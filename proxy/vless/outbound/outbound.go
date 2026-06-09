@@ -5,6 +5,7 @@ import (
 	"context"
 	gotls "crypto/tls"
 	"encoding/base64"
+	"math/rand"
 	"reflect"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/common/task"
+	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/common/xudp"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
@@ -159,18 +161,33 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	if h.testpre > 0 && h.reverse == nil {
 		h.initpre.Do(func() {
 			h.preConns = make(chan *ConnExpire)
-			for range h.testpre { // TODO: randomize
+			for range h.testpre {
 				go func() {
-					defer func() { recover() }()
+					var conn stat.Connection
+					defer func() {
+						if r := recover(); r != nil && conn != nil {
+							conn.Close()
+						}
+					}()
 					ctx := xctx.ContextWithID(context.Background(), session.NewID())
+					failCount := 0
 					for {
-						conn, err := dialer.Dial(ctx, rec.Destination)
+						var err error
+						conn, err = dialer.Dial(ctx, rec.Destination)
 						if err != nil {
+							failCount++
 							errors.LogWarningInner(ctx, err, "pre-connect failed")
+							// Exponential backoff: 200ms → 400ms → 800ms …, capped at 10s.
+							backoff := time.Duration(200<<min(failCount-1, 6)) * time.Millisecond
+							time.Sleep(backoff)
 							continue
 						}
-						h.preConns <- &ConnExpire{Conn: conn, Expire: time.Now().Add(time.Minute * 2)} // TODO: customize & randomize
-						time.Sleep(time.Millisecond * 200)                                             // TODO: customize & randomize
+						failCount = 0
+						ttl := time.Minute*2 - time.Minute/2 + time.Duration(rand.Int63n(int64(time.Minute)))
+						h.preConns <- &ConnExpire{Conn: conn, Expire: time.Now().Add(ttl)}
+						// ±50% jitter around 200ms → 100–300ms.
+						jitter := time.Duration(rand.Int63n(int64(time.Millisecond * 200)))
+						time.Sleep(time.Millisecond*100 + jitter)
 					}
 				}()
 			}
@@ -218,6 +235,16 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	command := protocol.RequestCommandTCP
 	if target.Network == net.Network_UDP {
 		command = protocol.RequestCommandUDP
+	}
+
+	// P0: If the target is an IPv6 address but the system has no IPv6
+	// route, replace it with the original domain name so the server can
+	// resolve using its own domainStrategy (e.g. UseIPv4).
+	if target.Address.Family().IsIPv6() {
+		_, hasV6 := utils.CheckRoutes()
+		if !hasV6 && ob.OriginalTarget.Address.Family().IsDomain() {
+			target.Address = ob.OriginalTarget.Address
+		}
 	}
 	if target.Address.Family().IsDomain() {
 		switch target.Address.Domain() {
@@ -312,7 +339,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	clientReader := link.Reader // .(*pipe.Reader)
 	clientWriter := link.Writer // .(*pipe.Writer)
 	trafficState := proxy.NewTrafficState(account.ID.Bytes())
-	if request.Command == protocol.RequestCommandUDP && (requestAddons.Flow == vless.XRV || (h.cone && request.Port != 53 && request.Port != 443)) {
+	if request.Command == protocol.RequestCommandUDP && (requestAddons.Flow == vless.XRV || (h.cone && request.Port != 53 && request.Port != 443 && !isMoonlightPort(request.Port))) {
 		request.Command = protocol.RequestCommandMux
 		request.Address = net.DomainAddress("v1.mux.cool")
 		request.Port = net.Port(666)
@@ -386,7 +413,6 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			return errors.New("failed to decode response header").Base(err).AtInfo()
 		}
 
-		// default: serverReader := buf.NewReader(conn)
 		serverReader := encoding.DecodeBodyAddons(conn, request, responseAddons)
 		if requestAddons.Flow == vless.XRV {
 			serverReader = proxy.NewVisionReader(serverReader, trafficState, false, ctx, conn, input, rawInput, ob)
@@ -422,6 +448,13 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	}
 
 	return nil
+}
+
+// Moonlight streaming uses port range 47984-48010 (TCP/UDP).
+// Sending these through XUDP causes packet reordering that breaks RTSP
+// handshake. Direct connect bypasses XUDP, matching VMess behavior.
+func isMoonlightPort(p net.Port) bool {
+	return p >= 47984 && p <= 48010
 }
 
 type Reverse struct {

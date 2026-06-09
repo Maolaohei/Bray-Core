@@ -283,13 +283,13 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 		return errors.New("unable to set read deadline").Base(err).AtWarning()
 	}
 
-	first := buf.FromBytes(make([]byte, buf.Size))
-	first.Clear()
+	remoteAddr := connection.RemoteAddr()
+
+	first := buf.New()
 	firstLen, errR := first.ReadFrom(connection)
 	if errR != nil {
 		return errR
 	}
-	errors.LogInfo(ctx, "firstLen = ", firstLen)
 
 	reader := &buf.BufferedReader{
 		Reader: buf.NewReader(connection),
@@ -307,7 +307,7 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	if isfb && firstLen < 18 {
 		err = errors.New("fallback directly")
 	} else {
-		userSentID, request, requestAddons, isfb, err = encoding.DecodeRequestHeader(isfb, first, reader, h.validator)
+		userSentID, request, requestAddons, isfb, err = encoding.DecodeRequestHeader(ctx, isfb, first, reader, h.validator)
 	}
 
 	if err != nil {
@@ -514,12 +514,12 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 
 		if errors.Cause(err) != io.EOF {
 			log.Record(&log.AccessMessage{
-				From:   connection.RemoteAddr(),
+				From:   remoteAddr,
 				To:     "",
 				Status: log.AccessRejected,
 				Reason: err,
 			})
-			err = errors.New("invalid request from ", connection.RemoteAddr()).Base(err).AtInfo()
+			err = errors.New("invalid request from ", remoteAddr).Base(err).AtInfo()
 		}
 		return err
 	}
@@ -543,9 +543,7 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 		return errors.New("for safety reasons, user " + account.ID.String() + " is not allowed to use forward proxy")
 	}
 
-	responseAddons := &encoding.Addons{
-		// Flow: requestAddons.Flow,
-	}
+	responseAddons := &encoding.Addons{}
 
 	var input *bytes.Reader
 	var rawInput *bytes.Buffer
@@ -599,7 +597,7 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 
 	if request.Command != protocol.RequestCommandMux {
 		ctx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
-			From:   connection.RemoteAddr(),
+			From:   remoteAddr,
 			To:     request.Destination(),
 			Status: log.AccessAccepted,
 			Reason: "",

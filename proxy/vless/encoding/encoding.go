@@ -2,8 +2,6 @@ package encoding
 
 import (
 	"context"
-	"io"
-
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
@@ -13,6 +11,7 @@ import (
 	"github.com/xtls/xray-core/common/uuid"
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/vless"
+	"io"
 )
 
 const (
@@ -34,11 +33,9 @@ func EncodeRequestHeader(writer io.Writer, request *protocol.RequestHeader, requ
 	if err := buffer.WriteByte(request.Version); err != nil {
 		return errors.New("failed to write request version").Base(err)
 	}
-
 	if _, err := buffer.Write(request.User.Account.(*vless.MemoryAccount).ID.Bytes()); err != nil {
 		return errors.New("failed to write request user id").Base(err)
 	}
-
 	if err := EncodeHeaderAddons(&buffer, requestAddons); err != nil {
 		return errors.New("failed to encode request header addons").Base(err)
 	}
@@ -61,74 +58,74 @@ func EncodeRequestHeader(writer io.Writer, request *protocol.RequestHeader, requ
 }
 
 // DecodeRequestHeader decodes and returns (if successful) a RequestHeader from an input stream.
-func DecodeRequestHeader(isfb bool, first *buf.Buffer, reader io.Reader, validator vless.Validator) ([]byte, *protocol.RequestHeader, *Addons, bool, error) {
+func DecodeRequestHeader(ctx context.Context, isfb bool, first *buf.Buffer, reader io.Reader, validator vless.Validator) ([]byte, *protocol.RequestHeader, *Addons, bool, error) {
 	buffer := buf.StackNew()
 	defer buffer.Release()
 
 	request := new(protocol.RequestHeader)
 
+	var id [16]byte
+
 	if isfb {
 		request.Version = first.Byte(0)
-	} else {
-		if _, err := buffer.ReadFullFrom(reader, 1); err != nil {
-			return nil, nil, nil, false, errors.New("failed to read request version").Base(err)
+		if request.Version != 0 {
+			return nil, nil, nil, isfb, errors.New("invalid request version")
 		}
-		request.Version = buffer.Byte(0)
-	}
-
-	switch request.Version {
-	case 0:
-
-		var id [16]byte
-
-		if isfb {
-			copy(id[:], first.BytesRange(1, 17))
-		} else {
-			buffer.Clear()
-			if _, err := buffer.ReadFullFrom(reader, 16); err != nil {
-				return nil, nil, nil, false, errors.New("failed to read request user id").Base(err)
-			}
-			copy(id[:], buffer.Bytes())
-		}
-
+		copy(id[:], first.BytesRange(1, 17))
 		if request.User = validator.Get(id); request.User == nil {
 			u := uuid.UUID(id)
 			return nil, nil, nil, isfb, errors.New("invalid request user id: " + u.String())
 		}
-
-		if isfb {
-			first.Advance(17)
-		}
-
-		requestAddons, err := DecodeHeaderAddons(&buffer, reader)
-		if err != nil {
-			return nil, nil, nil, false, errors.New("failed to decode request header addons").Base(err)
-		}
-
-		buffer.Clear()
+		first.Advance(17)
+	} else {
+		// Read version byte first. If invalid, fail fast without reading
+		// the full 17-byte header — avoids blocking for 4s on short/abusive
+		// connections that send a version byte other than 0.
 		if _, err := buffer.ReadFullFrom(reader, 1); err != nil {
-			return nil, nil, nil, false, errors.New("failed to read request command").Base(err)
+			return nil, nil, nil, false, errors.New("failed to read request version").Base(err)
 		}
-
-		request.Command = protocol.RequestCommand(buffer.Byte(0))
-		switch request.Command {
-		case protocol.RequestCommandMux:
-			request.Address = net.DomainAddress("v1.mux.cool")
-		case protocol.RequestCommandRvs:
-			request.Address = net.DomainAddress("v1.rvs.cool")
-		case protocol.RequestCommandTCP, protocol.RequestCommandUDP:
-			if addr, port, err := addrParser.ReadAddressPort(&buffer, reader); err == nil {
-				request.Address = addr
-				request.Port = port
-			}
+		request.Version = buffer.Byte(0)
+		if request.Version != 0 {
+			return nil, nil, nil, false, errors.New("invalid request version")
 		}
-		if request.Address == nil {
-			return nil, nil, nil, false, errors.New("invalid request address")
+		// Read remaining 16 bytes (UUID) now that version is confirmed.
+		buffer.Clear()
+		if _, err := buffer.ReadFullFrom(reader, 16); err != nil {
+			return nil, nil, nil, false, errors.New("failed to read request user id").Base(err)
 		}
-		return id[:], request, requestAddons, false, nil
-	default:
-		return nil, nil, nil, isfb, errors.New("invalid request version")
+		copy(id[:], buffer.Bytes())
+		if request.User = validator.Get(id); request.User == nil {
+			u := uuid.UUID(id)
+			return nil, nil, nil, false, errors.New("invalid request user id: " + u.String())
+		}
 	}
+
+	requestAddons, err := DecodeHeaderAddons(&buffer, reader)
+	if err != nil {
+		return nil, nil, nil, false, errors.New("failed to decode request header addons").Base(err)
+	}
+
+	buffer.Clear()
+	if _, err := buffer.ReadFullFrom(reader, 1); err != nil {
+		return nil, nil, nil, false, errors.New("failed to read request command").Base(err)
+	}
+
+	request.Command = protocol.RequestCommand(buffer.Byte(0))
+	switch request.Command {
+	case protocol.RequestCommandMux:
+		request.Address = net.DomainAddress("v1.mux.cool")
+	case protocol.RequestCommandRvs:
+		request.Address = net.DomainAddress("v1.rvs.cool")
+	case protocol.RequestCommandTCP, protocol.RequestCommandUDP:
+		if addr, port, err := addrParser.ReadAddressPort(&buffer, reader); err == nil {
+			request.Address = addr
+			request.Port = port
+		}
+	}
+	if request.Address == nil {
+		return nil, nil, nil, false, errors.New("invalid request address")
+	}
+	return id[:], request, requestAddons, false, nil
 }
 
 // EncodeResponseHeader writes encoded response header into the given writer.

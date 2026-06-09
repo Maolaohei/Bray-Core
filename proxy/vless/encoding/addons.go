@@ -28,8 +28,22 @@ func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
 			return errors.New("failed to write addons protobuf value").Base(err)
 		}
 	default:
-		if err := buffer.WriteByte(0); err != nil {
-			return errors.New("failed to write addons protobuf length").Base(err)
+		// Serialize non-empty addons for non-XRV flows.
+		if addons.Flow != "" {
+			bytes, err := proto.Marshal(addons)
+			if err != nil {
+				return errors.New("failed to marshal addons protobuf value").Base(err)
+			}
+			if err := buffer.WriteByte(byte(len(bytes))); err != nil {
+				return errors.New("failed to write addons protobuf length").Base(err)
+			}
+			if _, err := buffer.Write(bytes); err != nil {
+				return errors.New("failed to write addons protobuf value").Base(err)
+			}
+		} else {
+			if err := buffer.WriteByte(0); err != nil {
+				return errors.New("failed to write addons protobuf length").Base(err)
+			}
 		}
 	}
 
