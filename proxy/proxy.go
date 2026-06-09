@@ -8,9 +8,8 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"io"
-	"math/big"
+	"math/rand/v2"
 	"runtime"
 	"strconv"
 	"time"
@@ -185,6 +184,9 @@ type VisionReader struct {
 
 	// internal
 	directReadCounter stats.Counter
+	// visionBuf is a reusable MultiBuffer backing array for the unpadding
+	// phase, avoiding per-packet make() allocations before splice kicks in.
+	visionBuf buf.MultiBuffer
 }
 
 func NewVisionReader(reader buf.Reader, trafficState *TrafficState, isUplink bool, ctx context.Context, conn net.Conn, input *bytes.Reader, rawInput *bytes.Buffer, ob *session.Outbound) *VisionReader {
@@ -233,7 +235,13 @@ func (w *VisionReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 	}
 
 	if *withinPaddingBuffers || w.trafficState.NumberOfPacketToFilter > 0 {
-		mb2 := make(buf.MultiBuffer, 0, len(buffer))
+		// Reuse the multi-buffer backing array to avoid per-packet allocation.
+		// During the initial 1-2 unpadding packets this is called repeatedly
+		// before switchToDirectCopy kicks in.
+		mb2 := w.visionBuf[:0]
+		if cap(mb2) < len(buffer) {
+			mb2 = make(buf.MultiBuffer, 0, len(buffer))
+		}
 		for _, b := range buffer {
 			newbuffer := XtlsUnpadding(b, w.trafficState, w.isUplink, w.ctx)
 			if newbuffer.Len() > 0 {
@@ -320,6 +328,14 @@ func NewVisionWriter(writer buf.Writer, trafficState *TrafficState, isUplink boo
 }
 
 func (w *VisionWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	// P0: Compact MultiBuffer before any TLS record analysis.
+	// Without compaction, a TLS Application Data record may be split across
+	// multiple Buffer entries, causing IsCompleteRecord() to misdetect the
+	// boundary and trigger splice at an incorrect offset. This is the root
+	// cause of intermittent ERR_SSL_PROTOCOL_ERROR with Vision+REALITY
+	// (upstream issue #4878).
+	mb = buf.Compact(mb)
+
 	var isPadding *bool
 	var switchToDirectCopy *bool
 	var spliceReadyInbound *session.Inbound
@@ -404,57 +420,47 @@ func (w *VisionWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 }
 
 // IsCompleteRecord Is complete tls data record
+// IsCompleteRecord checks whether the MultiBuffer contains complete TLS records
+// (no partial record at the end). P0-2: walks chunks directly without allocating
+// a contiguous byte slice, eliminating per-packet heap pressure.
 func IsCompleteRecord(buffer buf.MultiBuffer) bool {
-	b := make([]byte, buffer.Len())
-	if buffer.Copy(b) != int(buffer.Len()) {
-		panic("impossible bytes allocation")
-	}
-	var headerLen int = 5
-	var recordLen int
+	headerRemaining := 5
+	dataRemaining := 0
+	var header [5]byte
+	hi := 0
 
-	totalLen := len(b)
-	i := 0
-	for i < totalLen {
-		// record header: 0x17 0x3 0x3 + 2 bytes length
-		if headerLen > 0 {
-			data := b[i]
-			i++
-			switch headerLen {
-			case 5:
-				if data != 0x17 {
-					return false
+	for _, b := range buffer {
+		bytes := b.Bytes()
+		for i := 0; i < len(bytes); {
+			if dataRemaining > 0 {
+				skip := dataRemaining
+				if len(bytes)-i < skip {
+					skip = len(bytes) - i
 				}
-			case 4:
-				if data != 0x03 {
-					return false
-				}
-			case 3:
-				if data != 0x03 {
-					return false
-				}
-			case 2:
-				recordLen = int(data) << 8
-			case 1:
-				recordLen = recordLen | int(data)
+				dataRemaining -= skip
+				i += skip
+				continue
 			}
-			headerLen--
-		} else if recordLen > 0 {
-			remaining := totalLen - i
-			if remaining < recordLen {
-				return false
+			need := headerRemaining - hi
+			avail := len(bytes) - i
+			if avail >= need {
+				copy(header[hi:], bytes[i:i+need])
+				hi = 0
+				if header[0] != 0x17 || header[1] != 0x03 || header[2] != 0x03 {
+					return false
+				}
+				dataRemaining = int(header[3])<<8 | int(header[4])
+				headerRemaining = 5
+				i += need
 			} else {
-				i += recordLen
-				recordLen = 0
-				headerLen = 5
+				copy(header[hi:], bytes[i:])
+				hi += avail
+				headerRemaining -= avail
+				i += avail
 			}
-		} else {
-			return false
 		}
 	}
-	if headerLen == 5 && recordLen == 0 {
-		return true
-	}
-	return false
+	return headerRemaining == 5 && dataRemaining == 0
 }
 
 // ReshapeMultiBuffer prepare multi buffer for padding structure (max 21 bytes)
@@ -472,7 +478,15 @@ func ReshapeMultiBuffer(ctx context.Context, buffer buf.MultiBuffer) buf.MultiBu
 	toPrint := ""
 	for i, buffer1 := range buffer {
 		if buffer1.Len() >= buf.Size-21 {
-			index := int32(bytes.LastIndex(buffer1.Bytes(), TlsApplicationDataStart))
+			// P2-1: Fast path — TLS ApplicationData records normally start at
+			// buffer boundary. Check first 3 bytes before O(n) LastIndex scan.
+			b1Bytes := buffer1.Bytes()
+			index := int32(-1)
+			if len(b1Bytes) >= 3 && bytes.Equal(b1Bytes[:3], TlsApplicationDataStart) {
+				index = 0
+			} else {
+				index = int32(bytes.LastIndex(b1Bytes, TlsApplicationDataStart))
+			}
 			if index < 21 || index > buf.Size-21 {
 				index = buf.Size / 2
 			}
@@ -499,18 +513,21 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
 	if b != nil {
 		contentLen = b.Len()
 	}
+	// P1: Use math/rand/v2 pseudo-random instead of crypto/rand syscall.
+	// Padding length does not need cryptographic strength — ChaCha8 is sufficient
+	// and avoids a per-packet getrandom() / BCryptGenRandom syscall.
+	// Int64N panics on n<=0; the original crypto/rand+bignum path returns 0 for n<=1
+	// (range [0,0) → 0). Guard with the same threshold to preserve semantics.
 	if contentLen < int32(testseed[0]) && longPadding {
-		l, err := rand.Int(rand.Reader, big.NewInt(int64(testseed[1])))
-		if err != nil {
-			errors.LogDebugInner(ctx, err, "failed to generate padding")
+		if testseed[1] > 1 {
+			paddingLen = int32(rand.Int64N(int64(testseed[1]))) + int32(testseed[2]) - contentLen
+		} else {
+			paddingLen = int32(testseed[2]) - contentLen
 		}
-		paddingLen = int32(l.Int64()) + int32(testseed[2]) - contentLen
 	} else {
-		l, err := rand.Int(rand.Reader, big.NewInt(int64(testseed[3])))
-		if err != nil {
-			errors.LogDebugInner(ctx, err, "failed to generate padding")
+		if testseed[3] > 1 {
+			paddingLen = int32(rand.Int64N(int64(testseed[3])))
 		}
-		paddingLen = int32(l.Int64())
 	}
 	if paddingLen > buf.Size-21-contentLen {
 		paddingLen = buf.Size - 21 - contentLen

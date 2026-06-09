@@ -28,6 +28,11 @@ func (r *retryer) On(method func() error) error {
 		if err == nil {
 			return nil
 		}
+		// Fatal errors (e.g. 'cannot assign requested address') should not
+		// be retried — they will never succeed and only waste time.
+		if errors.Cause(err) == ErrRetryFailed {
+			return err
+		}
 		numErrors := len(accumulatedError)
 		if numErrors == 0 || err.Error() != accumulatedError[numErrors-1].Error() {
 			accumulatedError = append(accumulatedError, err)

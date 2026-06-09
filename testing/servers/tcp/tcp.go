@@ -41,12 +41,12 @@ func (server *Server) StartContext(ctx context.Context, sockopt *internet.Socket
 	localAddr := listener.Addr().(*net.TCPAddr)
 	server.Port = net.Port(localAddr.Port)
 	server.listener = listener
-	go server.acceptConnections(listener.(*net.TCPListener))
+	go server.acceptConnections(listener)
 
 	return net.TCPDestination(net.IPAddress(localAddr.IP), net.Port(localAddr.Port)), nil
 }
 
-func (server *Server) acceptConnections(listener *net.TCPListener) {
+func (server *Server) acceptConnections(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {

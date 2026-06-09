@@ -168,9 +168,15 @@ func (f *DialingWorkerFactory) Create() (*ClientWorker, error) {
 	return c, nil
 }
 
+// ClientStrategy controls the behavior of mux client workers.
 type ClientStrategy struct {
 	MaxConcurrency uint32
-	MaxConnection  uint32
+	MaxReuseTimes  uint32
+	// KeepAlivePeriod is the interval in seconds between keepalive frames
+	// sent when the mux connection is idle. Set to 0 (default) to disable
+	// keepalive and use the legacy idle-close behavior.
+	// Recommended for mobile: 25 seconds (below typical 30s NAT timeout).
+	KeepAlivePeriod int32
 }
 
 type ClientWorker struct {
@@ -179,6 +185,7 @@ type ClientWorker struct {
 	done           *done.Instance
 	timer          *time.Ticker
 	strategy       ClientStrategy
+	timeCretaed    time.Time
 }
 
 var (
@@ -188,12 +195,19 @@ var (
 
 // NewClientWorker creates a new mux.Client.
 func NewClientWorker(stream transport.Link, s ClientStrategy) (*ClientWorker, error) {
+	interval := time.Second * 16
+	// When keepalive is enabled, align the ticker with the keepalive period
+	// so we can react before NAT timeouts expire.
+	if s.KeepAlivePeriod > 0 && time.Duration(s.KeepAlivePeriod)*time.Second < interval {
+		interval = time.Duration(s.KeepAlivePeriod) * time.Second
+	}
 	c := &ClientWorker{
 		sessionManager: NewSessionManager(),
 		link:           stream,
 		done:           done.New(),
-		timer:          time.NewTicker(time.Second * 16),
+		timer:          time.NewTicker(interval),
 		strategy:       s,
+		timeCretaed:    time.Now(),
 	}
 
 	go c.fetchOutput()
@@ -226,21 +240,62 @@ func (m *ClientWorker) Close() error {
 func (m *ClientWorker) monitor() {
 	defer m.timer.Stop()
 
+	// idleStrikes tracks consecutive idle checks. Used with KeepAlivePeriod
+	// to defer closing the worker until the connection has been truly idle
+	// for multiple intervals, giving keepalive a chance to detect dead peers.
+	idleStrikes := 0
+
 	for {
 		checkSize := m.sessionManager.Size()
 		checkCount := m.sessionManager.Count()
 		select {
 		case <-m.done.Wait():
 			m.sessionManager.Close()
+			common.Interrupt(m.link.Reader) // interrupt fetchOutput
 			common.Interrupt(m.link.Writer)
-			common.Interrupt(m.link.Reader)
 			return
 		case <-m.timer.C:
-			if m.sessionManager.CloseIfNoSessionAndIdle(checkSize, checkCount) {
-				common.Must(m.done.Close())
+			stillIdle := checkSize == 0 && int(m.sessionManager.Count()) == checkCount
+
+			if m.strategy.KeepAlivePeriod > 0 {
+				if stillIdle {
+					idleStrikes++
+					if err := sendKeepAliveFrame(m.link.Writer); err != nil {
+						errors.LogInfoInner(context.Background(), err, "mux keepalive write failed, closing worker")
+						m.sessionManager.Close()
+						common.Must(m.done.Close())
+						return
+					}
+				} else {
+					idleStrikes = 0
+				}
+				// Only close after 3 consecutive idle intervals with keepalive
+				if idleStrikes >= 3 && m.sessionManager.CloseIfNoSessionAndIdle(checkSize, checkCount) {
+					common.Must(m.done.Close())
+				}
+			} else if stillIdle {
+				if m.sessionManager.CloseIfNoSessionAndIdle(checkSize, checkCount) {
+					common.Must(m.done.Close())
+				}
 			}
 		}
 	}
+}
+
+// sendKeepAliveFrame writes a SessionStatusKeepAlive frame to the writer
+// to prevent NAT timeouts on idle connections. The frame uses session ID 0
+// as it is not associated with any specific session.
+func sendKeepAliveFrame(writer buf.Writer) error {
+	meta := FrameMetadata{
+		SessionID:     0,
+		SessionStatus: SessionStatusKeepAlive,
+	}
+	frame := buf.New()
+	if err := meta.WriteTo(frame); err != nil {
+		frame.Release()
+		return err
+	}
+	return writer.WriteMultiBuffer(buf.MultiBuffer{frame})
 }
 
 func writeFirstPayload(reader buf.Reader, writer *Writer) error {
@@ -288,7 +343,7 @@ func fetchInput(ctx context.Context, s *Session, output buf.Writer) {
 
 func (m *ClientWorker) IsClosing() bool {
 	sm := m.sessionManager
-	if m.strategy.MaxConnection > 0 && sm.Count() >= int(m.strategy.MaxConnection) {
+	if m.strategy.MaxReuseTimes > 0 && sm.Count() >= int(m.strategy.MaxReuseTimes) {
 		return true
 	}
 	return false
