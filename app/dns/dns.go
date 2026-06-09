@@ -5,6 +5,7 @@ import (
 	"context"
 	go_errors "errors"
 	"fmt"
+	go_net "net"
 	"sort"
 	"strings"
 	"sync"
@@ -287,11 +288,38 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 	}
 
 	// Name servers lookup
+	var ips []net.IP
+	var ttl uint32
+	var err error
 	if s.enableParallelQuery {
-		return s.parallelQuery(domain, option)
+		ips, ttl, err = s.parallelQuery(domain, option)
 	} else {
-		return s.serialQuery(domain, option)
+		ips, ttl, err = s.serialQuery(domain, option)
 	}
+
+	// Fallback to system DNS when all configured servers return empty.
+	// This helps when CDN domains (googlevideo.com, ytimg.com, etc.) are
+	// blocked or throttled by DoH servers but still resolvable via the
+	// system resolver.
+	if (len(ips) == 0 || go_errors.Is(err, dns.ErrEmptyResponse)) &&
+		!s.checkSystem { // avoid recursion (checkSystem already uses system DNS)
+		errors.LogInfo(s.ctx, "all DNS servers returned empty for ", domain, ", falling back to system resolver")
+		sysIps, sysErr := go_net.DefaultResolver.LookupIPAddr(s.ctx, domain)
+		if sysErr == nil && len(sysIps) > 0 {
+			for _, addr := range sysIps {
+				isV4 := addr.IP.To4() != nil
+				if (isV4 && option.IPv4Enable) || (!isV4 && option.IPv6Enable) {
+					ips = append(ips, addr.IP)
+				}
+			}
+			if len(ips) > 0 {
+				ttl = 60 // conservative TTL for system fallback
+				err = nil
+			}
+		}
+	}
+
+	return ips, ttl, err
 }
 
 func (s *DNS) sortClients(domain string) []*Client {

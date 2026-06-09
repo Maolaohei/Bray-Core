@@ -3,6 +3,7 @@ package internet
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/xtls/xray-core/common"
@@ -104,6 +105,14 @@ func LookupForIP(domain string, strategy DomainStrategy, localAddr net.Address) 
 
 	if err == nil && len(ips) == 0 {
 		return nil, dns.ErrEmptyResponse
+	}
+	// Sort resolved IPs: IPv4 first, then IPv6.  When both stacks are
+	// available Go's Happy Eyeballs dialer tries IPv6 first, which breaks
+	// on IPv4-only servers or when IPv6 routes are unreliable.
+	if len(ips) > 1 {
+		sort.SliceStable(ips, func(i, j int) bool {
+			return ips[i].To4() != nil && ips[j].To4() == nil
+		})
 	}
 	return ips, err
 }
