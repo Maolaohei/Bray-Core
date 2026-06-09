@@ -146,9 +146,21 @@ func GeneraticUClient(c net.Conn, config *tls.Config) *utls.UConn {
 	return utls.UClient(c, copyConfig(config), utls.HelloChrome_Auto)
 }
 
+func convertCurvePreferences(curves []tls.CurveID) []utls.CurveID {
+	if curves == nil {
+		return nil
+	}
+	out := make([]utls.CurveID, len(curves))
+	for i, v := range curves {
+		out[i] = utls.CurveID(v)
+	}
+	return out
+}
+
 func copyConfig(c *tls.Config) *utls.Config {
 	config := &utls.Config{
 		Rand:                           c.Rand,
+		Time:                           c.Time,
 		RootCAs:                        c.RootCAs,
 		ServerName:                     c.ServerName,
 		InsecureSkipVerify:             c.InsecureSkipVerify,
@@ -156,21 +168,14 @@ func copyConfig(c *tls.Config) *utls.Config {
 		KeyLogWriter:                   c.KeyLogWriter,
 		EncryptedClientHelloConfigList: c.EncryptedClientHelloConfigList,
 		NextProtos:                     c.NextProtos,
+		MinVersion:                     c.MinVersion,
+		MaxVersion:                     c.MaxVersion,
+		CurvePreferences:               convertCurvePreferences(c.CurvePreferences),
 	}
 	return config
 }
 
 func init() {
-	bigInt, _ := rand.Int(rand.Reader, big.NewInt(int64(len(ModernFingerprints))))
-	stopAt := int(bigInt.Int64())
-	i := 0
-	for _, v := range ModernFingerprints {
-		if i == stopAt {
-			PresetFingerprints["random"] = v
-			break
-		}
-		i++
-	}
 	weights := utls.DefaultWeights
 	weights.TLSVersMax_Set_VersionTLS13 = 1
 	weights.FirstKeyShare_Set_CurveP256 = 0
@@ -187,6 +192,14 @@ func init() {
 func GetFingerprint(name string) (fingerprint *utls.ClientHelloID) {
 	if name == "" {
 		return &utls.HelloChrome_Auto
+	}
+	if name == "random" {
+		keys := make([]string, 0, len(ModernFingerprints))
+		for k := range ModernFingerprints {
+			keys = append(keys, k)
+		}
+		bigInt, _ := rand.Int(rand.Reader, big.NewInt(int64(len(keys))))
+		return ModernFingerprints[keys[bigInt.Int64()]]
 	}
 	if fingerprint = PresetFingerprints[name]; fingerprint != nil {
 		return

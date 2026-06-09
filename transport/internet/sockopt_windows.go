@@ -79,6 +79,9 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 				return errors.New("failed to unset SO_KEEPALIVE", err)
 			}
 		}
+
+		// 优化说明：Windows 内核不支持对特定套接字动态修改拥塞控制算法。
+		// 此处对 config.TcpCongestion 不做处理（直接忽略），防止跨平台配置导致 Windows 端运行报错。
 	}
 
 	if len(config.CustomSockopt) > 0 {
@@ -88,9 +91,6 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 				continue
 			}
 			// Skip unwanted network type
-			// network might be tcp4 or tcp6
-			// use HasPrefix so that "tcp" can match tcp4/6 with "tcp" if user want to control all tcp (udp is also the same)
-			// if it is empty, strings.HasPrefix will always return true to make it apply for all networks
 			if !strings.HasPrefix(network, custom.Network) {
 				continue
 			}
@@ -134,6 +134,8 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 				return errors.New("failed to unset SO_KEEPALIVE", err)
 			}
 		}
+
+		// 同理，入站流量的 TcpCongestion 在 Windows 下直接忽略。
 	}
 
 	if config.V6Only {
@@ -148,10 +150,6 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 				errors.LogDebug(context.Background(), "CustomSockopt system not match: ", "want ", custom.System, " got ", runtime.GOOS)
 				continue
 			}
-			// Skip unwanted network type
-			// network might be tcp4 or tcp6
-			// use HasPrefix so that "tcp" can match tcp4/6 with "tcp" if user want to control all tcp (udp is also the same)
-			// if it is empty, strings.HasPrefix will always return true to make it apply for all networks
 			if !strings.HasPrefix(network, custom.Network) {
 				continue
 			}

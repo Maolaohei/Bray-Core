@@ -157,6 +157,8 @@ message SocketConfig {
   HappyEyeballsConfig happy_eyeballs = 22;
 
   repeated string trusted_x_forwarded_for = 23;
+
+  int32 tcp_notsent_lowat = 24;
 }
 
 message HappyEyeballsConfig {

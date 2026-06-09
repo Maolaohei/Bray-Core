@@ -64,6 +64,35 @@ func (l *UnixListenerWrapper) Close() error {
 	return l.UnixListener.Close()
 }
 
+// tcpNoDelayListener wraps a net.Listener to disable Nagle's algorithm
+// (TCP_NODELAY) on every accepted TCP connection. Go's net.Dialer already
+// does this for outbound connections, but net.Listener.Accept does not.
+// Mobile clients especially benefit from this on local SOCKS/HTTP proxy
+// listeners, where Nagle can add 100-200ms to small request/response packets.
+type tcpNoDelayListener struct {
+	net.Listener
+}
+
+func (l *tcpNoDelayListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		// Also disable delayed ACK on Linux for faster TLS
+		// handshake completion with clients.
+		if rawConn, err := tcpConn.SyscallConn(); err == nil {
+			rawConn.Control(func(fd uintptr) {
+				setQuickAck(fd)
+			})
+		}
+	}
+	return conn, nil
+}
+
 type UnixConnWrapper struct {
 	*net.UnixConn
 }
@@ -166,9 +195,16 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 	}
 
 	l, err = callback(lc.Listen(ctx, network, address))
-	if err == nil && sockopt != nil && sockopt.AcceptProxyProtocol {
-		policyFunc := func(upstream net.Addr) (proxyproto.Policy, error) { return proxyproto.REQUIRE, nil }
-		l = &proxyproto.Listener{Listener: l, Policy: policyFunc}
+	if err == nil {
+		// Disable Nagle on accepted TCP connections — outbound already has
+		// this via Go's net.Dialer, but inbound listeners do not.
+		if _, isTCP := addr.(*net.TCPAddr); isTCP {
+			l = &tcpNoDelayListener{Listener: l}
+		}
+		if sockopt != nil && sockopt.AcceptProxyProtocol {
+			policyFunc := func(upstream net.Addr) (proxyproto.Policy, error) { return proxyproto.REQUIRE, nil }
+			l = &proxyproto.Listener{Listener: l, Policy: policyFunc}
+		}
 	}
 	return l, err
 }

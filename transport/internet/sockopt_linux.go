@@ -2,6 +2,7 @@ package internet
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -10,6 +11,83 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"golang.org/x/sys/unix"
 )
+
+// autoNotsentLowat is initialized on startup based on system memory.
+// It provides a safe default for TCP_NOTSENT_LOWAT when the user hasn't
+// configured an explicit value. Zero means "detection failed; skip."
+var autoNotsentLowat int32
+
+// sysDefaultCongestion stores the dynamically detected system default congestion control.
+// Fallback path: Current sysctl -> BBR -> CUBIC.
+var sysDefaultCongestion string = "bbr"
+
+func init() {
+	// Enable TCP_QUICKACK on accepted connections.
+	// Disables delayed ACK for faster TLS handshake completion.
+	setQuickAck = func(fd uintptr) {
+		syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
+	}
+
+	// -----------------------------------------------------------------
+	// 动态检测拥塞控制算法优先级：当前 sysctl 默认值 > BBR > CUBIC
+	// -----------------------------------------------------------------
+	if data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control"); err == nil {
+		sysCongest := strings.TrimSpace(string(data))
+		if sysCongest != "" {
+			sysDefaultCongestion = sysCongest
+		}
+	} else {
+		// 若因特殊权限/沙盒无法读取当前默认值，则检测系统中注册的所有可用算法列表
+		if availData, err := os.ReadFile("/proc/sys/net/ipv4/tcp_available_congestion_control"); err == nil {
+			availStr := string(availData)
+			availAlgorithms := strings.Fields(availStr) // 按空格切分成切片
+
+			hasBBR := false
+			hasCubic := false
+			for _, algo := range availAlgorithms {
+				if algo == "bbr" {
+					hasBBR = true
+				}
+				if algo == "cubic" {
+					hasCubic = true
+				}
+			}
+
+			if hasBBR {
+				sysDefaultCongestion = "bbr"
+			} else if hasCubic {
+				sysDefaultCongestion = "cubic"
+			} else {
+				sysDefaultCongestion = "cubic" // 最终兜底
+			}
+		}
+	}
+	// -----------------------------------------------------------------
+
+	var info unix.Sysinfo_t
+	if err := unix.Sysinfo(&info); err != nil {
+		return
+	}
+	totalMB := uint64(info.Totalram) * uint64(info.Unit) / (1024 * 1024)
+	switch {
+	case totalMB < 512:
+		autoNotsentLowat = 8192 // 8 KB  — tiny VPS, be conservative
+	case totalMB < 2048:
+		autoNotsentLowat = 16384 // 16 KB — typical 100 Mbps / 1–2 GB
+	default:
+		autoNotsentLowat = 32768 // 32 KB — high-bandwidth
+	}
+}
+
+// resolveNotsentLowat returns the effective TCP_NOTSENT_LOWAT value and
+// whether the caller explicitly set it. When the user supplied a value
+// (> 0) we honour it; otherwise the auto-detected default is used.
+func resolveNotsentLowat(userValue int32) (value int32, userExplicit bool) {
+	if userValue > 0 {
+		return userValue, true
+	}
+	return autoNotsentLowat, false
+}
 
 // applyOutboundSocketOptions applies socket options for outbound connection.
 // note that unlike other part of Xray, this function needs network with speified network stack(tcp4/tcp6/udp4/udp6)
@@ -37,10 +115,12 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 			}
 		}
 
-		if config.TcpCongestion != "" {
-			if err := syscall.SetsockoptString(int(fd), syscall.SOL_TCP, syscall.TCP_CONGESTION, config.TcpCongestion); err != nil {
-				return errors.New("failed to set TCP_CONGESTION", err)
-			}
+		// 优化：不再写死 "bbr"，无配置时自动回退到探测出的系统最优算法
+		if config.TcpCongestion == "" {
+			config.TcpCongestion = sysDefaultCongestion
+		}
+		if err := syscall.SetsockoptString(int(fd), syscall.SOL_TCP, syscall.TCP_CONGESTION, config.TcpCongestion); err != nil {
+			return errors.New("failed to set TCP_CONGESTION", err)
 		}
 
 		if config.TcpWindowClamp > 0 {
@@ -58,6 +138,15 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 		if config.TcpMaxSeg > 0 {
 			if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, unix.TCP_MAXSEG, int(config.TcpMaxSeg)); err != nil {
 				return errors.New("failed to set TCP_MAXSEG", err)
+			}
+		}
+
+		if lowat, explicit := resolveNotsentLowat(config.TcpNotsentLowat); lowat > 0 {
+			if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT, int(lowat)); err != nil {
+				if explicit {
+					return errors.New("failed to set TCP_NOTSENT_LOWAT", err)
+				}
+				// auto-detected value on old kernel — silently skip
 			}
 		}
 
@@ -125,6 +214,14 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 				return errors.New("failed to set TCP_FASTOPEN", tfo).Base(err)
 			}
 		}
+		// TCP_DEFER_ACCEPT delays accept() until the first data byte
+		// arrives, saving one wakeup per connection. For TLS servers
+		// this means the ClientHello is already in the buffer when
+		// accept() returns. 3s is safe — any client that can't send
+		// the ClientHello in 3s is almost certainly not real traffic.
+		if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, unix.TCP_DEFER_ACCEPT, 3); err != nil {
+			// Non-fatal: old kernels may not support this.
+		}
 
 		if config.TcpKeepAliveInterval > 0 || config.TcpKeepAliveIdle > 0 {
 			if config.TcpKeepAliveInterval > 0 {
@@ -146,10 +243,12 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 			}
 		}
 
-		if config.TcpCongestion != "" {
-			if err := syscall.SetsockoptString(int(fd), syscall.SOL_TCP, syscall.TCP_CONGESTION, config.TcpCongestion); err != nil {
-				return errors.New("failed to set TCP_CONGESTION", err)
-			}
+		// 优化：不再写死 "bbr"，无配置时自动回退到探测出的系统最优算法
+		if config.TcpCongestion == "" {
+			config.TcpCongestion = sysDefaultCongestion
+		}
+		if err := syscall.SetsockoptString(int(fd), syscall.SOL_TCP, syscall.TCP_CONGESTION, config.TcpCongestion); err != nil {
+			return errors.New("failed to set TCP_CONGESTION", err)
 		}
 
 		if config.TcpWindowClamp > 0 {
@@ -167,6 +266,15 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 		if config.TcpMaxSeg > 0 {
 			if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, unix.TCP_MAXSEG, int(config.TcpMaxSeg)); err != nil {
 				return errors.New("failed to set TCP_MAXSEG", err)
+			}
+		}
+
+		if lowat, explicit := resolveNotsentLowat(config.TcpNotsentLowat); lowat > 0 {
+			if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT, int(lowat)); err != nil {
+				if explicit {
+					return errors.New("failed to set TCP_NOTSENT_LOWAT", err)
+				}
+				// auto-detected value on old kernel — silently skip
 			}
 		}
 		if len(config.CustomSockopt) > 0 {

@@ -21,7 +21,15 @@ import (
 	"github.com/xtls/xray-core/transport/internet"
 )
 
-var globalSessionCache = tls.NewLRUClientSessionCache(128)
+var globalSessionCache = tls.NewLRUClientSessionCache(1024)
+
+var getCipherSuiteIDs = sync.OnceValue(func() map[string]uint16 {
+	id := make(map[string]uint16)
+	for _, s := range tls.CipherSuites() {
+		id[s.Name] = s.ID
+	}
+	return id
+})
 
 // ParseCertificate converts a cert.Certificate to Certificate.
 func ParseCertificate(c *cert.Certificate) *Certificate {
@@ -253,8 +261,10 @@ func getNewGetCertificateFunc(certs []*tls.Certificate, rejectUnknownSNI bool) f
 			return certs[0], nil
 		}
 		gsni := "*"
-		if index := strings.IndexByte(sni, '.'); index != -1 {
-			gsni += sni[index:]
+		if !strings.HasPrefix(sni, ".") && !strings.HasSuffix(sni, ".") {
+			if index := strings.IndexByte(sni, '.'); index != -1 {
+				gsni += sni[index:]
+			}
 		}
 		for _, keyPair := range certs {
 			if keyPair.Leaf.Subject.CommonName == sni || keyPair.Leaf.Subject.CommonName == gsni {
@@ -325,7 +335,7 @@ func (r *RandCarrier) verifyPeerCert(rawCerts [][]byte, verifiedChains [][]*x509
 			}
 		}
 		if verifyResult == foundCA {
-			errors.New("peer cert is invalid (against pinned CA and verifyPeerCertByName)")
+			return errors.New("peer cert is invalid (against pinned CA and verifyPeerCertByName)")
 		}
 		return errors.New("peer cert is invalid (against root CAs and verifyPeerCertByName)")
 	}
@@ -381,12 +391,11 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		PinnedPeerCertSha256: c.PinnedPeerCertSha256,
 	}
 	config := &tls.Config{
-		Rand:                   randCarrier,
-		ClientSessionCache:     globalSessionCache,
-		RootCAs:                root,
-		NextProtos:             slices.Clone(c.NextProtocol),
-		SessionTicketsDisabled: !c.EnableSessionResumption,
-		VerifyPeerCertificate:  randCarrier.verifyPeerCert,
+		Rand:                  randCarrier,
+		ClientSessionCache:    globalSessionCache,
+		RootCAs:               root,
+		NextProtos:            slices.Clone(c.NextProtocol),
+		VerifyPeerCertificate: randCarrier.verifyPeerCert,
 	}
 	randCarrier.Config = config
 	if len(c.VerifyPeerCertByName) > 0 {
@@ -446,10 +455,7 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 	}
 
 	if len(c.CipherSuites) > 0 {
-		id := make(map[string]uint16)
-		for _, s := range tls.CipherSuites() {
-			id[s.Name] = s.ID
-		}
+		id := getCipherSuiteIDs()
 		for _, n := range strings.Split(c.CipherSuites, ":") {
 			if id[n] != 0 {
 				config.CipherSuites = append(config.CipherSuites, id[n])

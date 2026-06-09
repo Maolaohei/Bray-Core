@@ -283,7 +283,7 @@ func dnsQuery(server string, domain string, sockopt *internet.SocketConfig) ([]b
 			return nil, 0, err
 		}
 		conn.Write(msg)
-		udpResponse := make([]byte, 512)
+		udpResponse := make([]byte, 4096)
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, err = conn.Read(udpResponse)
 		if err != nil {
