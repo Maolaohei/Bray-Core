@@ -127,6 +127,10 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 				config.Concurrency = 8 // same as before
 			}
 			if config.Concurrency > 0 {
+				MaxReuseTimes := uint32(60000)
+				if config.MaxReuseTimes != 0 && config.MaxReuseTimes < 60000 {
+					MaxReuseTimes = uint32(config.MaxReuseTimes)
+				}
 				h.mux = &mux.ClientManager{
 					Enabled: true,
 					Picker: &mux.IncrementalWorkerPicker{
@@ -135,7 +139,7 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 							Dialer: h,
 							Strategy: mux.ClientStrategy{
 								MaxConcurrency: uint32(config.Concurrency),
-								MaxConnection:  128,
+								MaxReuseTimes:  MaxReuseTimes,
 							},
 						},
 					},
@@ -156,7 +160,7 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 							Dialer: h,
 							Strategy: mux.ClientStrategy{
 								MaxConcurrency: uint32(config.XudpConcurrency),
-								MaxConnection:  128,
+								MaxReuseTimes:  128,
 							},
 						},
 					},
@@ -232,6 +236,10 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 			test(h.xudp.Dispatch(ctx, link))
 			return
 		}
+		// XHTTP has its own multiplexing (XMUX), skip mux.cool
+		if h.streamSettings != nil && h.streamSettings.ProtocolName == "splithttp" {
+			goto out
+		}
 		if h.mux.Enabled {
 			test(h.mux.Dispatch(ctx, link))
 			return
@@ -264,6 +272,23 @@ out:
 
 func (h *Handler) DestIpAddress() net.IP {
 	return internet.DestIpAddress()
+}
+
+func (h *Handler) ResolveStrategy() internet.DomainStrategy {
+	if h.senderSettings != nil && h.senderSettings.TargetStrategy.HasStrategy() {
+		return h.senderSettings.TargetStrategy
+	}
+	if h.streamSettings != nil && h.streamSettings.SocketSettings != nil {
+		return h.streamSettings.SocketSettings.DomainStrategy
+	}
+	return internet.DomainStrategy_AS_IS
+}
+
+func (h *Handler) UsesProxySettings() bool {
+	if h.senderSettings != nil && h.senderSettings.ProxySettings.HasTag() {
+		return true
+	}
+	return h.streamSettings != nil && h.streamSettings.SocketSettings != nil && len(h.streamSettings.SocketSettings.DialerProxy) > 0
 }
 
 // Dial implements internet.Dialer.
