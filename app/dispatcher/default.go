@@ -308,16 +308,8 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 				if fkr0, ok := d.fdns.(dns.FakeDNSEngineRev0); ok && fkr0.IsIPInIPPool(ob.Target.Address) {
 					isFakeIP = true
 				}
-				// When a domain is recovered via sniffing, always send it to the
-				// remote server instead of the original IP (which may be IPv6 on
-				// an IPv4-only server). The only exception is FakeDNS: the fake
-				// IP must reach the server so its FakeDNS can map it back.
-				if isFakeIP || protocol == "fakedns" || protocol == "fakedns+others" {
-					if sniffingRequest.RouteOnly {
-						ob.RouteTarget = destination
-					} else {
-						ob.Target = destination
-					}
+				if sniffingRequest.RouteOnly && protocol != "fakedns" && protocol != "fakedns+others" && !isFakeIP {
+					ob.RouteTarget = destination
 				} else {
 					ob.Target = destination
 				}
@@ -371,19 +363,9 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			if fkr0, ok := d.fdns.(dns.FakeDNSEngineRev0); ok && fkr0.IsIPInIPPool(ob.Target.Address) {
 				isFakeIP = true
 			}
-			// When a domain is recovered via sniffing, always send it to the
-			// remote server instead of the original IP (which may be IPv6 on
-			// an IPv4-only server). The only exception is FakeDNS: the fake
-			// IP must reach the server so its FakeDNS can map it back.
-			if isFakeIP || protocol == "fakedns" || protocol == "fakedns+others" {
-				// FakeDNS: preserve fake IP for server-side mapping
-				if sniffingRequest.RouteOnly {
-					ob.RouteTarget = destination
-				} else {
-					ob.Target = destination
-				}
+			if sniffingRequest.RouteOnly && protocol != "fakedns" && protocol != "fakedns+others" && !isFakeIP {
+				ob.RouteTarget = destination
 			} else {
-				// Non-FakeDNS: always send domain to server
 				ob.Target = destination
 			}
 		}

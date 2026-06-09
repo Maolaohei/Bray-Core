@@ -127,9 +127,14 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 				config.Concurrency = 8 // same as before
 			}
 			if config.Concurrency > 0 {
-				MaxReuseTimes := uint32(60000)
-				if config.MaxReuseTimes != 0 && config.MaxReuseTimes < 60000 {
-					MaxReuseTimes = uint32(config.MaxReuseTimes)
+				MaxReuseTimes := uint32(128)
+				if config.MaxReuseTimes != 0 {
+					if config.MaxReuseTimes < 0 {
+						// negative: unlimited reuses (not recommended)
+						MaxReuseTimes = 0
+					} else {
+						MaxReuseTimes = uint32(config.MaxReuseTimes)
+					}
 				}
 				h.mux = &mux.ClientManager{
 					Enabled: true,
