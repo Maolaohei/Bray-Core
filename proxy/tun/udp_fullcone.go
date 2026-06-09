@@ -11,6 +11,31 @@ import (
 	"github.com/xtls/xray-core/common/net"
 )
 
+// udpEgressSize is computed at startup based on total system memory.
+// Larger buffers reduce packet drops under high concurrency (gaming,
+// BitTorrent), while smaller buffers keep memory usage bounded on
+// low-end devices.
+//
+//	< 2 GB  → 128  (~200 KB/conn)
+//	2–6 GB  → 256  (~400 KB/conn)
+//	6–12 GB → 512  (~800 KB/conn)
+//	> 12 GB → 1024 (~1.6 MB/conn)
+var udpEgressSize = func() int {
+	totalMB := getSystemMemoryMB()
+	switch {
+	case totalMB <= 0:
+		return 256
+	case totalMB < 2048:
+		return 128
+	case totalMB < 6144:
+		return 256
+	case totalMB < 12288:
+		return 512
+	default:
+		return 1024
+	}
+}()
+
 type packet struct {
 	data []byte
 	dest *net.Destination
@@ -60,7 +85,7 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
 
 	conn, found = u.udpConns[src]
 	if !found {
-		egress := make(chan *packet, 1024)
+		egress := make(chan *packet, udpEgressSize)
 		conn = &udpConn{handler: u, egress: egress, src: src, dst: dst}
 		u.udpConns[src] = conn
 

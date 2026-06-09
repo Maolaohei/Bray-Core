@@ -79,7 +79,7 @@ func (t *Handler) Start() error {
 			t.config.AutoOutboundsInterface = ""
 		}
 		updater = &InterfaceUpdater{tunIndex: tunIndex, fixedName: t.config.AutoOutboundsInterface}
-		updater.Update()
+		updater.Start()
 		internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
 			iface := updater.Get()
 			if iface == nil {

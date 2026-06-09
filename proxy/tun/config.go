@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common/errors"
 )
@@ -16,6 +17,9 @@ type InterfaceUpdater struct {
 	tunIndex  int
 	fixedName string
 	iface     *net.Interface
+
+	// debounceTimer merges rapid-fire netlink events into a single Update() call.
+	debounceTimer *time.Timer
 }
 
 var updater *InterfaceUpdater
@@ -25,6 +29,25 @@ func (updater *InterfaceUpdater) Get() *net.Interface {
 	defer updater.Unlock()
 
 	return updater.iface
+}
+
+// Start begins background interface monitoring. On platforms with netlink
+// support (Linux), it uses event-driven route watching for sub-second
+// response to network switches. On other platforms it falls back to
+// periodic polling every 10 minutes.
+func (updater *InterfaceUpdater) Start() {
+	updater.Update() // initial selection
+
+	// Try platform-specific event listener; falls back to polling.
+	if !startNetlinkListener(updater) {
+		go updater.pollLoop()
+	}
+}
+
+// startNetlinkListener is a platform-specific hook. The default returns
+// false (not supported). On Linux it is replaced in init() to use netlink.
+var startNetlinkListener = func(updater *InterfaceUpdater) bool {
+	return false
 }
 
 func (updater *InterfaceUpdater) Update() {
@@ -122,4 +145,28 @@ func score(iface *net.Interface, addrs []net.Addr) int {
 	}
 
 	return score
+}
+
+// pollLoop periodically refreshes the interface selection. Used as a
+// fallback on platforms without netlink event support.
+func (updater *InterfaceUpdater) pollLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		updater.Update()
+	}
+}
+
+// debounceUpdate coalesces rapid netlink events so that a burst of
+// route changes (e.g., old default deleted + new default added during
+// a WiFi→cellular switch) triggers only one Update() call.
+func (updater *InterfaceUpdater) debounceUpdate() {
+	updater.Lock()
+	defer updater.Unlock()
+
+	const debounceInterval = 500 * time.Millisecond
+	if updater.debounceTimer != nil {
+		updater.debounceTimer.Stop()
+	}
+	updater.debounceTimer = time.AfterFunc(debounceInterval, updater.Update)
 }
