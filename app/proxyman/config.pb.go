@@ -420,8 +420,10 @@ type MultiplexingConfig struct {
 	XudpConcurrency int32 `protobuf:"varint,3,opt,name=xudpConcurrency,proto3" json:"xudpConcurrency,omitempty"`
 	// "reject" (default), "allow" or "skip".
 	XudpProxyUDP443 string `protobuf:"bytes,4,opt,name=xudpProxyUDP443,proto3" json:"xudpProxyUDP443,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// MaxReuseTimes for an connection
+	MaxReuseTimes int32 `protobuf:"varint,5,opt,name=maxReuseTimes,proto3" json:"maxReuseTimes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MultiplexingConfig) Reset() {
@@ -480,6 +482,13 @@ func (x *MultiplexingConfig) GetXudpProxyUDP443() string {
 		return x.XudpProxyUDP443
 	}
 	return ""
+}
+
+func (x *MultiplexingConfig) GetMaxReuseTimes() int32 {
+	if x != nil {
+		return x.MaxReuseTimes
+	}
+	return 0
 }
 
 var File_app_proxyman_config_proto protoreflect.FileDescriptor

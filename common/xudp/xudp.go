@@ -26,9 +26,18 @@ var AddrParser = protocol.NewAddressParser(
 	protocol.PortThenAddress(),
 )
 
+const (
+	maxMetaLen = 2048 // upper bound for meta-data length to prevent DoS
+)
+
 var (
 	Show    bool
 	BaseKey []byte
+
+	// Pre-allocated, read-only header prefixes to avoid per-packet
+	// allocations on the hot path. Never modify these at runtime.
+	newPacketPrefix  = [7]byte{0, 0, 0, 0, 1, 1, 2} // meta length (2) + Mux Session ID (2) + New + Opt + UDP
+	keepPacketPrefix = [6]byte{0, 0, 0, 0, 2, 1}    // meta length (2) + Mux Session ID (2) + Keep + Opt
 )
 
 func init() {
@@ -36,7 +45,9 @@ func init() {
 		Show = true
 	}
 	BaseKey = make([]byte, 32)
-	rand.Read(BaseKey)
+	if _, err := rand.Read(BaseKey); err != nil {
+		panic("xudp: crypto/rand.Read failed: " + err.Error())
+	}
 	go func() {
 		time.Sleep(100 * time.Millisecond) // this is not nice, but need to give some time for Android to setup ENV
 		if raw := platform.NewEnvFlag(platform.XUDPBaseKey).GetValue(func() string { return "" }); raw != "" {
@@ -49,7 +60,8 @@ func init() {
 }
 
 func GetGlobalID(ctx context.Context) (globalID [8]byte) {
-	if cone := ctx.Value("cone"); cone == nil || !cone.(bool) { // cone is nil only in some unit tests
+	cone, ok := ctx.Value("cone").(bool)
+	if !ok || !cone {
 		return
 	}
 	if inbound := session.InboundFromContext(ctx); inbound != nil && inbound.Source.Network == net.Network_UDP &&
@@ -88,19 +100,15 @@ func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 		}
 
 		eb := buf.New()
-		eb.Write([]byte{0, 0, 0, 0}) // Meta data length; Mux Session ID
 		if w.Dest.Network == net.Network_UDP {
-			eb.WriteByte(1) // New
-			eb.WriteByte(1) // Opt
-			eb.WriteByte(2) // UDP
+			eb.Write(newPacketPrefix[:]) // metaHeader + New + Opt + UDP
 			AddrParser.WriteAddressPort(eb, w.Dest.Address, w.Dest.Port)
 			if b.UDP != nil { // make sure it's user's proxy request
 				eb.Write(w.GlobalID[:]) // no need to check whether it's empty
 			}
 			w.Dest.Network = net.Network_Unknown
 		} else {
-			eb.WriteByte(2) // Keep
-			eb.WriteByte(1) // Opt
+			eb.Write(keepPacketPrefix[:]) // metaHeader + Keep + Opt
 			if b.UDP != nil {
 				eb.WriteByte(2) // UDP
 				AddrParser.WriteAddressPort(eb, b.UDP.Address, b.UDP.Port)
@@ -139,7 +147,7 @@ func (r *PacketReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 			return nil, err
 		}
 		l := int32(r.cache[0])<<8 | int32(r.cache[1])
-		if l < 4 {
+		if l < 4 || l > maxMetaLen {
 			return nil, io.EOF
 		}
 		b := buf.New()
@@ -177,6 +185,10 @@ func (r *PacketReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 				return nil, err
 			}
 			length := int32(r.cache[0])<<8 | int32(r.cache[1])
+			if length <= 0 || length > int32(buf.Size) {
+				b.Release()
+				continue
+			}
 			if length > 0 {
 				if _, err := b.ReadFullFrom(r.Reader, length); err != nil {
 					b.Release()

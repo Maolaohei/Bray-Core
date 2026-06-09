@@ -66,3 +66,13 @@ ehthumbs.db
 # Other common ignores
 *.bak
 *.tmp
+common/xudp/.codewhale
+transport/internet/splithttp/.codewhale
+transport/internet/reality/.codewhale
+.deepseek/pastes
+.codegraph/
+.reasonix/
+.codewhale/
+**/.codewhale/
+**/.deepseek/
+**/checklist.md
