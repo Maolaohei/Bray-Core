@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -31,6 +32,9 @@ type DNS struct {
 	domainMatcher          geodata.DomainMatcher
 	matcherInfos           []*DomainMatcherInfo
 	checkSystem            bool
+	// warmupDomains are resolved asynchronously after Start() to
+	// prime the DNS cache for faster cold-start lookups.
+	warmupDomains []string
 }
 
 // DomainMatcherInfo contains information attached to index returned by Server.domainMatcher.
@@ -190,7 +194,33 @@ func (*DNS) Type() interface{} {
 
 // Start implements common.Runnable.
 func (s *DNS) Start() error {
+	if len(s.warmupDomains) > 0 {
+		go s.warmup(s.warmupDomains)
+	}
 	return nil
+}
+
+// SetWarmupDomains configures domains to be pre-resolved at startup
+// or on network change. Call before Start() or after a network event.
+func (s *DNS) SetWarmupDomains(domains []string) {
+	s.warmupDomains = domains
+}
+
+// warmup resolves the given domains in the background to prime the DNS
+// cache. Errors are silently ignored since warmup is best-effort.
+func (s *DNS) warmup(domains []string) {
+	_, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, domain := range domains {
+		wg.Add(1)
+		go func(d string) {
+			defer wg.Done()
+			s.LookupIP(d, *s.ipOption)
+		}(domain)
+	}
+	wg.Wait()
 }
 
 // Close implements common.Closable.

@@ -5,8 +5,8 @@ on:
   release:
     types: [published]
   push:
-  pull_request:
-    types: [opened, synchronize, reopened]
+    branches:
+      - main
 
 jobs:
   check-assets:
@@ -175,6 +175,7 @@ jobs:
       - name: Set up NDK
         if: matrix.goos == 'android'
         run: |
+          wget -qO android-ndk.zip https://dl.google.com/android/repository/android-ndk-r29c-linux.zip || \
           wget -qO android-ndk.zip https://dl.google.com/android/repository/android-ndk-r28b-linux.zip
           unzip android-ndk.zip
           rm android-ndk.zip
@@ -182,7 +183,9 @@ jobs:
             ["amd64"]="x86_64-linux-android24-clang"
             ["arm64"]="aarch64-linux-android24-clang"
           )
-          echo CC="$(realpath android-ndk-*/toolchains/llvm/prebuilt/linux-x86_64/bin)/${arches[${{ matrix.goarch }}]}" >> $GITHUB_ENV
+          NDK_DIR=$(ls -d android-ndk-*/ 2>/dev/null | head -1)
+          NDK_ABS="$(pwd)/${NDK_DIR}"
+          echo "CC=${NDK_ABS}toolchains/llvm/prebuilt/linux-x86_64/bin/${arches[${{ matrix.goarch }}]}" >> $GITHUB_ENV
           echo CGO_ENABLED=1 >> $GITHUB_ENV
 
       - name: Show workflow information
@@ -197,7 +200,8 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-
+      - name: Print Go version   
+        run: go version
       - name: Get project dependencies
         run: go mod download
 
@@ -205,17 +209,20 @@ jobs:
         run: |
           mkdir -p build_assets
           COMMID=$(git describe --always --dirty)
+          
           if [[ ${GOOS} == 'windows' ]]; then
             echo 'Building Xray for Windows...'
-            go build -o build_assets/xray.exe -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
-            # The line below is for without running conhost.exe version. Commented for not being used. Provided for reference.
-            # go build -o build_assets/wxray.exe -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-H windowsgui -X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
+            CGO_ENABLED=0 GOAMD64=v3 go build -o build_assets/xray.exe -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
           elif [[ ${GOOS} == 'android' ]]; then
             echo 'Building Xray for Android...'
             go build -o build_assets/xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid= -checklinkname=0" -v ./main
           else
             echo 'Building Xray...'
-            if [[ ${GOARCH} == 'mips' || ${GOARCH} == 'mipsle' ]]; then
+            if [[ ${GOARCH} == 'amd64' && ${GOOS} == 'linux' ]]; then
+              CGO_ENABLED=0 GOAMD64=v3 go build -o build_assets/xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
+            elif [[ ${GOARCH} == '386' ]]; then
+              CGO_ENABLED=0 go build -o build_assets/xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
+            elif [[ ${GOARCH} == 'mips' || ${GOARCH} == 'mipsle' ]]; then
               go build -o build_assets/xray -trimpath -buildvcs=false -gcflags="-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
               echo 'Building soft-float Xray for MIPS/MIPSLE 32-bit...'
               GOMIPS=softfloat go build -o build_assets/xray_softfloat -trimpath -buildvcs=false -gcflags="-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
@@ -263,7 +270,7 @@ jobs:
           cp ${GITHUB_WORKSPACE}/LICENSE ./build_assets/LICENSE
 
       - name: Create ZIP archive
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         shell: bash
         run: |
           pushd build_assets || exit 1
@@ -276,7 +283,21 @@ jobs:
           do
             openssl dgst -$METHOD $FILE | sed 's/([^)]*)//g' >>$DGST
           done
+      - name: Get current date
+        id: date
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
 
+      - name: Create/Update Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: release-${{ steps.date.outputs.date }}-${{ github.run_number }}
+          name: Release ${{ steps.date.outputs.date }}
+          draft: false
+          prerelease: false
+          files: ./Xray-${{ env.ASSET_NAME }}.zip*
+    
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         if: github.event_name == 'release'
@@ -285,7 +306,7 @@ jobs:
           file: ./Xray-${{ env.ASSET_NAME }}.zip*
           tag: ${{ github.ref }}
           file_glob: true
-
+      
       - name: Upload files to Artifacts
         uses: actions/upload-artifact@v7
         with:
