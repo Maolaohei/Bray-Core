@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	gotls "crypto/tls"
@@ -13,7 +14,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	mrand "math/rand"
 	"net/http"
+	"net/url"
 	"reflect"
 	"regexp"
 	"strings"
@@ -79,18 +82,31 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 		fmt.Printf("REALITY localAddr: %v\tis using X25519MLKEM768 for TLS' communication: %v\n", localAddr, c.HandshakeState.ServerHello.ServerShare.Group == utls.X25519MLKEM768)
 		fmt.Printf("REALITY localAddr: %v\tis using ML-DSA-65 for cert's extra verification: %v\n", localAddr, len(c.Config.Mldsa65Verify) > 0)
 	}
-	p, _ := reflect.TypeOf(c.Conn).Elem().FieldByName("peerCertificates")
+	p, ok := reflect.TypeOf(c.Conn).Elem().FieldByName("peerCertificates")
+	if !ok {
+		return errors.New("REALITY: peerCertificates field not found via reflect")
+	}
 	certs := *(*([]*x509.Certificate))(unsafe.Pointer(uintptr(unsafe.Pointer(c.Conn)) + p.Offset))
+	if len(certs) == 0 {
+		return errors.New("REALITY: no peer certificates")
+	}
 	if pub, ok := certs[0].PublicKey.(ed25519.PublicKey); ok {
 		h := hmac.New(sha512.New, c.AuthKey)
 		h.Write(pub)
-		if bytes.Equal(h.Sum(nil), certs[0].Signature) {
+		if hmac.Equal(h.Sum(nil), certs[0].Signature) {
 			if len(c.Config.Mldsa65Verify) > 0 {
 				if len(certs[0].Extensions) > 0 {
 					h.Write(c.HandshakeState.Hello.Raw)
 					h.Write(c.HandshakeState.ServerHello.Raw)
-					verify, _ := mldsa65.Scheme().UnmarshalBinaryPublicKey(c.Config.Mldsa65Verify)
-					if mldsa65.Verify(verify.(*mldsa65.PublicKey), h.Sum(nil), nil, certs[0].Extensions[0].Value) {
+					verify, err := mldsa65.Scheme().UnmarshalBinaryPublicKey(c.Config.Mldsa65Verify)
+					if err != nil {
+						return errors.New("REALITY: failed to unmarshal ML-DSA-65 public key")
+					}
+					pubKey, ok := verify.(*mldsa65.PublicKey)
+					if !ok {
+						return errors.New("REALITY: unexpected ML-DSA-65 public key type")
+					}
+					if mldsa65.Verify(pubKey, h.Sum(nil), nil, certs[0].Extensions[0].Value) {
 						c.Verified = true
 						return nil
 					}
@@ -146,6 +162,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		hello.SessionId[3] = 0 // reserved
 		binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 		copy(hello.SessionId[8:], config.ShortId)
+		_, _ = rand.Read(hello.SessionId[16:])
 		if config.Show {
 			fmt.Printf("REALITY localAddr: %v\thello.SessionId[:16]: %v\n", localAddr, hello.SessionId[:16])
 		}
@@ -171,8 +188,11 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		if config.Show {
 			fmt.Printf("REALITY localAddr: %v\tuConn.AuthKey[:16]: %v\tAEAD: %T\n", localAddr, uConn.AuthKey[:16], aead)
 		}
-		aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
-		copy(hello.Raw[39:], hello.SessionId)
+		sealed := aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
+		if len(sealed) != 16+16 {
+			return nil, errors.New("REALITY: unexpected AEAD seal output length")
+		}
+		copy(hello.Raw[39:], sealed)
 	}
 	if err := uConn.HandshakeContext(ctx); err != nil {
 		return nil, err
@@ -181,9 +201,13 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		fmt.Printf("REALITY localAddr: %v\tuConn.Verified: %v\n", localAddr, uConn.Verified)
 	}
 	if !uConn.Verified {
-		errors.LogError(ctx, "REALITY: received real certificate (potential MITM or redirection)")
+		errors.LogError(ctx, "REALITY: standard x509 fallback, serverName=", uConn.ServerName)
+		if len(config.SpiderY) < 10 {
+			return nil, errors.New("REALITY: SpiderY requires 10 elements, got ", len(config.SpiderY)).AtWarning()
+		}
 		go func() {
 			client := &http.Client{
+				Timeout: 30 * time.Second,
 				Transport: &http2.Transport{
 					DialTLSContext: func(ctx context.Context, network, addr string, cfg *gotls.Config) (net.Conn, error) {
 						if config.Show {
@@ -196,15 +220,15 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 			prefix := []byte("https://" + uConn.ServerName)
 			maps.Lock()
 			if maps.maps == nil {
-				maps.maps = make(map[string]map[string]struct{})
+				maps.maps = make(map[string]map[string]pathForms)
 			}
 			paths := maps.maps[uConn.ServerName]
 			if paths == nil {
-				paths = make(map[string]struct{})
-				paths[config.SpiderX] = struct{}{}
+				paths = make(map[string]pathForms)
+				paths[config.SpiderX] = newPathForms(config.SpiderX)
 				maps.maps[uConn.ServerName] = paths
 			}
-			firstURL := string(prefix) + getPathLocked(paths)
+			firstURL := string(prefix) + spiderPickPath(paths)
 			maps.Unlock()
 			get := func(first bool) {
 				var (
@@ -217,13 +241,14 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 					req, _ = http.NewRequest("GET", firstURL, nil)
 				} else {
 					maps.Lock()
-					req, _ = http.NewRequest("GET", string(prefix)+getPathLocked(paths), nil)
+					req, _ = http.NewRequest("GET", string(prefix)+spiderPickPath(paths), nil)
 					maps.Unlock()
 				}
 				if req == nil {
 					return
 				}
-				utils.TryDefaultHeadersWith(req.Header, "nav")
+				headerModes := []string{"nav", "chrome", "firefox", "safari"}
+				utils.TryDefaultHeadersWith(req.Header, headerModes[crypto.RandBetween(0, int64(len(headerModes)-1))])
 				if first && config.Show {
 					fmt.Printf("REALITY localAddr: %v\treq.UserAgent(): %v\n", localAddr, req.UserAgent())
 				}
@@ -239,19 +264,26 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 					if resp, err = client.Do(req); err != nil {
 						break
 					}
-					defer resp.Body.Close()
-					req.Header.Set("Referer", req.URL.String())
-					if body, err = io.ReadAll(resp.Body); err != nil {
+					body, err = io.ReadAll(resp.Body)
+					resp.Body.Close()
+					if err != nil {
 						break
 					}
+					req.Header.Set("Referer", req.URL.String())
 					maps.Lock()
 					for _, m := range href.FindAllSubmatch(body, -1) {
 						m[1] = bytes.TrimPrefix(m[1], prefix)
 						if !bytes.Contains(m[1], dot) {
-							paths[string(m[1])] = struct{}{}
+							addToPoolLocked(paths, string(m[1]))
 						}
 					}
-					req.URL.Path = getPathLocked(paths)
+					for _, m := range srcRe.FindAllSubmatch(body, -1) {
+						m[1] = bytes.TrimPrefix(m[1], prefix)
+						if !bytes.Contains(m[1], dot) {
+							addToPoolLocked(paths, string(m[1]))
+						}
+					}
+					req.URL.Path = spiderPickPath(paths)
 					if config.Show {
 						fmt.Printf("REALITY localAddr: %v\treq.Referer(): %v\n", localAddr, req.Referer())
 						fmt.Printf("REALITY localAddr: %v\tlen(body): %v\n", localAddr, len(body))
@@ -270,30 +302,131 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 			}
 			// Do not close the connection
 		}()
-		time.Sleep(time.Duration(crypto.RandBetween(config.SpiderY[8], config.SpiderY[9])) * time.Millisecond) // return
-		return nil, errors.New("REALITY: processed invalid connection").AtWarning()
+		return nil, errors.New("REALITY: connection rejected").AtWarning()
 	}
 	return uConn, nil
 }
 
+const maxPathsPerHost = 500 // cap on Spider path pool per host
+
 var (
-	href = regexp.MustCompile(`href="([/h].*?)"`)
-	dot  = []byte(".")
+	href  = regexp.MustCompile(`href="([/h].*?)"`)
+	srcRe = regexp.MustCompile(`src="([/h].*?)"`)
+	dot   = []byte(".")
 )
 
-var maps struct {
-	sync.Mutex
-	maps map[string]map[string]struct{}
+// pathForms caches eight pre-computed URL variants of a Spider path so
+// that GetRandomPath can return a pre-computed form without per-request
+// encoding or allocation overhead.
+type pathForms [8]string
+
+func newPathForms(p string) pathForms {
+	plain := p[1:]            // assets/images/logo.png
+	name := fileNameOnly(p)   // logo.png
+	ext := fileExtOnly(p)     // .png
+	dir := dirNameOnly(plain) // assets/images
+	return pathForms{
+		url.QueryEscape(p),                  // %2Fassets%2Fimages%2Flogo.png
+		plain,                               // assets/images/logo.png
+		name,                                // logo.png
+		url.QueryEscape(plain),              // assets%2Fimages%2Flogo.png
+		url.QueryEscape(name),               // logo.png (already safe)
+		ext,                                 // .png
+		dir + "/" + name,                    // assets/images/logo.png (rebuild)
+		strings.ReplaceAll(plain, "/", "-"), // assets-images-logo.png
+	}
 }
 
-func getPathLocked(paths map[string]struct{}) string {
-	stopAt := int(crypto.RandBetween(0, int64(len(paths)-1)))
+// formsLen is the number of pre-computed variants; used by GetRandomPath.
+const formsLen = 8
+
+// spiderPickPath selects a random raw (un-obfuscated) path for the Spider's
+// own crawling. Must be called with maps lock held.
+func spiderPickPath(paths map[string]pathForms) string {
+	if len(paths) == 0 {
+		return "/"
+	}
+	stopAt := mrand.Intn(len(paths))
 	i := 0
-	for s := range paths {
+	for k := range paths {
 		if i == stopAt {
-			return s
+			return k
 		}
 		i++
 	}
+	return "/"
+}
+
+func fileNameOnly(p string) string {
+	if idx := strings.LastIndexByte(p, '/'); idx >= 0 {
+		return p[idx+1:]
+	}
+	return p[1:]
+}
+
+func fileExtOnly(p string) string {
+	if idx := strings.LastIndexByte(p, '.'); idx >= 0 {
+		return p[idx:]
+	}
+	return ""
+}
+
+func dirNameOnly(plain string) string {
+	if idx := strings.LastIndexByte(plain, '/'); idx >= 0 {
+		return plain[:idx]
+	}
+	return ""
+}
+
+var maps struct {
+	sync.RWMutex
+	maps map[string]map[string]pathForms
+}
+
+// addToPoolLocked inserts a path into the Spider pool, capping growth at
+// maxPathsPerHost entries. At capacity, new paths are accepted with ~10%
+// probability (replacing a random old entry), which slows turnover and
+// preserves frequently-used paths. Must be called with maps.Lock held.
+func addToPoolLocked(paths map[string]pathForms, path string) {
+	// Already present — skip pre-computation.
+	if _, ok := paths[path]; ok {
+		return
+	}
+	if len(paths) < maxPathsPerHost {
+		paths[path] = newPathForms(path)
+		return
+	}
+	// At capacity: ~10% chance to replace a random old entry.
+	if mrand.Intn(10) != 0 {
+		return
+	}
+	for k := range paths {
+		delete(paths, k)
+		break
+	}
+	paths[path] = newPathForms(path)
+}
+
+// GetRandomPath returns a random URL path from the Spider path pool for the
+// given serverName. The returned value is one of four pre-computed encodings
+// chosen at random. Returns "/" if the pool is empty. Safe for concurrent use.
+func GetRandomPath(serverName string) string {
+	maps.RLock()
+	paths := maps.maps[serverName]
+	if paths == nil || len(paths) == 0 {
+		maps.RUnlock()
+		return "/"
+	}
+	stopAt := mrand.Intn(len(paths))
+	i := 0
+	for _, forms := range paths {
+		if i == stopAt {
+			result := forms[mrand.Intn(formsLen)]
+			maps.RUnlock()
+			return result
+		}
+		i++
+	}
+	maps.RUnlock()
 	return "/"
 }
