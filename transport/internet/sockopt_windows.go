@@ -84,7 +84,7 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 		// 此处对 config.TcpCongestion 不做处理（直接忽略），防止跨平台配置导致 Windows 端运行报错。
 	}
 
-	if len(config.CustomSockopt) > 0 {
+		if len(config.CustomSockopt) > 0 {
 		for _, custom := range config.CustomSockopt {
 			if custom.System != "" && custom.System != runtime.GOOS {
 				errors.LogDebug(context.Background(), "CustomSockopt system not match: ", "want ", custom.System, " got ", runtime.GOOS)
@@ -99,13 +99,24 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 			if len(custom.Opt) == 0 {
 				return errors.New("No opt!")
 			} else {
-				opt, _ = strconv.Atoi(custom.Opt)
+				optValue, err := strconv.Atoi(custom.Opt)
+				if err != nil {
+					return errors.New("invalid CustomSockopt opt value: ", custom.Opt)
+				}
+				opt = optValue
 			}
 			if custom.Level != "" {
-				level, _ = strconv.Atoi(custom.Level)
+				levelValue, err := strconv.Atoi(custom.Level)
+				if err != nil {
+					return errors.New("invalid CustomSockopt level value: ", custom.Level)
+				}
+				level = levelValue
 			}
 			if custom.Type == "int" {
-				value, _ := strconv.Atoi(custom.Value)
+				value, err := strconv.Atoi(custom.Value)
+				if err != nil {
+					return errors.New("invalid CustomSockopt int value: ", custom.Value)
+				}
 				if err := syscall.SetsockoptInt(syscall.Handle(fd), level, opt, value); err != nil {
 					return errors.New("failed to set CustomSockoptInt", opt, value, err)
 				}
@@ -158,13 +169,24 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 			if len(custom.Opt) == 0 {
 				return errors.New("No opt!")
 			} else {
-				opt, _ = strconv.Atoi(custom.Opt)
+				optValue, err := strconv.Atoi(custom.Opt)
+				if err != nil {
+					return errors.New("invalid CustomSockopt opt value: ", custom.Opt)
+				}
+				opt = optValue
 			}
 			if custom.Level != "" {
-				level, _ = strconv.Atoi(custom.Level)
+				levelValue, err := strconv.Atoi(custom.Level)
+				if err != nil {
+					return errors.New("invalid CustomSockopt level value: ", custom.Level)
+				}
+				level = levelValue
 			}
 			if custom.Type == "int" {
-				value, _ := strconv.Atoi(custom.Value)
+				value, err := strconv.Atoi(custom.Value)
+				if err != nil {
+					return errors.New("invalid CustomSockopt int value: ", custom.Value)
+				}
 				if err := syscall.SetsockoptInt(syscall.Handle(fd), level, opt, value); err != nil {
 					return errors.New("failed to set CustomSockoptInt", opt, value, err)
 				}

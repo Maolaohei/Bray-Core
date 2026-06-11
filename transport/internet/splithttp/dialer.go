@@ -210,7 +210,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 					case *internet.PacketConnWrapper:
 						pktConn = c.PacketConn
 					default:
-						panic(reflect.TypeOf(c))
+						return nil, errors.New("unexpected connection type: ", reflect.TypeOf(c))
 					}
 
 					return pktConn, nil
@@ -230,9 +230,12 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 						pktConn = c.PacketConn
 						udpAddr = conn.RemoteAddr().(*net.UDPAddr)
 					default:
-						panic(reflect.TypeOf(c))
+						return nil, errors.New("unexpected connection type: ", reflect.TypeOf(c))
 					}
-					pktConn = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
+					pktConn, err = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
+					if err != nil {
+						return nil, errors.New("failed to create udphop conn").Base(err)
+					}
 				} else {
 					conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
 					if err != nil {
@@ -246,7 +249,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 						pktConn = &internet.FakePacketConn{Conn: c}
 						udpAddr = &net.UDPAddr{IP: c.RemoteAddr().(*net.TCPAddr).IP, Port: c.RemoteAddr().(*net.TCPAddr).Port}
 					default:
-						panic(reflect.TypeOf(c))
+						return nil, errors.New("unexpected connection type: ", reflect.TypeOf(c))
 					}
 				}
 
@@ -487,7 +490,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	scMinPostsIntervalMs := transportConfiguration.GetNormalizedScMinPostsIntervalMs()
 
 	if scMaxEachPostBytes.From <= 0 {
-		panic("`scMaxEachPostBytes` should be bigger than 0")
+		return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
 	}
 
 	maxUploadSize := scMaxEachPostBytes.rand()
@@ -496,6 +499,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	// uploadWriter wrapper, exact size limits can be enforced
 	// uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(maxUploadSize - 1))
 	uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(max(0, maxUploadSize-buf.Size)))
+
+	// Pre-compute URL string once to avoid per-packet allocation in upload loop.
+	requestURLStr := requestURL.String()
 
 	conn.writer = uploadWriter{
 		uploadPipeWriter,
@@ -547,14 +553,14 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					dynamicHTTPClient, dynamicXmuxClient = getHTTPClient(ctx, dest, streamSettings)
 				}
 
-				go func(hClient DialerClient) {
-					err := hClient.PostPacket(
-						ctx,
-						requestURL.String(),
-						sessionId,
-						seqStr,
-						chunk,
-					)
+			go func(hClient DialerClient) {
+				err := hClient.PostPacket(
+					ctx,
+					requestURLStr,
+					sessionId,
+					seqStr,
+					chunk,
+				)
 					wroteRequest.Close()
 					if err != nil {
 						errors.LogInfoInner(ctx, err, "failed to send upload")

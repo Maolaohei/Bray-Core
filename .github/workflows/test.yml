@@ -47,7 +47,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26'
 
       # 自动修复格式不规范的代码
       - name: Run gofmt Auto Fix
@@ -61,9 +61,26 @@ jobs:
           commit_message: "chore: 自动格式化 Go 代码 (gofmt 自动修复)"
           branch: ${{ github.head_ref || github.ref_name }}
 
+  lint:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
   test:
     runs-on: ${{ matrix.os }}
-    needs: [check-assets, check-format]
+    needs: [check-assets, check-format, lint]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     strategy:
       matrix:
@@ -74,7 +91,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26'
       - name: Cache Geodat
         if: matrix.os == 'ubuntu-latest'
         uses: actions/cache/save@v4

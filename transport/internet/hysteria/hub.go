@@ -83,7 +83,8 @@ func (h *httpHandler) AuthHTTP(w http.ResponseWriter, r *http.Request) bool {
 			case "force-brutal":
 				congestion.UseBrutal(conn, quicParams.BrutalUp)
 			default:
-				panic(quicParams.Congestion)
+				errors.LogInfo(context.Background(), "unknown congestion algorithm: ", quicParams.Congestion)
+				return false
 			}
 
 			if h.validator != nil {

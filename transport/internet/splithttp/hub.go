@@ -5,7 +5,6 @@ import (
 	"context"
 	gotls "crypto/tls"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"net/http"
 	"runtime"
@@ -259,7 +258,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		if dataPlacement == PlacementAuto || dataPlacement == PlacementHeader {
 			var headerPayloadChunks []string
 			for i := 0; true; i++ {
-				chunk := request.Header.Get(fmt.Sprintf("%s-%d", uplinkDataKey, i))
+				chunk := request.Header.Get(uplinkDataKey + "-" + strconv.Itoa(i))
 				if chunk == "" {
 					break
 				}
@@ -278,7 +277,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		if dataPlacement == PlacementAuto || dataPlacement == PlacementCookie {
 			var cookiePayloadChunks []string
 			for i := 0; true; i++ {
-				cookieName := fmt.Sprintf("%s_%d", uplinkDataKey, i)
+				cookieName := uplinkDataKey + "_" + strconv.Itoa(i)
 				if c, _ := request.Cookie(cookieName); c != nil {
 					cookiePayloadChunks = append(cookiePayloadChunks, c.Value)
 				} else {
@@ -633,7 +632,8 @@ func (l *QListener) Accept(ctx context.Context) (*quic.Conn, error) {
 	case "force-brutal":
 		congestion.UseBrutal(conn, l.quicParams.BrutalUp)
 	default:
-		panic(l.quicParams.Congestion)
+		conn.CloseWithError(0, "")
+		return nil, errors.New("unknown congestion algorithm: ", l.quicParams.Congestion)
 	}
 	return conn, nil
 }

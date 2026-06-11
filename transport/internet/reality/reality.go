@@ -177,10 +177,11 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		if ecdhe == nil {
 			return nil, errors.New("Current fingerprint ", uConn.ClientHelloID.Client, uConn.ClientHelloID.Version, " does not support TLS 1.3, REALITY handshake cannot establish.")
 		}
-		uConn.AuthKey, _ = ecdhe.ECDH(publicKey)
-		if uConn.AuthKey == nil {
-			return nil, errors.New("REALITY: SharedKey == nil")
+		authKey, err := ecdhe.ECDH(publicKey)
+		if err != nil {
+			return nil, errors.New("REALITY: ECDH key exchange failed: ", err)
 		}
+		uConn.AuthKey = authKey
 		if _, err := hkdf.New(sha256.New, uConn.AuthKey, hello.Random[:20], []byte("REALITY")).Read(uConn.AuthKey); err != nil {
 			return nil, err
 		}
@@ -237,16 +238,16 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 					err  error
 					body []byte
 				)
-				if first {
-					req, _ = http.NewRequest("GET", firstURL, nil)
-				} else {
-					maps.Lock()
-					req, _ = http.NewRequest("GET", string(prefix)+spiderPickPath(paths), nil)
-					maps.Unlock()
-				}
-				if req == nil {
-					return
-				}
+			if first {
+				req, err = http.NewRequest("GET", firstURL, nil)
+			} else {
+				maps.Lock()
+				req, err = http.NewRequest("GET", string(prefix)+spiderPickPath(paths), nil)
+				maps.Unlock()
+			}
+			if err != nil || req == nil {
+				return
+			}
 				headerModes := []string{"nav", "chrome", "firefox", "safari"}
 				utils.TryDefaultHeadersWith(req.Header, headerModes[crypto.RandBetween(0, int64(len(headerModes)-1))])
 				if first && config.Show {

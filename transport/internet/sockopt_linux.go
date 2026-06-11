@@ -170,13 +170,24 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 			if len(custom.Opt) == 0 {
 				return errors.New("No opt!")
 			} else {
-				opt, _ = strconv.Atoi(custom.Opt)
+				optValue, err := strconv.Atoi(custom.Opt)
+				if err != nil {
+					return errors.New("invalid CustomSockopt opt value: ", custom.Opt)
+				}
+				opt = optValue
 			}
 			if custom.Level != "" {
-				level, _ = strconv.Atoi(custom.Level)
+				levelValue, err := strconv.Atoi(custom.Level)
+				if err != nil {
+					return errors.New("invalid CustomSockopt level value: ", custom.Level)
+				}
+				level = levelValue
 			}
 			if custom.Type == "int" {
-				value, _ := strconv.Atoi(custom.Value)
+				value, err := strconv.Atoi(custom.Value)
+				if err != nil {
+					return errors.New("invalid CustomSockopt int value: ", custom.Value)
+				}
 				if err := syscall.SetsockoptInt(int(fd), level, opt, value); err != nil {
 					return errors.New("failed to set CustomSockoptInt", opt, value, err)
 				}

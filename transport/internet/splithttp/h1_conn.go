@@ -13,7 +13,7 @@ type H1Conn struct {
 
 func NewH1Conn(conn net.Conn) *H1Conn {
 	return &H1Conn{
-		RespBufReader: bufio.NewReader(conn),
+		RespBufReader: bufio.NewReaderSize(conn, 32*1024),
 		Conn:          conn,
 	}
 }

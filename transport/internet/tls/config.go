@@ -292,9 +292,13 @@ func (c *Config) parseServerName() string {
 
 func (r *RandCarrier) verifyPeerCert(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) (err error) {
 	// extract x509 certificates from rawCerts (verifiedChains will be nil if InsecureSkipVerify is true)
-	certs := make([]*x509.Certificate, len(rawCerts))
-	for i, asn1Data := range rawCerts {
-		certs[i], _ = x509.ParseCertificate(asn1Data)
+	certs := make([]*x509.Certificate, 0, len(rawCerts))
+	for _, asn1Data := range rawCerts {
+		cert, err := x509.ParseCertificate(asn1Data)
+		if err != nil {
+			continue
+		}
+		certs = append(certs, cert)
 	}
 	if len(certs) == 0 {
 		return errors.New("unexpected certs")

@@ -127,7 +127,7 @@ func (c *client) dial(ctx context.Context) error {
 		case *internet.PacketConnWrapper:
 			pktConn = c.PacketConn
 		default:
-			panic(reflect.TypeOf(c))
+			return nil, errors.New("unexpected connection type: ", reflect.TypeOf(c))
 		}
 
 		return pktConn, nil
@@ -147,9 +147,12 @@ func (c *client) dial(ctx context.Context) error {
 			pktConn = c.PacketConn
 			udpAddr = conn.RemoteAddr().(*net.UDPAddr)
 		default:
-			panic(reflect.TypeOf(c))
+			return errors.New("unexpected connection type: ", reflect.TypeOf(c))
 		}
-		pktConn = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
+		pktConn, err = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
+		if err != nil {
+			return errors.New("failed to create udphop conn").Base(err)
+		}
 	} else {
 		conn, err := internet.DialSystem(ctx, c.dest, c.socketConfig)
 		if err != nil {
@@ -163,7 +166,7 @@ func (c *client) dial(ctx context.Context) error {
 			pktConn = &internet.FakePacketConn{Conn: c}
 			udpAddr = &net.UDPAddr{IP: c.RemoteAddr().(*net.TCPAddr).IP, Port: c.RemoteAddr().(*net.TCPAddr).Port}
 		default:
-			panic(reflect.TypeOf(c))
+			return errors.New("unexpected connection type: ", reflect.TypeOf(c))
 		}
 	}
 

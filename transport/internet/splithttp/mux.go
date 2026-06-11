@@ -2,9 +2,8 @@ package splithttp
 
 import (
 	"context"
-	"crypto/rand"
 	"math"
-	"math/big"
+	"math/rand/v2"
 	"sync/atomic"
 	"time"
 
@@ -104,8 +103,8 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		return m.newXmuxClient()
 	}
 
-	i, _ := rand.Int(rand.Reader, big.NewInt(int64(len(xmuxClients))))
-	xmuxClient := xmuxClients[i.Int64()]
+	i := rand.IntN(len(xmuxClients))
+	xmuxClient := xmuxClients[i]
 	if xmuxClient.leftUsage > 0 {
 		xmuxClient.leftUsage -= 1
 	}

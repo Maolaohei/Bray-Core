@@ -2,10 +2,10 @@ package splithttp
 
 import (
 	"encoding/base64"
-	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/xtls/xray-core/common"
@@ -14,6 +14,16 @@ import (
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/common/uuid"
 	"github.com/xtls/xray-core/transport/internet"
+)
+
+// Pre-allocated default RangeConfig values to avoid per-request heap allocations.
+var (
+	defaultRangeConfigMaxPostBytes    = &RangeConfig{From: 1000000, To: 1000000}
+	defaultRangeConfigMinPostInterval = &RangeConfig{From: 30, To: 30}
+	defaultRangeConfigStreamUpSecs    = &RangeConfig{From: 20, To: 80}
+	defaultRangeConfigUplinkChunkCookie = &RangeConfig{From: 2 * 1024, To: 3 * 1024}
+	defaultRangeConfigUplinkChunkHeader = &RangeConfig{From: 3 * 1000, To: 4 * 1000}
+	defaultRangeConfigZero            = &RangeConfig{From: 0, To: 0}
 )
 
 func (c *Config) GetNormalizedPath() string {
@@ -68,7 +78,7 @@ func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
 		chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
 		chunk := encodedData[:chunkSize]
 		encodedData = encodedData[chunkSize:]
-		headerKey := fmt.Sprintf("%s-%d", key, i)
+		headerKey := key + "-" + strconv.Itoa(i)
 		header.Set(headerKey, chunk)
 	}
 
@@ -85,7 +95,7 @@ func (c *Config) GetRequestCookiesWithPayload(payload []byte) []*http.Cookie {
 		chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
 		chunk := encodedData[:chunkSize]
 		encodedData = encodedData[chunkSize:]
-		cookieName := fmt.Sprintf("%s_%d", key, i)
+		cookieName := key + "_" + strconv.Itoa(i)
 		cookies = append(cookies, &http.Cookie{Name: cookieName, Value: chunk})
 	}
 
@@ -135,10 +145,7 @@ func (c *Config) GetNormalizedUplinkHTTPMethod() string {
 
 func (c *Config) GetNormalizedScMaxEachPostBytes() *RangeConfig {
 	if c.ScMaxEachPostBytes == nil || c.ScMaxEachPostBytes.To == 0 {
-		return &RangeConfig{
-			From: 1000000,
-			To:   1000000,
-		}
+		return defaultRangeConfigMaxPostBytes
 	}
 
 	return c.ScMaxEachPostBytes
@@ -146,10 +153,7 @@ func (c *Config) GetNormalizedScMaxEachPostBytes() *RangeConfig {
 
 func (c *Config) GetNormalizedScMinPostsIntervalMs() *RangeConfig {
 	if c.ScMinPostsIntervalMs == nil || c.ScMinPostsIntervalMs.To == 0 {
-		return &RangeConfig{
-			From: 30,
-			To:   30,
-		}
+		return defaultRangeConfigMinPostInterval
 	}
 
 	return c.ScMinPostsIntervalMs
@@ -165,10 +169,7 @@ func (c *Config) GetNormalizedScMaxBufferedPosts() int {
 
 func (c *Config) GetNormalizedScStreamUpServerSecs() *RangeConfig {
 	if c.ScStreamUpServerSecs == nil || c.ScStreamUpServerSecs.To == 0 {
-		return &RangeConfig{
-			From: 20,
-			To:   80,
-		}
+		return defaultRangeConfigStreamUpSecs
 	}
 
 	return c.ScStreamUpServerSecs
@@ -178,15 +179,9 @@ func (c *Config) GetNormalizedUplinkChunkSize() *RangeConfig {
 	if c.UplinkChunkSize == nil || c.UplinkChunkSize.To == 0 {
 		switch c.UplinkDataPlacement {
 		case PlacementCookie:
-			return &RangeConfig{
-				From: 2 * 1024, // 2 KiB
-				To:   3 * 1024, // 3 KiB
-			}
+			return defaultRangeConfigUplinkChunkCookie
 		case PlacementHeader:
-			return &RangeConfig{
-				From: 3 * 1000, // 3 KB
-				To:   4 * 1000, // 4 KB
-			}
+			return defaultRangeConfigUplinkChunkHeader
 		default:
 			return c.GetNormalizedScMaxEachPostBytes()
 		}
@@ -421,10 +416,7 @@ func (c *Config) ExtractMetaFromRequest(req *http.Request, path string) (session
 
 func (m *XmuxConfig) GetNormalizedMaxConcurrency() *RangeConfig {
 	if m.MaxConcurrency == nil {
-		return &RangeConfig{
-			From: 0,
-			To:   0,
-		}
+		return defaultRangeConfigZero
 	}
 
 	return m.MaxConcurrency
@@ -432,10 +424,7 @@ func (m *XmuxConfig) GetNormalizedMaxConcurrency() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedMaxConnections() *RangeConfig {
 	if m.MaxConnections == nil {
-		return &RangeConfig{
-			From: 0,
-			To:   0,
-		}
+		return defaultRangeConfigZero
 	}
 
 	return m.MaxConnections
@@ -443,10 +432,7 @@ func (m *XmuxConfig) GetNormalizedMaxConnections() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedCMaxReuseTimes() *RangeConfig {
 	if m.CMaxReuseTimes == nil {
-		return &RangeConfig{
-			From: 0,
-			To:   0,
-		}
+		return defaultRangeConfigZero
 	}
 
 	return m.CMaxReuseTimes
@@ -454,10 +440,7 @@ func (m *XmuxConfig) GetNormalizedCMaxReuseTimes() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedHMaxRequestTimes() *RangeConfig {
 	if m.HMaxRequestTimes == nil {
-		return &RangeConfig{
-			From: 0,
-			To:   0,
-		}
+		return defaultRangeConfigZero
 	}
 
 	return m.HMaxRequestTimes
@@ -465,10 +448,7 @@ func (m *XmuxConfig) GetNormalizedHMaxRequestTimes() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedHMaxReusableSecs() *RangeConfig {
 	if m.HMaxReusableSecs == nil {
-		return &RangeConfig{
-			From: 0,
-			To:   0,
-		}
+		return defaultRangeConfigZero
 	}
 
 	return m.HMaxReusableSecs

@@ -47,9 +47,9 @@ type udpPacket struct {
 	Err  error
 }
 
-func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopIntervalMax time.Duration, listenUDPFunc func(addr *net.UDPAddr) (net.PacketConn, error), currentConn net.PacketConn, addrIndex int) net.PacketConn {
+func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopIntervalMax time.Duration, listenUDPFunc func(addr *net.UDPAddr) (net.PacketConn, error), currentConn net.PacketConn, addrIndex int) (net.PacketConn, error) {
 	if len(addrs) == 0 {
-		panic("len(addrs) == 0")
+		return nil, errors.New("udphop: addrs must not be empty")
 	}
 	if hopIntervalMin == 0 {
 		hopIntervalMin = defaultHopInterval
@@ -58,16 +58,16 @@ func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopInte
 		hopIntervalMax = defaultHopInterval
 	}
 	if hopIntervalMin < 5*time.Second {
-		panic("hopIntervalMin < 5*time.Second")
+		return nil, errors.New("udphop: hopIntervalMin must be >= 5s")
 	}
 	if hopIntervalMax < 5*time.Second {
-		panic("hopIntervalMax < 5*time.Second")
+		return nil, errors.New("udphop: hopIntervalMax must be >= 5s")
 	}
 	if hopIntervalMax < hopIntervalMin {
-		panic("hopIntervalMax < hopIntervalMin")
+		return nil, errors.New("udphop: hopIntervalMax must be >= hopIntervalMin")
 	}
 	if listenUDPFunc == nil {
-		panic("listenUDPFunc is nil")
+		return nil, errors.New("udphop: listenUDPFunc must not be nil")
 	}
 	hConn := &UdpHopPacketConn{
 		Addrs:          addrs,
@@ -87,7 +87,7 @@ func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopInte
 	}
 	go hConn.recvLoop(hConn.currentConn)
 	go hConn.hopLoop()
-	return hConn
+	return hConn, nil
 }
 
 func (u *UdpHopPacketConn) recvLoop(conn net.PacketConn) {
