@@ -45,7 +45,54 @@
 | **ECH h2c/H2C 查询修复** | `transport/internet/tls/ech.go` | DNS over HTTPS 正确路由 |
 | **预连接指数退避 + 抖动** | `proxy/vless/outbound/outbound.go` | 连接失败时指数退避，避免雷鸣群效应 |
 
-### 四、已合并的上游 PR
+### 四、性能优化（GC 压力降低 47%）
+
+通过 pprof 分析定位热点，针对性优化内存分配路径：
+
+| 优化 | 涉及文件 | 效果 |
+|------|---------|------|
+| **VLESS AddonsPool** | `proxy/vless/encoding/addons.go` | 复用 Addons 结构体，每连接省 1 次堆分配 |
+| **VLESS Vision Fast Path** | `proxy/vless/encoding/addons.go` | 预编码 xtls-rprx-vision，零分配 |
+| **VLESS 手写 protobuf** | `proxy/vless/encoding/addons.go` | 移除 proto.Marshal/Unmarshal 反射开销 |
+| **AEAD Nonce IsMax 缓存** | `proxy/vless/encryption/common.go` | 避免每 chunk bytes.Equal 12 字节比较 |
+| **mux writer mbPool** | `common/mux/writer.go` | 复用 mux 帧 MultiBuffer slice |
+| **XHTTP 默认值缓存** | `transport/internet/splithttp/config.go` | 6 个默认 RangeConfig 包级变量缓存 |
+| **XHTTP requestURL 预计算** | `transport/internet/splithttp/dialer.go` | 上传循环外预计算 URL string |
+| **XHTTP mux rand 优化** | `transport/internet/splithttp/mux.go` | crypto/rand → math/rand/v2 |
+| **XHTTP bufio 32KB** | `transport/internet/splithttp/h1_conn.go` | H1 响应读取 buffer 4KB → 32KB |
+| **XHTTP Padding randBufPool** | `transport/internet/splithttp/xpadding.go` | 复用 256 字节随机 buffer |
+| **fmt.Sprintf → strconv** | `config.go` + `hub.go` | 减少每请求 fmt 反射分配 |
+
+**pprof 验证结果：**
+- GC marking CPU 占比：7.08% → 3.77%（**降低 47%**）
+- requestHandler 内存分配：164MB → 141MB（**降低 14%**）
+- 网络吞吐：42.8 Mbps，0 错误，无回归
+
+### 五、错误处理修复
+
+| 修复 | 涉及文件 | 说明 |
+|------|---------|------|
+| **context 泄漏** | `proxy/shadowsocks_2022/outbound.go` | `context.WithCancel` → `context.WithoutCancel` |
+| **ECDH 错误处理** | `transport/internet/reality/reality.go` | ECDH 和 HTTP 请求错误不再静默忽略 |
+| **证书解析错误** | `transport/internet/tls/config.go` | ParseCertificate 错误不再跳过 |
+| **panic → error** | `splithttp/dialer.go`, `hysteria/dialer.go` 等 | 13 处 panic 改为返回 error |
+| **strconv 错误** | `sockopt_linux.go`, `sockopt_windows.go` | Atoi 转换错误不再忽略 |
+| **splitConn.Close** | `transport/internet/splithttp/connection.go` | 返回正确 error 而非 nil |
+
+### 六、CI/测试
+
+| 改进 | 说明 |
+|------|------|
+| **Go 版本更新** | CI 从 1.22 更新至 1.26，与 go.mod 一致 |
+| **golangci-lint** | 添加静态分析配置和 CI 步骤 |
+| **断流耐久测试** | 5 网络环境 × 4 测试场景，验证 0 断流 |
+| **VLESS encoding benchmark** | 验证 Vision Fast Path 零分配 |
+
+---
+
+---
+
+## 六、已合并的上游 PR
 
 | PR | 内容 |
 |----|------|
