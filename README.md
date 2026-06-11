@@ -3,6 +3,11 @@
 基于 [Xray-core](https://github.com/XTLS/Xray-core) 的高性能定制分支。
 
 ---
+## 基于Bray-Core的定制版
+**除内核外原汁原味**
+[V2rayNG](https://github.com/Maolaohei/v2rayNG/releases) Frok (2dust/v2rayNG)
+
+
 
 ## 设计原则
 
