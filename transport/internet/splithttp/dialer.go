@@ -78,7 +78,16 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 	}
 
 	xmuxClient := xmuxManager.GetXmuxClient(ctx)
-	return xmuxClient.XmuxConn.(DialerClient), xmuxClient
+	client := xmuxClient.XmuxConn.(DialerClient)
+
+	// Set RTT callback on DefaultDialerClient for RTT-aware scheduling
+	if dc, ok := client.(*DefaultDialerClient); ok {
+		dc.SetOnRTT(func(rtt time.Duration) {
+			xmuxClient.UpdateRTT(rtt)
+		})
+	}
+
+	return client, xmuxClient
 }
 
 func decideHTTPVersion(tlsConfig *tls.Config, realityConfig *reality.Config) string {

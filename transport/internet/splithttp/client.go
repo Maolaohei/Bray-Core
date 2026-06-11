@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -36,10 +37,18 @@ type DefaultDialerClient struct {
 	// pool of net.Conn, created using dialUploadConn
 	uploadRawPool  *sync.Pool
 	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
+	// onRTT is called after each request completes with the measured RTT.
+	// Used for RTT-aware scheduling in XmuxManager.
+	onRTT func(rtt time.Duration)
 }
 
 func (c *DefaultDialerClient) IsClosed() bool {
 	return c.closed
+}
+
+// SetOnRTT sets the callback for RTT measurement.
+func (c *DefaultDialerClient) SetOnRTT(fn func(rtt time.Duration)) {
+	c.onRTT = fn
 }
 
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
@@ -101,10 +110,16 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 	c.transportConfig.FillPacketRequest(req, sessionId, seqStr, payload)
 
 	if c.httpVersion != "1.1" {
+		start := time.Now()
 		resp, err := c.client.Do(req)
 		if err != nil {
 			c.closed = true
 			return err
+		}
+
+		// Record RTT for RTT-aware scheduling
+		if c.onRTT != nil {
+			c.onRTT(time.Since(start))
 		}
 
 		io.Copy(io.Discard, resp.Body)
