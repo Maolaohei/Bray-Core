@@ -27,16 +27,49 @@ type XmuxManager struct {
 	connections int32
 	newConnFunc func() XmuxConn
 	xmuxClients []*XmuxClient
+	stopCh      chan struct{}
 }
 
 func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
-	return &XmuxManager{
+	m := &XmuxManager{
 		xmuxConfig:  xmuxConfig,
 		concurrency: xmuxConfig.GetNormalizedMaxConcurrency().rand(),
 		connections: xmuxConfig.GetNormalizedMaxConnections().rand(),
 		newConnFunc: newConnFunc,
 		xmuxClients: make([]*XmuxClient, 0),
+		stopCh:      make(chan struct{}),
 	}
+
+	// Start pre-connect goroutine to maintain warm connections.
+	// This reduces first-connection latency for new requests.
+	go m.preConnectLoop()
+
+	return m
+}
+
+// preConnectLoop maintains at least 1 warm connection in the pool.
+// It runs in the background and creates new connections when the pool is empty.
+func (m *XmuxManager) preConnectLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			// Only pre-connect if pool is empty or all connections are busy
+			if len(m.xmuxClients) == 0 {
+				errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient because pool is empty")
+				m.newXmuxClient()
+			}
+		}
+	}
+}
+
+// Close stops the pre-connect goroutine.
+func (m *XmuxManager) Close() {
+	close(m.stopCh)
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
