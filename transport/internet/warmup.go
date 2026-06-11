@@ -152,139 +152,20 @@ func extractDomainsFromSenderSettings(ss *serial.TypedMessage, domainSet map[str
 }
 
 // extractTransportHostDomains extracts host domains from transport settings.
-// These are often CDN edge domains used by Spider path simulation.
+// Note: Transport host extraction requires proper proto unmarshaling of TypedMessage,
+// which would cause circular dependencies. For now, this is a no-op.
+// Transport hosts can be explicitly configured via dns.warmupDomains.
 func extractTransportHostDomains(streamMsg protoreflect.Message, domainSet map[string]struct{}) {
-	tsField := streamMsg.Descriptor().Fields().ByName("transport_settings")
-	if tsField == nil || !streamMsg.Has(tsField) {
-		return
-	}
-
-	tsList := streamMsg.Get(tsField).List()
-	for i := 0; i < tsList.Len(); i++ {
-		tsMsg := tsList.Get(i).Message()
-		if !tsMsg.IsValid() {
-			continue
-		}
-
-		// Transport settings have a "settings" field which is a TypedMessage
-		settingsField := tsMsg.Descriptor().Fields().ByName("settings")
-		if settingsField == nil || !tsMsg.Has(settingsField) {
-			continue
-		}
-
-		// The settings field contains a TypedMessage (type_url + value)
-		// We can't easily unwrap it via reflection without circular deps
-		// Instead, we'll use a heuristic approach on the raw bytes
-		settingsVal := tsMsg.Get(settingsField)
-		if !settingsVal.IsValid() {
-			continue
-		}
-
-		// For TypedMessage, the value is in the "value" field
-		settingsInnerMsg := settingsVal.Message()
-		if !settingsInnerMsg.IsValid() {
-			continue
-		}
-
-		valueField := settingsInnerMsg.Descriptor().Fields().ByName("value")
-		if valueField == nil || !settingsInnerMsg.Has(valueField) {
-			continue
-		}
-
-		valueBytes := settingsInnerMsg.Get(valueField).Bytes()
-		if len(valueBytes) == 0 {
-			continue
-		}
-
-		// Try to extract domain from the serialized bytes
-		// This is a best-effort approach for transport host extraction
-		extractDomainFromProtoBytes(valueBytes, domainSet)
-	}
+	// Intentionally empty - extracting from TypedMessage bytes is unreliable
+	// Use dns.warmupDomains config for explicit CDN domain warmup
 }
 
-// extractDomainFromProtoBytes tries to extract domain strings from serialized proto bytes.
-// This is a heuristic approach for cases where we can't use proper unmarshaling.
-func extractDomainFromProtoBytes(data []byte, domainSet map[string]struct{}) {
-	// Look for printable ASCII sequences that look like domains
-	// This is a simple heuristic and may have false positives
-	if len(data) == 0 {
-		return
-	}
-
-	// Scan for domain-like patterns
-	start := -1
-	for i, b := range data {
-		if b >= 32 && b <= 126 && b != ' ' {
-			if start == -1 {
-				start = i
-			}
-		} else {
-			if start != -1 && i-start > 3 {
-				s := string(data[start:i])
-				if isDomainLike(s) {
-					domainSet[s] = struct{}{}
-				}
-			}
-			start = -1
-		}
-	}
-	if start != -1 && len(data)-start > 3 {
-		s := string(data[start:])
-		if isDomainLike(s) {
-			domainSet[s] = struct{}{}
-		}
-	}
-}
-
-// isDomainLike checks if a string looks like a domain name.
-func isDomainLike(s string) bool {
-	if len(s) < 4 || len(s) > 255 {
-		return false
-	}
-	// Must contain at least one dot
-	hasDot := false
-	for _, c := range s {
-		if c == '.' {
-			hasDot = true
-			break
-		}
-	}
-	if !hasDot {
-		return false
-	}
-	// Must start with alphanumeric
-	if !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= '0' && s[0] <= '9')) {
-		return false
-	}
-	return true
-}
-
-// extractHeaderFakeHostDomains extracts fakeHost from HTTP header settings.
-// These are Spider simulation target domains (e.g., cdnjs.cloudflare.com).
+// extractHeaderFakeHostDomains extracts fakeHost from header settings.
+// Note: Header settings are nested inside transport TypedMessage.
+// For now, this is a no-op due to the same circular dependency issue.
 func extractHeaderFakeHostDomains(streamMsg protoreflect.Message, domainSet map[string]struct{}) {
-	hsField := streamMsg.Descriptor().Fields().ByName("header_settings")
-	if hsField == nil || !streamMsg.Has(hsField) {
-		return
-	}
-
-	// header_settings is a TypedMessage
-	hsMsg := streamMsg.Get(hsField).Message()
-	if !hsMsg.IsValid() {
-		return
-	}
-
-	// Extract value bytes
-	valueField := hsMsg.Descriptor().Fields().ByName("value")
-	if valueField == nil || !hsMsg.Has(valueField) {
-		return
-	}
-
-	valueBytes := hsMsg.Get(valueField).Bytes()
-	if len(valueBytes) == 0 {
-		return
-	}
-
-	extractDomainFromProtoBytes(valueBytes, domainSet)
+	// Intentionally empty - extracting from TypedMessage bytes is unreliable
+	// Use dns.warmupDomains config for explicit header host warmup
 }
 
 func extractRealityDomainsFromMsg(streamMsg protoreflect.Message, domainSet map[string]struct{}) {

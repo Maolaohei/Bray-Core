@@ -246,31 +246,7 @@ func initInstanceWithConfig(config *Config, server *Instance) (bool, error) {
 	}
 
 	// Start warmup pipeline: DNS → Happy Eyeballs → PreConnect → XMUX
-	go func() {
-		obm, _ := server.GetFeature(outbound.ManagerType()).(outbound.Manager)
-		if obm == nil {
-			return
-		}
-
-		// Wait a moment for outbound handlers to be fully registered
-		time.Sleep(500 * time.Millisecond)
-
-		// Extract domains from outbound config
-		domains := internet.ExtractWarmupDomains(obm)
-		if len(domains) == 0 {
-			return
-		}
-
-		errors.LogInfo(server.ctx, "DNS warmup: pre-resolving ", len(domains), " outbound domains")
-
-		// DNS warmup happens via the DNS module's Start()
-		// The warmup pipeline for pre-connecting is handled by XMUX's preConnectLoop
-		// which now benefits from the warmed DNS cache
-
-		// TODO: Enqueue warmup targets to XmuxManager when available
-		// This requires access to the XmuxManager instances, which are created per-destination
-		// For now, the DNS cache warming is sufficient for the preConnectLoop
-	}()
+	// Warmup is triggered by DNS.WarmupNow() after outbound handlers are registered
 
 	server.resolveLock.Lock()
 	if server.pendingResolutions != nil {

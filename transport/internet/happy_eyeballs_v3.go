@@ -55,6 +55,7 @@ type HappyIPRecord struct {
 	fails       atomic.Int64
 	successes   atomic.Int64
 	smoothedRTT atomic.Int64 // nanoseconds, EWMA
+	lastSeen    atomic.Int64 // Unix timestamp of last activity
 }
 
 func (r *HappyIPRecord) getFails() int         { return int(r.fails.Load()) }
@@ -62,6 +63,7 @@ func (r *HappyIPRecord) getSuccesses() int     { return int(r.successes.Load()) 
 func (r *HappyIPRecord) getSmoothedRTT() int64 { return r.smoothedRTT.Load() }
 
 func (r *HappyIPRecord) recordSuccess(rtt time.Duration) {
+	r.lastSeen.Store(time.Now().Unix())
 	r.successes.Add(1)
 	newRTT := int64(rtt)
 	for {
@@ -79,6 +81,7 @@ func (r *HappyIPRecord) recordSuccess(rtt time.Duration) {
 }
 
 func (r *HappyIPRecord) recordFail() {
+	r.lastSeen.Store(time.Now().Unix())
 	r.fails.Add(1)
 }
 
@@ -88,8 +91,19 @@ type HappyIPDB struct {
 	records map[string]*HappyIPRecord
 }
 
+const (
+	// ipRecordTTL is how long an IP record lives without activity.
+	ipRecordTTL = 10 * time.Minute
+	// ipRecordCleanupInterval is how often to run cleanup.
+	ipRecordCleanupInterval = 5 * time.Minute
+)
+
 var globalHappyIPDB = &HappyIPDB{
 	records: make(map[string]*HappyIPRecord),
+}
+
+func init() {
+	go globalHappyIPDB.cleanupLoop()
 }
 
 func (db *HappyIPDB) get(ip string) *HappyIPRecord {
@@ -105,9 +119,35 @@ func (db *HappyIPDB) get(ip string) *HappyIPRecord {
 	if r, ok = db.records[ip]; ok {
 		return r
 	}
-	r = &HappyIPRecord{}
+	r = &HappyIPRecord{lastSeen: atomic.Int64{}}
+	r.lastSeen.Store(time.Now().Unix())
 	db.records[ip] = r
 	return r
+}
+
+// cleanupLoop periodically removes expired IP records.
+func (db *HappyIPDB) cleanupLoop() {
+	ticker := time.NewTicker(ipRecordCleanupInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		db.cleanup()
+	}
+}
+
+// cleanup removes IP records that haven't been seen within TTL.
+func (db *HappyIPDB) cleanup() {
+	now := time.Now().Unix()
+	cutoff := now - int64(ipRecordTTL.Seconds())
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	for ip, record := range db.records {
+		if record.lastSeen.Load() < cutoff {
+			delete(db.records, ip)
+		}
+	}
 }
 
 // scoreIPs scores and sorts IPs by v3 priority. Lower score = higher priority.
