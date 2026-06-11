@@ -64,9 +64,8 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		stopCh:      make(chan struct{}),
 	}
 
-	// Start background goroutines for connection management.
+	// Start pre-connect goroutine to maintain warm connections.
 	go m.preConnectLoop()
-	go m.healthCheckLoop()
 
 	return m
 }
