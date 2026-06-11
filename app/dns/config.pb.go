@@ -258,6 +258,7 @@ type Config struct {
 	DisableFallback        bool          `protobuf:"varint,10,opt,name=disableFallback,proto3" json:"disableFallback,omitempty"`
 	DisableFallbackIfMatch bool          `protobuf:"varint,11,opt,name=disableFallbackIfMatch,proto3" json:"disableFallbackIfMatch,omitempty"`
 	EnableParallelQuery    bool          `protobuf:"varint,14,opt,name=enableParallelQuery,proto3" json:"enableParallelQuery,omitempty"`
+	WarmupDomains          []string      `protobuf:"bytes,15,rep,name=warmup_domains,json=warmupDomains,proto3" json:"warmup_domains,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -367,6 +368,13 @@ func (x *Config) GetEnableParallelQuery() bool {
 		return x.EnableParallelQuery
 	}
 	return false
+}
+
+func (x *Config) GetWarmupDomains() []string {
+	if x != nil {
+		return x.WarmupDomains
+	}
+	return nil
 }
 
 type Config_HostMapping struct {

@@ -180,8 +180,41 @@ func TestSortIPScores(t *testing.T) {
 }
 
 func TestDefaultRTT(t *testing.T) {
-	if defaultRTT() != 500*time.Millisecond {
-		t.Errorf("expected 500ms default RTT, got %d", defaultRTT())
+	if defaultSmoothedRTT != 100*time.Millisecond {
+		t.Errorf("expected 100ms default RTT, got %d", defaultSmoothedRTT)
+	}
+}
+
+func TestClampRTT(t *testing.T) {
+	// Zero RTT → default
+	if got := clampRTT(0); got != int64(defaultSmoothedRTT) {
+		t.Errorf("clampRTT(0) = %d, want %d", got, defaultSmoothedRTT)
+	}
+	// Normal RTT → unchanged
+	if got := clampRTT(200e6); got != 200e6 {
+		t.Errorf("clampRTT(200ms) = %d, want 200ms", got)
+	}
+	// Over cap → capped
+	if got := clampRTT(2000e6); got != int64(maxRTTCap) {
+		t.Errorf("clampRTT(2s) = %d, want %d", got, maxRTTCap)
+	}
+}
+
+func TestScore_NoRTTNotDominant(t *testing.T) {
+	// New IP with no RTT sample should NOT beat a known-good 20ms IP
+	known := HappyIPScore{IP: net.ParseIP("1.1.1.1"), RTT: 20e6, Successes: 10, Fails: 0}
+	newIP := HappyIPScore{IP: net.ParseIP("2.2.2.2"), RTT: 0, Successes: 0, Fails: 0}
+	if newIP.score() < known.score() {
+		t.Errorf("new IP (RTT=0) scored %.0f < known IP (RTT=20ms) %.0f — should not happen", newIP.score(), known.score())
+	}
+}
+
+func TestScore_HighRTTNotInverted(t *testing.T) {
+	// High RTT IP should NOT beat low RTT IP
+	low := HappyIPScore{IP: net.ParseIP("1.1.1.1"), RTT: 20e6, Successes: 10, Fails: 0}
+	high := HappyIPScore{IP: net.ParseIP("2.2.2.2"), RTT: 3000e6, Successes: 10, Fails: 0}
+	if high.score() < low.score() {
+		t.Errorf("high RTT (%.0f) scored lower than low RTT (%.0f) — score inversion", high.score(), low.score())
 	}
 }
 

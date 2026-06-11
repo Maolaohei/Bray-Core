@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -232,6 +233,45 @@ func initInstanceWithConfig(config *Config, server *Instance) (bool, error) {
 		}(),
 	)
 
+	// Set up DNS warmup domain extraction from outbound configuration
+	if dnsClient, ok := server.GetFeature(dns.ClientType()).(interface {
+		SetWarmupDomainExtractor(fn func() []string)
+	}); ok {
+		obm, _ := server.GetFeature(outbound.ManagerType()).(outbound.Manager)
+		if obm != nil {
+			dnsClient.SetWarmupDomainExtractor(func() []string {
+				return internet.ExtractWarmupDomains(obm)
+			})
+		}
+	}
+
+	// Start warmup pipeline: DNS → Happy Eyeballs → PreConnect → XMUX
+	go func() {
+		obm, _ := server.GetFeature(outbound.ManagerType()).(outbound.Manager)
+		if obm == nil {
+			return
+		}
+
+		// Wait a moment for outbound handlers to be fully registered
+		time.Sleep(500 * time.Millisecond)
+
+		// Extract domains from outbound config
+		domains := internet.ExtractWarmupDomains(obm)
+		if len(domains) == 0 {
+			return
+		}
+
+		errors.LogInfo(server.ctx, "DNS warmup: pre-resolving ", len(domains), " outbound domains")
+
+		// DNS warmup happens via the DNS module's Start()
+		// The warmup pipeline for pre-connecting is handled by XMUX's preConnectLoop
+		// which now benefits from the warmed DNS cache
+
+		// TODO: Enqueue warmup targets to XmuxManager when available
+		// This requires access to the XmuxManager instances, which are created per-destination
+		// For now, the DNS cache warming is sufficient for the preConnectLoop
+	}()
+
 	server.resolveLock.Lock()
 	if server.pendingResolutions != nil {
 		server.resolveLock.Unlock()
@@ -246,6 +286,31 @@ func initInstanceWithConfig(config *Config, server *Instance) (bool, error) {
 	if err := addOutboundHandlers(server, config.Outbound); err != nil {
 		return true, err
 	}
+
+	// Trigger DNS warmup after outbound handlers are registered
+	// This ensures ExtractWarmupDomains can find all node domains
+	go func() {
+		time.Sleep(1 * time.Second) // Wait for handlers to be fully registered
+
+		dnsClient, ok := server.GetFeature(dns.ClientType()).(interface {
+			WarmupNow()
+		})
+		if !ok {
+			return
+		}
+
+		obm, _ := server.GetFeature(outbound.ManagerType()).(outbound.Manager)
+		if obm == nil {
+			return
+		}
+
+		domains := internet.ExtractWarmupDomains(obm)
+		if len(domains) > 0 {
+			errors.LogInfo(server.ctx, "warmup: pre-resolving ", len(domains), " outbound domains after handler registration")
+			dnsClient.WarmupNow()
+		}
+	}()
+
 	return false, nil
 }
 

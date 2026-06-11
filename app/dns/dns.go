@@ -36,6 +36,9 @@ type DNS struct {
 	// warmupDomains are resolved asynchronously after Start() to
 	// prime the DNS cache for faster cold-start lookups.
 	warmupDomains []string
+	// extractWarmupDomains is a function that extracts domains from outbound
+	// configuration (node domains, REALITY, etc.) for DNS warmup.
+	extractWarmupDomains func() []string
 }
 
 // DomainMatcherInfo contains information attached to index returned by Server.domainMatcher.
@@ -195,18 +198,28 @@ func (*DNS) Type() interface{} {
 
 // Start implements common.Runnable.
 func (s *DNS) Start() error {
-	domains := s.warmupDomains
-	if len(domains) == 0 {
-		// Default warmup domains for common services
-		domains = []string{
-			"www.google.com",
-			"www.youtube.com",
-			"github.com",
-			"www.baidu.com",
-			"www.cloudflare.com",
+	// Start with domains extracted from outbound configuration
+	var domains []string
+	if s.extractWarmupDomains != nil {
+		domains = s.extractWarmupDomains()
+	}
+
+	// Append user-configured warmupDomains (deduplicated)
+	if len(s.warmupDomains) > 0 {
+		seen := make(map[string]struct{}, len(domains))
+		for _, d := range domains {
+			seen[d] = struct{}{}
+		}
+		for _, d := range s.warmupDomains {
+			if _, exists := seen[d]; !exists {
+				domains = append(domains, d)
+			}
 		}
 	}
-	go s.warmup(domains)
+
+	if len(domains) > 0 {
+		go s.warmup(domains)
+	}
 	return nil
 }
 
@@ -214,6 +227,41 @@ func (s *DNS) Start() error {
 // or on network change. Call before Start() or after a network event.
 func (s *DNS) SetWarmupDomains(domains []string) {
 	s.warmupDomains = domains
+}
+
+// SetWarmupDomainExtractor sets a function that extracts warmup domains from
+// outbound configuration. Called from core/xray.go after outbound handlers
+// are registered. If no explicit warmupDomains are configured, this function
+// is used to automatically discover domains from node configs, REALITY, etc.
+func (s *DNS) SetWarmupDomainExtractor(fn func() []string) {
+	s.extractWarmupDomains = fn
+}
+
+// WarmupNow triggers an immediate warmup using the configured extractor.
+// Called from core/xray.go after outbound handlers are registered.
+func (s *DNS) WarmupNow() {
+	var domains []string
+	if s.extractWarmupDomains != nil {
+		domains = s.extractWarmupDomains()
+	}
+
+	// Append user-configured warmupDomains (deduplicated)
+	if len(s.warmupDomains) > 0 {
+		seen := make(map[string]struct{}, len(domains))
+		for _, d := range domains {
+			seen[d] = struct{}{}
+		}
+		for _, d := range s.warmupDomains {
+			if _, exists := seen[d]; !exists {
+				domains = append(domains, d)
+			}
+		}
+	}
+
+	if len(domains) > 0 {
+		errors.LogInfo(s.ctx, "DNS warmup now: pre-resolving ", len(domains), " domains")
+		go s.warmup(domains)
+	}
 }
 
 // warmup resolves the given domains in the background to prime the DNS

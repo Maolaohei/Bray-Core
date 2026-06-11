@@ -176,8 +176,8 @@ func tcpRaceDialV3(ctx context.Context, src net.Address, ips []net.IP, port net.
 						record.recordSuccess(r.rtt)
 						tryController.OnSuccess(r.rtt)
 					} else {
-						record.recordSuccess(defaultRTT())
-						tryController.OnSuccess(defaultRTT())
+						record.recordSuccess(defaultSmoothedRTT)
+						tryController.OnSuccess(defaultSmoothedRTT)
 					}
 
 					cancel()

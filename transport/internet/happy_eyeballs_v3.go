@@ -18,16 +18,35 @@ type HappyIPScore struct {
 	Fails     int
 }
 
+const (
+	// defaultSmoothedRTT is the assumed RTT (in ns) for IPs with no sample.
+	// 100ms is conservative enough to not dominate scoring but high enough
+	// to not let unsampled IPs always win.
+	defaultSmoothedRTT = 100 * time.Millisecond
+
+	// maxRTTCap is the upper bound for RTT in scoring (in ns).
+	// Prevents pathological RTTs from inverting the score.
+	maxRTTCap = 999 * time.Millisecond
+)
+
+// clampRTT caps RTT at maxRTTCap. If rtt is 0 (no sample), returns defaultSmoothedRTT.
+func clampRTT(rtt int64) int64 {
+	if rtt == 0 {
+		return int64(defaultSmoothedRTT)
+	}
+	if rtt > int64(maxRTTCap) {
+		return int64(maxRTTCap)
+	}
+	return rtt
+}
+
 // score computes a composite priority score. Lower is better.
 func (s *HappyIPScore) score() float64 {
-	if s.Successes+s.Fails == 0 {
-		return float64(s.Priority)*1e9 + float64(s.RTT)
+	failRate := float64(0)
+	if s.Successes+s.Fails > 0 {
+		failRate = float64(s.Fails) / float64(s.Successes+s.Fails)
 	}
-	failRate := float64(s.Fails) / float64(s.Successes+s.Fails)
-	rttScore := float64(s.RTT)
-	if s.RTT == 0 {
-		rttScore = 500e6 // default 500ms for unknown RTT
-	}
+	rttScore := float64(clampRTT(s.RTT))
 	return float64(s.Priority)*1e9 + rttScore*(1+failRate*10)
 }
 
@@ -186,8 +205,4 @@ func (tc *TryController) OnFail() {
 		newDelay = 1 * time.Second
 	}
 	tc.currentDelay.Store(int64(newDelay))
-}
-
-func defaultRTT() time.Duration {
-	return 500 * time.Millisecond
 }
