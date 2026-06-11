@@ -69,36 +69,34 @@ func (t *Handler) Start() error {
 		return err
 	}
 
-	if t.config.AutoOutboundsInterface != "" {
-		tunIndex, err := tunInterface.Index()
-		if err != nil {
-			_ = tunInterface.Close()
-			return err
-		}
-		if t.config.AutoOutboundsInterface == "auto" {
-			t.config.AutoOutboundsInterface = ""
-		}
-		updater = &InterfaceUpdater{tunIndex: tunIndex, fixedName: t.config.AutoOutboundsInterface}
-		updater.Start()
-		internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
-			iface := updater.Get()
-			if iface == nil {
-				errors.LogInfo(context.Background(), "[tun] falied to set interface > iface == nil")
-				return nil
-			}
-			return c.Control(func(fd uintptr) {
-				addrPort, _ := netip.ParseAddrPort(address)
-				// skip loopback
-				if addrPort.Addr().IsLoopback() || strings.HasPrefix(strings.ToLower(address), "localhost:") {
-					return
-				}
-				err := setinterface(network, address, fd, iface)
-				if err != nil {
-					errors.LogInfoInner(context.Background(), err, "[tun] falied to set interface")
-				}
-			})
-		})
+	tunIndex, err := tunInterface.Index()
+	if err != nil {
+		_ = tunInterface.Close()
+		return err
 	}
+	if t.config.AutoOutboundsInterface == "auto" {
+		t.config.AutoOutboundsInterface = ""
+	}
+	updater = &InterfaceUpdater{tunIndex: tunIndex, fixedName: t.config.AutoOutboundsInterface}
+	updater.Start()
+	internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
+		iface := updater.Get()
+		if iface == nil {
+			errors.LogInfo(context.Background(), "[tun] falied to set interface > iface == nil")
+			return nil
+		}
+		return c.Control(func(fd uintptr) {
+			addrPort, _ := netip.ParseAddrPort(address)
+			// skip loopback
+			if addrPort.Addr().IsLoopback() || strings.HasPrefix(strings.ToLower(address), "localhost:") {
+				return
+			}
+			err := setinterface(network, address, fd, iface)
+			if err != nil {
+				errors.LogInfoInner(context.Background(), err, "[tun] falied to set interface")
+			}
+		})
+	})
 
 	errors.LogInfo(t.ctx, tunName, " created")
 
