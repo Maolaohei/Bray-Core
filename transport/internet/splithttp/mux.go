@@ -19,6 +19,30 @@ type XmuxClient struct {
 	leftUsage    int32
 	LeftRequests atomic.Int32
 	UnreusableAt time.Time
+	lastRTT      atomic.Int64 // nanoseconds, for RTT-aware scheduling
+}
+
+// UpdateRTT updates the smoothed RTT for this connection using EWMA.
+func (c *XmuxClient) UpdateRTT(rtt time.Duration) {
+	newRTT := int64(rtt)
+	for {
+		old := c.lastRTT.Load()
+		var smoothed int64
+		if old == 0 {
+			smoothed = newRTT
+		} else {
+			// EWMA: 80% old + 20% new
+			smoothed = (old*8 + newRTT*2) / 10
+		}
+		if c.lastRTT.CompareAndSwap(old, smoothed) {
+			return
+		}
+	}
+}
+
+// GetRTT returns the current smoothed RTT.
+func (c *XmuxClient) GetRTT() time.Duration {
+	return time.Duration(c.lastRTT.Load())
 }
 
 type XmuxManager struct {
@@ -166,14 +190,16 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		return m.newXmuxClient()
 	}
 
-	// min-inflight: select the connection with the fewest active streams
-	// to distribute load evenly and reduce tail latency.
+	// RTT-aware min-inflight scheduling:
+	// Score = inflight * 1000 + rtt_ms
+	// This favors low-inflight connections, but breaks ties using RTT.
+	// A connection with lower RTT gets slightly higher priority.
 	best := xmuxClients[0]
-	bestUsage := best.OpenUsage.Load()
+	bestScore := scoreClient(best)
 	for _, c := range xmuxClients[1:] {
-		if usage := c.OpenUsage.Load(); usage < bestUsage {
+		if s := scoreClient(c); s < bestScore {
 			best = c
-			bestUsage = usage
+			bestScore = s
 		}
 	}
 
@@ -181,4 +207,14 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		best.leftUsage -= 1
 	}
 	return best
+}
+
+// scoreClient computes a scheduling score for a connection.
+// Lower score = better candidate.
+// Formula: inflight * 1000 + rtt_ms
+// This ensures inflight is the primary factor, with RTT as tiebreaker.
+func scoreClient(c *XmuxClient) int64 {
+	inflight := int64(c.OpenUsage.Load())
+	rttMs := c.GetRTT().Milliseconds()
+	return inflight*1000 + rttMs
 }
