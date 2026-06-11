@@ -1,13 +1,28 @@
 # Bray-Core
 
-基于 [Xray-core](https://github.com/XTLS/Xray-core) 的高性能定制分支。
+> **⚠️ 警告：这是一个个人实验性 Fork**
+> 
+> 本项目是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的**个人实验性分支**，用于测试和验证各种网络优化方案。
+> 
+> - **非官方版本**：与 Xray-core 官方团队无关
+> - **实验性质**：部分功能未经大规模生产验证
+> - **仅供学习**：建议在生产环境使用官方版本
+> - **风险自负**：使用本分支产生的任何问题，作者不承担责任
 
 ---
-## 基于Bray-Core的定制版
-**除内核外原汁原味**
-[V2rayNG](https://github.com/Maolaohei/v2rayNG/releases) Frok (2dust/v2rayNG)
 
+## 快速下载
 
+### 客户端
+
+| 平台 | 下载 |
+|------|------|
+| **Windows** | [V2rayN (Bray-Core 内核)](https://github.com/Maolaohei/v2rayN/releases) |
+| **Android** | [V2rayNG (Bray-Core 内核)](https://github.com/Maolaohei/v2rayNG/releases) |
+
+> 客户端除内核外原汁原味，仅替换为 Bray-Core 内核。
+
+---
 
 ## 设计原则
 
@@ -191,7 +206,96 @@ func scoreClient(c *XmuxClient) int64 {
 
 ---
 
-## 八、已合并的上游 PR
+## 八、Happy Eyeballs v3 + DNS Warmup
+
+### Happy Eyeballs v3 升级
+
+从 RFC 8305 升级到 v3 草案规范，**默认启用**：
+
+| 特性 | RFC 8305 (v2) | Happy Eyeballs v3 |
+|------|---------------|-------------------|
+| IPv4/IPv6 交错 | ✔ | ✔ |
+| tryDelay | 固定 | 动态调整 |
+| maxConcurrentTry | 固定 | 自适应并发 |
+| SVCB/HTTPS 优先 | ✘ | ✔ |
+| RTT 学习与历史记录 | ✘ | ✔ |
+| 协议无关（QUIC/HTTP3） | 部分 | ✔ |
+
+**新增功能：**
+- IP 评分模型：`score = priority*1e9 + rtt*(1+failRate*10)`
+- 自适应并发控制：根据 RTT 动态调整 delay
+- 历史学习：EWMA RTT 追踪 + 成功/失败计数
+- RTT 钳位：默认 100ms，上限 999ms 防止评分反转
+
+### DNS Warmup 完整流水线
+
+```
+启动
+  ↓
+ExtractWarmupDomains(obm)
+  ├── 节点域名 (VLESS/VMess address)
+  ├── REALITY serverName/dest
+  └── 用户配置的 warmupDomains
+  ↓
+DNS 缓存预热
+  ↓
+XMUX preConnectLoop
+  ↓
+用户请求时直接复用热连接 (0~10ms)
+```
+
+**关键改进：**
+- **删除硬编码公网域名**：不再预热 google.com/youtube.com
+- **智能域名提取**：从出站配置自动提取节点域名、REALITY 域名
+- **追加模式**：用户配置的 `warmupDomains` 追加而非覆盖
+- **网络变化检测**：Wi-Fi ↔ 4G 切换时自动预热
+
+### XMUX 动态预热队列
+
+- `WarmupTarget` 优先级队列，支持多域名并发预热
+- `networkWatchLoop`：每 10 秒检测网络接口变化
+- 网络切换后自动清理旧连接并触发重新预热
+- 信号量控制并发预热数（最多 2 个）
+
+### 可量化指标追踪
+
+```go
+type XmuxMetrics struct {
+    ReuseRate    float64       // 连接复用率（目标 ≥ 90%）
+    AvgTTFB      time.Duration // 平均首字节时间
+    MaxTTFB      time.Duration // 最大首字节时间
+    WarmupHit    int64         // 预热命中次数
+    WarmupMiss   int64         // 预热未命中次数
+    NetRecovery  int64         // 网络切换恢复次数
+}
+```
+
+**验收标准：**
+- Reuse Rate ≥ 90%
+- TTFB 下降 ≥ 20%
+- 网络恢复时间 < 2s
+
+### 配置示例
+
+```json
+{
+  "streamSettings": {
+    "happyEyeballs": {
+      "v3Enabled": true,
+      "rttWeight": 0.7,
+      "failPenalty": 10.0,
+      "adaptiveConcurrency": true
+    }
+  },
+  "dns": {
+    "warmupDomains": ["custom.cdn.com"]
+  }
+}
+```
+
+---
+
+## 九、已合并的上游 PR
 
 | PR | 内容 |
 |----|------|
@@ -232,6 +336,18 @@ XHTTP 传输层实现与上游一致，吞吐无差异。以下为本机环批�
 
 > XHTTP 性能与上游持平。实际网络场景下，BBR 默认启用和 TCP 栈优化会带来真实吞吐提升（取决于链路质量）。
 
+### XMUX 指标测试
+
+| 指标 | 测试值 | 目标 |
+|------|--------|------|
+| **Reuse Rate** | 93.3% | ≥ 90% ✅ |
+| **Avg TTFB** | 38.5ms | < 100ms ✅ |
+| **Max TTFB** | 67ms | < 200ms ✅ |
+| **Warmup Enqueue** | 2 | - |
+| **NetRecovery** | 1 | - |
+
+> 测试环境：本地单元测试，模拟 15 次请求。
+
 ---
 
 ## 配置示例
@@ -242,7 +358,10 @@ XHTTP 传输层实现与上游一致，吞吐无差异。以下为本机环批�
     "security": "reality",
     "realitySettings": {},
     "sockopt": {
-        "tcpFastOpen": true
+        "tcpFastOpen": true,
+        "happyEyeballs": {
+            "v3Enabled": true
+        }
     }
 }
 ```
