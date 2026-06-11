@@ -265,7 +265,7 @@ func initInstanceWithConfig(config *Config, server *Instance) (bool, error) {
 
 	// Trigger DNS warmup after outbound handlers are registered (async, non-blocking)
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond) // conservative delay for slow devices (ARM, OpenWrt, Docker)
 
 		dnsClient, ok := server.GetFeature(dns.ClientType()).(interface {
 			WarmupNow()
