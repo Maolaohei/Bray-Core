@@ -63,11 +63,19 @@ func (t *AndroidTun) Index() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	iface, err := net.InterfaceByName(name)
+	sock, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 	if err != nil {
 		return 0, err
 	}
-	return iface.Index, nil
+	defer unix.Close(sock)
+	ifr, err := unix.NewIfreq(name)
+	if err != nil {
+		return 0, err
+	}
+	if err = unix.IoctlIfreq(sock, unix.SIOCGIFINDEX, ifr); err != nil {
+		return 0, err
+	}
+	return int(ifr.Uint32()), nil
 }
 
 func (t *AndroidTun) newEndpoint() (stack.LinkEndpoint, error) {
