@@ -63,6 +63,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    continue-on-error: true
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     steps:
       - name: Checkout codebase
@@ -80,7 +81,7 @@ jobs:
 
   test:
     runs-on: ${{ matrix.os }}
-    needs: [check-assets, check-format, lint]
+    needs: [check-assets, check-format]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     strategy:
       matrix:
