@@ -407,6 +407,129 @@ func testMultiConnection(t *testing.T, profile NetworkProfile, duration time.Dur
 	}
 }
 
+// ============================================================================
+// Test: 多域压力测试（4 域 × 5 连接 × 30s）
+// ============================================================================
+
+func TestXHTTP_NoDrop_MultiDomainStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("long endurance test")
+	}
+	if runtime.GOARCH == "arm64" {
+		t.Skip("arm64")
+	}
+	defer checkGoroutineLeak(t)()
+
+	servers := []*echoServer{
+		startEchoServer(t, "packet-up", true),
+		startEchoServer(t, "stream-up", true),
+		startEchoServer(t, "stream-one", true),
+		startEchoServer(t, "packet-up", true),
+	}
+	defer func() {
+		for _, s := range servers {
+			s.close()
+		}
+	}()
+
+	var (
+		totalBytes atomic.Int64
+		totalErrs  atomic.Int64
+		activeConn atomic.Int64
+		wg         sync.WaitGroup
+		stop       = make(chan struct{})
+	)
+
+	connsPerServer := 5
+	payloadSizes := []int{512, 4096, 16384, 65536}
+
+	for idx, srv := range servers {
+		for c := 0; c < connsPerServer; c++ {
+			wg.Add(1)
+			go func(server *echoServer, workerID int) {
+				defer wg.Done()
+
+				conn, err := Dial(context.Background(),
+					xnet.TCPDestination(xnet.DomainAddress("localhost"), server.port),
+					server.settings)
+				if err != nil {
+					t.Logf("  [srv%d-w%d] dial failed: %v", idx, workerID, err)
+					totalErrs.Add(1)
+					return
+				}
+				defer conn.Close()
+				activeConn.Add(1)
+				defer activeConn.Add(-1)
+
+				payload := make([]byte, payloadSizes[workerID%len(payloadSizes)])
+				rand.Read(payload)
+
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+
+					if _, err := conn.Write(payload); err != nil {
+						totalErrs.Add(1)
+						return
+					}
+					n := 0
+					buf := make([]byte, len(payload))
+					for n < len(payload) {
+						read, err := conn.Read(buf[n:])
+						if err != nil {
+							totalErrs.Add(1)
+							return
+						}
+						n += read
+					}
+					totalBytes.Add(int64(n))
+				}
+			}(srv, c)
+		}
+	}
+
+	t.Logf("Starting 30s multi-domain stress test...")
+	t.Logf("Servers: %d, connections: %d, payload: 512B-64KB mix",
+		len(servers), len(servers)*connsPerServer)
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				b := totalBytes.Load()
+				conn := activeConn.Load()
+				mb := float64(b) / 1e6
+				t.Logf("  [progress] %d active conns, %.0f MB transferred, %d errors",
+					conn, mb, totalErrs.Load())
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	time.Sleep(30 * time.Second)
+	close(stop)
+	close(done)
+	wg.Wait()
+
+	mb := float64(totalBytes.Load()) / 1e6
+	mbps := mb * 8 / 30
+	errs := totalErrs.Load()
+	t.Logf("=== Multi-domain stress (30s) ===")
+	t.Logf("  Total: %.0f MB in 30s = %.1f Mbps", mb, mbps)
+	t.Logf("  Errors: %d", errs)
+
+	if errs > 10 {
+		t.Errorf("Too many errors (%d) during stress test", errs)
+	}
+}
+
 func testRapidSwitch(t *testing.T, profile NetworkProfile, rounds int, switchInterval time.Duration) {
 	t.Helper()
 

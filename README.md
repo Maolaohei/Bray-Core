@@ -85,14 +85,108 @@
 |------|------|
 | **Go 版本更新** | CI 从 1.22 更新至 1.26，与 go.mod 一致 |
 | **golangci-lint** | 添加静态分析配置和 CI 步骤 |
-| **断流耐久测试** | 5 网络环境 × 4 测试场景，验证 0 断流 |
+| **断流耐久测试** | 5 网络环境 × 5 测试场景，验证 0 断流 |
 | **VLESS encoding benchmark** | 验证 Vision Fast Path 零分配 |
 
 ---
 
+## 七、用户体验升级（P0-P3）
+
+重点强化用户感知的流畅性、稳定性和首次访问体验。
+
+### P0: XMUX min-inflight 调度
+
+将随机选择改为最小活跃流调度，均匀分担负载：
+
+```go
+// 改动前：随机选择
+i := rand.IntN(len(xmuxClients))
+
+// 改动后：选择最少活跃流的连接
+best := xmuxClients[0]
+bestUsage := best.OpenUsage.Load()
+for _, c := range xmuxClients[1:] {
+    if usage := c.OpenUsage.Load(); usage < bestUsage {
+        best = c
+        bestUsage = usage
+    }
+}
+```
+
+**用户感知**：视频/直播卡顿率降低，负载更均匀
+
+### P1: XMUX 预连接
+
+后台预建连接，降低首次访问延迟：
+
+```go
+// 每 5s 检查，空池时预建连接
+func (m *XmuxManager) preConnectLoop() {
+    ticker := time.NewTicker(5 * time.Second)
+    for {
+        select {
+        case <-m.stopCh:
+            return
+        case <-ticker.C:
+            if len(m.xmuxClients) == 0 {
+                m.newXmuxClient()
+            }
+        }
+    }
+}
+```
+
+**用户感知**：网页/视频冷启动更快
+
+### P2: 快速故障检测
+
+5 秒间隔主动检查连接健康：
+
+```go
+func (m *XmuxManager) healthCheckLoop() {
+    ticker := time.NewTicker(5 * time.Second)
+    for {
+        select {
+        case <-m.stopCh:
+            return
+        case <-ticker.C:
+            // 主动移除关闭的连接
+            for i := 0; i < len(m.xmuxClients); {
+                if m.xmuxClients[i].XmuxConn.IsClosed() {
+                    m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
+                } else {
+                    i++
+                }
+            }
+            // 空池时自动恢复
+            if len(m.xmuxClients) == 0 {
+                m.newXmuxClient()
+            }
+        }
+    }
+}
+```
+
+**用户感知**：断流恢复更快，移动网络切换更平滑
+
+### P3: RTT 感知调度
+
+在 min-inflight 基础上加入 RTT 权重：
+
+```go
+// 评分公式：inflight * 1000 + rtt_ms
+func scoreClient(c *XmuxClient) int64 {
+    inflight := int64(c.OpenUsage.Load())
+    rttMs := c.GetRTT().Milliseconds()
+    return inflight*1000 + rttMs
+}
+```
+
+**用户感知**：P99 延迟降低
+
 ---
 
-## 六、已合并的上游 PR
+## 八、已合并的上游 PR
 
 | PR | 内容 |
 |----|------|
