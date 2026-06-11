@@ -16,11 +16,15 @@ const ConnIdleTimeout = 300 * time.Second
 // consistent with quic-go
 const QuicgoH3KeepAlivePeriod = 10 * time.Second
 
-// consistent with chrome (reduced from 45s to 10s to prevent NAT
-// timeout and TCP slow start reset during video buffering pauses.
-// H2 PING frames every 10s keep the kernel from considering the
-// connection idle, preserving the congestion window across segments.
-const ChromeH2KeepAlivePeriod = 10 * time.Second
+// ChromeH2KeepAlivePeriod is the idle timeout after which an HTTP/2
+// health-check PING is sent before the next request (request-driven,
+// not timer-driven). Go's http2.Transport pings only when the
+// connection has been idle for this duration and a new request arrives.
+// The PING confirms the peer is still alive; on failure the connection
+// is closed and a new one is created.
+// 30s is conservative: NAT timeouts are typically ≥60s, and normal
+// traffic keeps the connection alive so PINGs rarely fire.
+const ChromeH2KeepAlivePeriod = 30 * time.Second
 
 var ErrNotLocal = errors.New("the source address is not from local machine.")
 
