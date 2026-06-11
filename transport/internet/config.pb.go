@@ -937,13 +937,18 @@ func (x *SocketConfig) GetTcpNotsentLowat() int32 {
 }
 
 type HappyEyeballsConfig struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	PrioritizeIpv6   bool                   `protobuf:"varint,1,opt,name=prioritize_ipv6,json=prioritizeIpv6,proto3" json:"prioritize_ipv6,omitempty"`
-	Interleave       uint32                 `protobuf:"varint,2,opt,name=interleave,proto3" json:"interleave,omitempty"`
-	TryDelayMs       uint64                 `protobuf:"varint,3,opt,name=try_delayMs,json=tryDelayMs,proto3" json:"try_delayMs,omitempty"`
-	MaxConcurrentTry uint32                 `protobuf:"varint,4,opt,name=max_concurrent_try,json=maxConcurrentTry,proto3" json:"max_concurrent_try,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	PrioritizeIpv6     bool                   `protobuf:"varint,1,opt,name=prioritize_ipv6,json=prioritizeIpv6,proto3" json:"prioritize_ipv6,omitempty"`
+	Interleave         uint32                 `protobuf:"varint,2,opt,name=interleave,proto3" json:"interleave,omitempty"`
+	TryDelayMs         uint64                 `protobuf:"varint,3,opt,name=try_delayMs,json=tryDelayMs,proto3" json:"try_delayMs,omitempty"`
+	MaxConcurrentTry   uint32                 `protobuf:"varint,4,opt,name=max_concurrent_try,json=maxConcurrentTry,proto3" json:"max_concurrent_try,omitempty"`
+	V3Enabled          bool                   `protobuf:"varint,5,opt,name=v3_enabled,json=v3Enabled,proto3" json:"v3_enabled,omitempty"`
+	InitialRttMs       int64                  `protobuf:"varint,6,opt,name=initial_rtt_ms,json=initialRttMs,proto3" json:"initial_rtt_ms,omitempty"`
+	RttWeight          float64                `protobuf:"fixed64,7,opt,name=rtt_weight,json=rttWeight,proto3" json:"rtt_weight,omitempty"`
+	FailPenalty        float64                `protobuf:"fixed64,8,opt,name=fail_penalty,json=failPenalty,proto3" json:"fail_penalty,omitempty"`
+	AdaptiveConcurrency bool                  `protobuf:"varint,9,opt,name=adaptive_concurrency,json=adaptiveConcurrency,proto3" json:"adaptive_concurrency,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *HappyEyeballsConfig) Reset() {
@@ -1002,6 +1007,41 @@ func (x *HappyEyeballsConfig) GetMaxConcurrentTry() uint32 {
 		return x.MaxConcurrentTry
 	}
 	return 0
+}
+
+func (x *HappyEyeballsConfig) GetV3Enabled() bool {
+	if x != nil {
+		return x.V3Enabled
+	}
+	return false
+}
+
+func (x *HappyEyeballsConfig) GetInitialRttMs() int64 {
+	if x != nil {
+		return x.InitialRttMs
+	}
+	return 0
+}
+
+func (x *HappyEyeballsConfig) GetRttWeight() float64 {
+	if x != nil {
+		return x.RttWeight
+	}
+	return 0
+}
+
+func (x *HappyEyeballsConfig) GetFailPenalty() float64 {
+	if x != nil {
+		return x.FailPenalty
+	}
+	return 0
+}
+
+func (x *HappyEyeballsConfig) GetAdaptiveConcurrency() bool {
+	if x != nil {
+		return x.AdaptiveConcurrency
+	}
+	return false
 }
 
 var File_transport_internet_config_proto protoreflect.FileDescriptor

@@ -166,4 +166,11 @@ message HappyEyeballsConfig {
   uint32 interleave = 2;
   uint64 try_delayMs = 3;
   uint32 max_concurrent_try = 4;
+
+  // v3 draft fields
+  bool v3_enabled = 5;
+  int64 initial_rtt_ms = 6;     // default RTT estimate in ms for unknown IPs
+  double rtt_weight = 7;        // weight of RTT in scoring (0-1)
+  double fail_penalty = 8;      // penalty multiplier for failure rate
+  bool adaptive_concurrency = 9; // use dynamic concurrency instead of fixed
 }

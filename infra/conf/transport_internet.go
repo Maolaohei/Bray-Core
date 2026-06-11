@@ -1044,19 +1044,29 @@ type CustomSockoptConfig struct {
 }
 
 type HappyEyeballsConfig struct {
-	PrioritizeIPv6   bool   `json:"prioritizeIPv6"`
-	TryDelayMs       uint64 `json:"tryDelayMs"`
-	Interleave       uint32 `json:"interleave"`
-	MaxConcurrentTry uint32 `json:"maxConcurrentTry"`
+	PrioritizeIPv6       bool    `json:"prioritizeIPv6"`
+	TryDelayMs           uint64  `json:"tryDelayMs"`
+	Interleave           uint32  `json:"interleave"`
+	MaxConcurrentTry     uint32  `json:"maxConcurrentTry"`
+	V3Enabled            bool    `json:"v3Enabled"`
+	InitialRTTMs         int64   `json:"initialRTTMs"`
+	RTTWeight            float64 `json:"rttWeight"`
+	FailPenalty          float64 `json:"failPenalty"`
+	AdaptiveConcurrency  bool    `json:"adaptiveConcurrency"`
 }
 
 func (h *HappyEyeballsConfig) UnmarshalJSON(data []byte) error {
 	innerHappyEyeballsConfig := struct {
-		PrioritizeIPv6   bool   `json:"prioritizeIPv6"`
-		TryDelayMs       uint64 `json:"tryDelayMs"`
-		Interleave       uint32 `json:"interleave"`
-		MaxConcurrentTry uint32 `json:"maxConcurrentTry"`
-	}{PrioritizeIPv6: false, Interleave: 1, TryDelayMs: 0, MaxConcurrentTry: 4}
+		PrioritizeIPv6      bool    `json:"prioritizeIPv6"`
+		TryDelayMs          uint64  `json:"tryDelayMs"`
+		Interleave          uint32  `json:"interleave"`
+		MaxConcurrentTry    uint32  `json:"maxConcurrentTry"`
+		V3Enabled           bool    `json:"v3Enabled"`
+		InitialRTTMs        int64   `json:"initialRTTMs"`
+		RTTWeight           float64 `json:"rttWeight"`
+		FailPenalty         float64 `json:"failPenalty"`
+		AdaptiveConcurrency bool    `json:"adaptiveConcurrency"`
+	}{PrioritizeIPv6: false, Interleave: 1, TryDelayMs: 0, MaxConcurrentTry: 4, V3Enabled: true, InitialRTTMs: 500, RTTWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true}
 	if err := json.Unmarshal(data, &innerHappyEyeballsConfig); err != nil {
 		return err
 	}
@@ -1064,6 +1074,11 @@ func (h *HappyEyeballsConfig) UnmarshalJSON(data []byte) error {
 	h.TryDelayMs = innerHappyEyeballsConfig.TryDelayMs
 	h.Interleave = innerHappyEyeballsConfig.Interleave
 	h.MaxConcurrentTry = innerHappyEyeballsConfig.MaxConcurrentTry
+	h.V3Enabled = innerHappyEyeballsConfig.V3Enabled
+	h.InitialRTTMs = innerHappyEyeballsConfig.InitialRTTMs
+	h.RTTWeight = innerHappyEyeballsConfig.RTTWeight
+	h.FailPenalty = innerHappyEyeballsConfig.FailPenalty
+	h.AdaptiveConcurrency = innerHappyEyeballsConfig.AdaptiveConcurrency
 	return nil
 }
 
@@ -1179,12 +1194,17 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 		return nil, errors.New("unsupported address and port strategy: ", c.AddressPortStrategy)
 	}
 
-	happyEyeballs := &internet.HappyEyeballsConfig{Interleave: 1, PrioritizeIpv6: false, TryDelayMs: 0, MaxConcurrentTry: 4}
+	happyEyeballs := &internet.HappyEyeballsConfig{Interleave: 1, PrioritizeIpv6: false, TryDelayMs: 0, MaxConcurrentTry: 4, V3Enabled: true, InitialRttMs: 500, RttWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true}
 	if c.HappyEyeballsSettings != nil {
 		happyEyeballs.PrioritizeIpv6 = c.HappyEyeballsSettings.PrioritizeIPv6
 		happyEyeballs.Interleave = c.HappyEyeballsSettings.Interleave
 		happyEyeballs.TryDelayMs = c.HappyEyeballsSettings.TryDelayMs
 		happyEyeballs.MaxConcurrentTry = c.HappyEyeballsSettings.MaxConcurrentTry
+		happyEyeballs.V3Enabled = c.HappyEyeballsSettings.V3Enabled
+		happyEyeballs.InitialRttMs = c.HappyEyeballsSettings.InitialRTTMs
+		happyEyeballs.RttWeight = c.HappyEyeballsSettings.RTTWeight
+		happyEyeballs.FailPenalty = c.HappyEyeballsSettings.FailPenalty
+		happyEyeballs.AdaptiveConcurrency = c.HappyEyeballsSettings.AdaptiveConcurrency
 	}
 
 	return &internet.SocketConfig{

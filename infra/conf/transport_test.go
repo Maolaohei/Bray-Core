@@ -28,7 +28,7 @@ func TestSocketConfig(t *testing.T) {
 		Tfo:            256,
 		DomainStrategy: internet.DomainStrategy_USE_IP,
 		DialerProxy:    "tag",
-		HappyEyeballs:  &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4},
+		HappyEyeballs:  &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4, InitialRttMs: 500, RttWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true},
 	}
 	runMultiTestCase(t, []TestCase{
 		{
@@ -50,7 +50,7 @@ func TestSocketConfig(t *testing.T) {
 	expectedOutput = &internet.SocketConfig{
 		Mark:          0,
 		Tfo:           -1,
-		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4},
+		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4, V3Enabled: true, InitialRttMs: 500, RttWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true},
 	}
 	runMultiTestCase(t, []TestCase{
 		{
@@ -69,7 +69,7 @@ func TestSocketConfig(t *testing.T) {
 	expectedOutput = &internet.SocketConfig{
 		Mark:          0,
 		Tfo:           65535,
-		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4},
+		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4, V3Enabled: true, InitialRttMs: 500, RttWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true},
 	}
 	runMultiTestCase(t, []TestCase{
 		{
@@ -88,7 +88,7 @@ func TestSocketConfig(t *testing.T) {
 	expectedOutput = &internet.SocketConfig{
 		Mark:          0,
 		Tfo:           -65535,
-		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4},
+		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4, V3Enabled: true, InitialRttMs: 500, RttWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true},
 	}
 	runMultiTestCase(t, []TestCase{
 		{
@@ -107,7 +107,7 @@ func TestSocketConfig(t *testing.T) {
 	expectedOutput = &internet.SocketConfig{
 		Mark:          0,
 		Tfo:           0,
-		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4},
+		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4, V3Enabled: true, InitialRttMs: 500, RttWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true},
 	}
 	runMultiTestCase(t, []TestCase{
 		{
@@ -126,7 +126,7 @@ func TestSocketConfig(t *testing.T) {
 	expectedOutput = &internet.SocketConfig{
 		Mark:          0,
 		Tfo:           0,
-		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4},
+		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4, V3Enabled: true, InitialRttMs: 500, RttWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true},
 	}
 	runMultiTestCase(t, []TestCase{
 		{
@@ -143,7 +143,7 @@ func TestSocketConfig(t *testing.T) {
 	expectedOutput = &internet.SocketConfig{
 		Mark:          0,
 		Tfo:           0,
-		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4},
+		HappyEyeballs: &internet.HappyEyeballsConfig{Interleave: 1, TryDelayMs: 0, PrioritizeIpv6: false, MaxConcurrentTry: 4, V3Enabled: true, InitialRttMs: 500, RttWeight: 0.7, FailPenalty: 10.0, AdaptiveConcurrency: true},
 	}
 	runMultiTestCase(t, []TestCase{
 		{
