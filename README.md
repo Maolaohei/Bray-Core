@@ -17,10 +17,10 @@
 
 | 平台 | 下载 |
 |------|------|
-| **Windows** | [V2rayN (Bray-Core 内核)](https://github.com/Maolaohei/v2rayN/releases) |
+| **Windows** | [V2rayN (原版 内核)](https://github.com/2dust/v2rayn/releases)|
 | **Android** | [V2rayNG (Bray-Core 内核)](https://github.com/Maolaohei/v2rayNG/releases) |
 
-> 客户端除内核外原汁原味，仅替换为 Bray-Core 内核。
+> Android客户端除内核外原汁原味，仅替换为 Bray-Core 内核。 Windows版本需要在bin\xray\路径 自选替换内核
 
 ---
 
