@@ -40,15 +40,14 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		stopCh:      make(chan struct{}),
 	}
 
-	// Start pre-connect goroutine to maintain warm connections.
-	// This reduces first-connection latency for new requests.
+	// Start background goroutines for connection management.
 	go m.preConnectLoop()
+	go m.healthCheckLoop()
 
 	return m
 }
 
 // preConnectLoop maintains at least 1 warm connection in the pool.
-// It runs in the background and creates new connections when the pool is empty.
 func (m *XmuxManager) preConnectLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -58,7 +57,6 @@ func (m *XmuxManager) preConnectLoop() {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			// Only pre-connect if pool is empty or all connections are busy
 			if len(m.xmuxClients) == 0 {
 				errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient because pool is empty")
 				m.newXmuxClient()
@@ -67,7 +65,40 @@ func (m *XmuxManager) preConnectLoop() {
 	}
 }
 
-// Close stops the pre-connect goroutine.
+// healthCheckLoop periodically removes closed connections and ensures
+// the pool maintains a minimum number of healthy connections.
+// This provides fast fault detection (5s interval) and automatic recovery.
+func (m *XmuxManager) healthCheckLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			removed := 0
+			for i := 0; i < len(m.xmuxClients); {
+				xmuxClient := m.xmuxClients[i]
+				if xmuxClient.XmuxConn.IsClosed() {
+					errors.LogDebug(context.Background(), "XMUX: health-check removing closed xmuxClient")
+					m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
+					removed++
+				} else {
+					i++
+				}
+			}
+
+			// If we removed connections, ensure pool stays above minimum
+			if removed > 0 && len(m.xmuxClients) == 0 {
+				errors.LogDebug(context.Background(), "XMUX: health-check creating xmuxClient because pool is empty after cleanup")
+				m.newXmuxClient()
+			}
+		}
+	}
+}
+
+// Close stops the background goroutines.
 func (m *XmuxManager) Close() {
 	close(m.stopCh)
 }
