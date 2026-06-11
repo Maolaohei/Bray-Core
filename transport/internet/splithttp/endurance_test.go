@@ -22,15 +22,83 @@ import (
 )
 
 // ============================================================================
+// 辅助函数
+// ============================================================================
+
+func checkGoroutineLeak(t *testing.T) func() {
+	t.Helper()
+	start := runtime.NumGoroutine()
+	return func() {
+		time.Sleep(100 * time.Millisecond)
+		delta := runtime.NumGoroutine() - start
+		if delta > 10 {
+			t.Errorf("Goroutine leak: +%d goroutines after test", delta)
+		}
+	}
+}
+
+type echoServer struct {
+	listen   internet.Listener
+	port     xnet.Port
+	settings *internet.MemoryStreamConfig
+}
+
+func startEchoServer(t *testing.T, mode string, useTLS bool) *echoServer {
+	t.Helper()
+	p := tcp.PickPort()
+
+	var settings *internet.MemoryStreamConfig
+	if useTLS {
+		ct, ctHash := cert.MustGenerate(nil, cert.CommonName("localhost"))
+		settings = &internet.MemoryStreamConfig{
+			ProtocolName: "splithttp",
+			ProtocolSettings: &Config{
+				Path:               "/sh",
+				Mode:               mode,
+				ScMaxEachPostBytes: &RangeConfig{From: 500000, To: 500000},
+			},
+			SecurityType: "tls",
+			SecuritySettings: &tls.Config{
+				Certificate:          []*tls.Certificate{tls.ParseCertificate(ct)},
+				PinnedPeerCertSha256: [][]byte{ctHash[:]},
+			},
+		}
+	} else {
+		settings = &internet.MemoryStreamConfig{
+			ProtocolName: "splithttp",
+			ProtocolSettings: &Config{
+				Path:               "/sh",
+				Mode:               mode,
+				ScMaxEachPostBytes: &RangeConfig{From: 500000, To: 500000},
+			},
+		}
+	}
+
+	listen, err := ListenXH(context.Background(), xnet.LocalHostIP, p, settings, func(conn stat.Connection) {
+		go func(c stat.Connection) {
+			defer c.Close()
+			io.Copy(c, c)
+		}(conn)
+	})
+	common.Must(err)
+
+	return &echoServer{listen: listen, port: p, settings: settings}
+}
+
+func (s *echoServer) close() {
+	s.listen.Close()
+}
+
+// ============================================================================
 // NetworkProfile 模拟不同网络环境
 // ============================================================================
 
 type NetworkProfile struct {
 	Name      string
-	Latency   time.Duration // 单程延迟
-	Jitter    time.Duration // 抖动
-	LossRate  float64       // 丢包率 0.0-1.0
-	Bandwidth int64         // 带宽限制 bytes/s, 0=不限
+	Latency   time.Duration
+	Jitter    time.Duration
+	LossRate  float64
+	Bandwidth int64
 }
 
 var networkProfiles = []NetworkProfile{
@@ -592,5 +660,171 @@ func testRapidSwitch(t *testing.T, profile NetworkProfile, rounds int, switchInt
 
 	if fail > int64(rounds)/10 {
 		t.Errorf("断流! 失败率 %.0f%% > 10%%", float64(fail)/float64(rounds)*100)
+	}
+}
+
+// ============================================================================
+// Test: 快速新连接测试（模拟新网页卡顿场景）
+// 连续创建新连接，测量首次请求延迟
+// ============================================================================
+
+func TestXHTTP_RapidNewConnections(t *testing.T) {
+	if testing.Short() {
+		t.Skip("long endurance test")
+	}
+	if runtime.GOARCH == "arm64" {
+		t.Skip("arm64")
+	}
+
+	// 启动服务器
+	listen, port, settings := startTestServer(t, "packet-up", true)
+	defer listen.Close()
+
+	var (
+		totalConns   atomic.Int64
+		totalStalls  atomic.Int64
+		totalLatency atomic.Int64 // 纳秒
+		wg           sync.WaitGroup
+	)
+
+	// 并发创建 50 个新连接
+	conns := 50
+	for i := 0; i < conns; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			start := time.Now()
+
+			// 创建新连接（模拟新网页）
+			conn, err := Dial(context.Background(),
+				xnet.TCPDestination(xnet.DomainAddress("localhost"), port),
+				settings)
+			if err != nil {
+				totalStalls.Add(1)
+				t.Logf("  [conn %d] dial failed: %v", id, err)
+				return
+			}
+			defer conn.Close()
+
+			// 首次写入（模拟 HTTP 请求）
+			payload := make([]byte, 1024)
+			rand.Read(payload)
+			if _, err := conn.Write(payload); err != nil {
+				totalStalls.Add(1)
+				return
+			}
+
+			// 首次读取（模拟 HTTP 响应）
+			buf := make([]byte, len(payload))
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := io.ReadFull(conn, buf); err != nil {
+				totalStalls.Add(1)
+				return
+			}
+
+			latency := time.Since(start)
+			totalLatency.Add(int64(latency))
+			totalConns.Add(1)
+
+			// 标记卡顿（>500ms）
+			if latency > 500*time.Millisecond {
+				t.Logf("  [conn %d] STALL: %v", id, latency)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	avgLatency := time.Duration(totalLatency.Load() / totalConns.Load())
+	stalls := totalStalls.Load()
+	success := totalConns.Load()
+
+	t.Logf("=== 快速新连接测试 ===")
+	t.Logf("  连接数: %d, 成功: %d, 失败: %d", conns, success, stalls)
+	t.Logf("  平均延迟: %v", avgLatency)
+
+	if stalls > int64(conns)/10 {
+		t.Errorf("断流! 失败率 %.0f%% > 10%%", float64(stalls)/float64(conns)*100)
+	}
+}
+
+// ============================================================================
+// Test: 连接复用 vs 新建连接对比
+// ============================================================================
+
+func TestXHTTP_ConnectionReuse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("long endurance test")
+	}
+	if runtime.GOARCH == "arm64" {
+		t.Skip("arm64")
+	}
+
+	listen, port, settings := startTestServer(t, "packet-up", true)
+	defer listen.Close()
+
+	payload := make([]byte, 4096)
+	rand.Read(payload)
+
+	// 阶段 1：创建连接并预热
+	conn, err := Dial(context.Background(),
+		xnet.TCPDestination(xnet.DomainAddress("localhost"), port),
+		settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// 预热：发送几次请求
+	for i := 0; i < 5; i++ {
+		conn.Write(payload)
+		buf := make([]byte, len(payload))
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		io.ReadFull(conn, buf)
+	}
+
+	// 阶段 2：复用连接测试
+	t.Log("Phase 1: 测试连接复用...")
+	reuseStart := time.Now()
+	for i := 0; i < 100; i++ {
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatalf("write error: %v", err)
+		}
+		buf := make([]byte, len(payload))
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Fatalf("read error: %v", err)
+		}
+	}
+	reuseTime := time.Since(reuseStart)
+	t.Logf("  复用 100 次: %v (平均 %v/次)", reuseTime, reuseTime/100)
+
+	// 阶段 3：新建连接测试
+	t.Log("Phase 2: 测试新建连接...")
+	conn.Close()
+	newStart := time.Now()
+	for i := 0; i < 10; i++ {
+		c, err := Dial(context.Background(),
+			xnet.TCPDestination(xnet.DomainAddress("localhost"), port),
+			settings)
+		if err != nil {
+			t.Fatalf("dial error: %v", err)
+		}
+		c.Write(payload)
+		buf := make([]byte, len(payload))
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		io.ReadFull(conn, buf)
+		c.Close()
+	}
+	newTime := time.Since(newStart)
+	t.Logf("  新建 10 次: %v (平均 %v/次)", newTime, newTime/10)
+
+	// 对比
+	ratio := float64(newTime) / float64(reuseTime) * 10
+	t.Logf("  新建/复用比: %.1fx", ratio)
+
+	if ratio > 10 {
+		t.Logf("  WARNING: 新建连接比复用慢 %.1fx，可能导致新网页卡顿", ratio)
 	}
 }
