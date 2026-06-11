@@ -3,7 +3,6 @@ package splithttp
 import (
 	"context"
 	"math"
-	"math/rand/v2"
 	"sync/atomic"
 	"time"
 
@@ -103,10 +102,19 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		return m.newXmuxClient()
 	}
 
-	i := rand.IntN(len(xmuxClients))
-	xmuxClient := xmuxClients[i]
-	if xmuxClient.leftUsage > 0 {
-		xmuxClient.leftUsage -= 1
+	// min-inflight: select the connection with the fewest active streams
+	// to distribute load evenly and reduce tail latency.
+	best := xmuxClients[0]
+	bestUsage := best.OpenUsage.Load()
+	for _, c := range xmuxClients[1:] {
+		if usage := c.OpenUsage.Load(); usage < bestUsage {
+			best = c
+			bestUsage = usage
+		}
 	}
-	return xmuxClient
+
+	if best.leftUsage > 0 {
+		best.leftUsage -= 1
+	}
+	return best
 }
