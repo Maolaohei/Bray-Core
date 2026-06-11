@@ -195,9 +195,18 @@ func (*DNS) Type() interface{} {
 
 // Start implements common.Runnable.
 func (s *DNS) Start() error {
-	if len(s.warmupDomains) > 0 {
-		go s.warmup(s.warmupDomains)
+	domains := s.warmupDomains
+	if len(domains) == 0 {
+		// Default warmup domains for common services
+		domains = []string{
+			"www.google.com",
+			"www.youtube.com",
+			"github.com",
+			"www.baidu.com",
+			"www.cloudflare.com",
+		}
 	}
+	go s.warmup(domains)
 	return nil
 }
 

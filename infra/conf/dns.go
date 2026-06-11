@@ -170,6 +170,7 @@ type DNSConfig struct {
 	DisableFallbackIfMatch bool                `json:"disableFallbackIfMatch"`
 	EnableParallelQuery    bool                `json:"enableParallelQuery"`
 	UseSystemHosts         bool                `json:"useSystemHosts"`
+	WarmupDomains          []string            `json:"warmupDomains"`
 }
 
 type HostAddress struct {
@@ -373,6 +374,11 @@ func (c *DNSConfig) Build() (*dns.Config, error) {
 			return nil, errors.New("failed to read system hosts").Base(err)
 		}
 		config.StaticHosts = append(config.StaticHosts, systemHosts...)
+	}
+
+	// Set warmup domains for DNS cache pre-heating
+	if len(c.WarmupDomains) > 0 {
+		config.WarmupDomains = c.WarmupDomains
 	}
 
 	return config, nil
