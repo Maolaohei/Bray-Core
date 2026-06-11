@@ -127,10 +127,14 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 	transportConfig := streamSettings.ProtocolSettings.(*Config)
 
 	dialContext := func(ctxInner context.Context) (net.Conn, error) {
+		t0 := time.Now()
 		conn, err := internet.DialSystem(ctxInner, dest, streamSettings.SocketSettings)
+		tcpDur := time.Since(t0)
 		if err != nil {
+			errors.LogDebug(ctxInner, "XHTTP dial: TCP failed in ", tcpDur.Round(time.Millisecond), ": ", err)
 			return nil, err
 		}
+		errors.LogDebug(ctxInner, "XHTTP dial: TCP connected in ", tcpDur.Round(time.Millisecond))
 
 		if streamSettings.TcpmaskManager != nil {
 			newConn, err := streamSettings.TcpmaskManager.WrapConnClient(conn)
@@ -142,18 +146,29 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		}
 
 		if realityConfig != nil {
-			return reality.UClient(conn, realityConfig, ctxInner, dest)
+			t1 := time.Now()
+			conn, err = reality.UClient(conn, realityConfig, ctxInner, dest)
+			realityDur := time.Since(t1)
+			if err != nil {
+				errors.LogDebug(ctxInner, "XHTTP dial: REALITY failed in ", realityDur.Round(time.Millisecond), ": ", err)
+				return nil, err
+			}
+			errors.LogDebug(ctxInner, "XHTTP dial: REALITY handshake in ", realityDur.Round(time.Millisecond))
+			return conn, nil
 		}
 
 		if gotlsConfig != nil {
+			t1 := time.Now()
 			if fingerprint := tls.GetFingerprint(tlsConfig.Fingerprint); fingerprint != nil {
 				conn = tls.UClient(conn, gotlsConfig, fingerprint)
 				if err := conn.(*tls.UConn).HandshakeContext(ctxInner); err != nil {
+					errors.LogDebug(ctxInner, "XHTTP dial: uTLS failed in ", time.Since(t1).Round(time.Millisecond), ": ", err)
 					return nil, err
 				}
 			} else {
 				conn = tls.Client(conn, gotlsConfig)
 			}
+			errors.LogDebug(ctxInner, "XHTTP dial: TLS handshake in ", time.Since(t1).Round(time.Millisecond))
 		}
 
 		return conn, nil

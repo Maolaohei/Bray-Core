@@ -354,13 +354,12 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 		ips, ttl, err = s.serialQuery(domain, option)
 	}
 
-	// Fallback to system DNS when all configured servers return empty.
-	// This helps when CDN domains (googlevideo.com, ytimg.com, etc.) are
-	// blocked or throttled by DoH servers but still resolvable via the
-	// system resolver.
-	if (len(ips) == 0 || go_errors.Is(err, dns.ErrEmptyResponse)) &&
+	// Fallback to system DNS when all configured servers FAIL (not empty).
+	// Empty response (ErrEmptyResponse) is normal when IPv6 is disabled
+	// and domain only has AAAA records - no need to fallback.
+	if err != nil && !go_errors.Is(err, dns.ErrEmptyResponse) &&
 		!s.checkSystem { // avoid recursion (checkSystem already uses system DNS)
-		errors.LogInfo(s.ctx, "all DNS servers returned empty for ", domain, ", falling back to system resolver")
+		errors.LogInfo(s.ctx, "DNS servers failed for ", domain, ", falling back to system resolver: ", err)
 		sysIps, sysErr := go_net.DefaultResolver.LookupIPAddr(s.ctx, domain)
 		if sysErr == nil && len(sysIps) > 0 {
 			for _, addr := range sysIps {

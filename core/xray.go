@@ -263,10 +263,9 @@ func initInstanceWithConfig(config *Config, server *Instance) (bool, error) {
 		return true, err
 	}
 
-	// Trigger DNS warmup after outbound handlers are registered
-	// This ensures ExtractWarmupDomains can find all node domains
+	// Trigger DNS warmup after outbound handlers are registered (async, non-blocking)
 	go func() {
-		time.Sleep(1 * time.Second) // Wait for handlers to be fully registered
+		time.Sleep(100 * time.Millisecond)
 
 		dnsClient, ok := server.GetFeature(dns.ClientType()).(interface {
 			WarmupNow()

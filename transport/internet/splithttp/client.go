@@ -52,14 +52,14 @@ func (c *DefaultDialerClient) SetOnRTT(fn func(rtt time.Duration)) {
 }
 
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
-	// this is done when the TCP/UDP connection to the server was established,
-	// and we can unblock the Dial function and print correct net addresses in
-	// logs
+	t0 := time.Now()
 	gotConn := done.New()
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(connInfo httptrace.GotConnInfo) {
 			remoteAddr = connInfo.Conn.RemoteAddr()
 			localAddr = connInfo.Conn.LocalAddr()
+			errors.LogDebug(ctx, "XHTTP stream: GotConn in ", time.Since(t0).Round(time.Millisecond),
+				" (reused=", connInfo.Reused, ")")
 			gotConn.Close()
 		},
 	})
@@ -89,7 +89,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		}
 		if resp.StatusCode != 200 || uploadOnly { // stream-up
 			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close() // if it is called immediately, the upload will be interrupted also
+			resp.Body.Close()
 			common.Close(body)
 			wrc.Close()
 			return

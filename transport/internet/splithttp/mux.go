@@ -62,6 +62,7 @@ type XmuxManager struct {
 	connections int32
 	newConnFunc func() XmuxConn
 	xmuxClients []*XmuxClient
+	clientsMu   sync.Mutex // protects xmuxClients slice
 	stopCh      chan struct{}
 
 	// Dynamic warmup queue
@@ -117,6 +118,16 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 
 // preConnectLoop maintains at least 1 warm connection in the pool.
 func (m *XmuxManager) preConnectLoop() {
+	// Execute immediately on startup so the pool is warm before the first request
+	m.processWarmupQueue()
+	m.clientsMu.Lock()
+	empty := len(m.xmuxClients) == 0
+	m.clientsMu.Unlock()
+	if empty {
+		errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient (initial)")
+		m.newXmuxClient()
+	}
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -129,7 +140,10 @@ func (m *XmuxManager) preConnectLoop() {
 			m.processWarmupQueue()
 
 			// Then ensure pool has connections
-			if len(m.xmuxClients) == 0 {
+			m.clientsMu.Lock()
+			empty = len(m.xmuxClients) == 0
+			m.clientsMu.Unlock()
+			if empty {
 				errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient because pool is empty")
 				m.newXmuxClient()
 			}
@@ -270,6 +284,8 @@ func (m *XmuxManager) checkNetworkChange() {
 
 // clearStaleConnections removes connections that may be invalid after network change.
 func (m *XmuxManager) clearStaleConnections() {
+	m.clientsMu.Lock()
+	defer m.clientsMu.Unlock()
 	// Mark all connections as potentially stale
 	// They will be removed on next health check if truly broken
 	for _, client := range m.xmuxClients {
@@ -315,6 +331,7 @@ func (m *XmuxManager) healthCheckLoop() {
 			return
 		case <-ticker.C:
 			now := time.Now()
+			m.clientsMu.Lock()
 			for i := 0; i < len(m.xmuxClients); {
 				xmuxClient := m.xmuxClients[i]
 
@@ -351,8 +368,9 @@ func (m *XmuxManager) healthCheckLoop() {
 			// Ensure pool stays above minimum
 			if len(m.xmuxClients) == 0 {
 				errors.LogDebug(context.Background(), "XMUX: health-check creating xmuxClient because pool is empty after cleanup")
-				m.newXmuxClient()
+				m.newXmuxClientLocked()
 			}
+			m.clientsMu.Unlock()
 		}
 	}
 }
@@ -380,11 +398,40 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs().rand(); x > 0 {
 		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
 	}
+	m.clientsMu.Lock()
+	m.xmuxClients = append(m.xmuxClients, xmuxClient)
+	m.clientsMu.Unlock()
+	return xmuxClient
+}
+
+// newXmuxClientLocked creates a new client and appends to the pool.
+// Caller must hold m.clientsMu.
+func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
+	m.RecordNewConn()
+
+	xmuxClient := &XmuxClient{
+		XmuxConn:  m.newConnFunc(),
+		leftUsage: -1,
+		createdAt: time.Now(),
+	}
+	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
+		xmuxClient.leftUsage = x - 1
+	}
+	xmuxClient.LeftRequests.Store(math.MaxInt32)
+	if x := m.xmuxConfig.GetNormalizedHMaxRequestTimes().rand(); x > 0 {
+		xmuxClient.LeftRequests.Store(x)
+	}
+	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs().rand(); x > 0 {
+		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
+	}
 	m.xmuxClients = append(m.xmuxClients, xmuxClient)
 	return xmuxClient
 }
 
-func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when locking
+func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
+	m.clientsMu.Lock()
+	defer m.clientsMu.Unlock()
+
 	for i := 0; i < len(m.xmuxClients); {
 		xmuxClient := m.xmuxClients[i]
 		if xmuxClient.XmuxConn.IsClosed() ||
@@ -404,12 +451,12 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 
 	if len(m.xmuxClients) == 0 {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because xmuxClients is empty")
-		return m.newXmuxClient()
+		return m.newXmuxClientLocked()
 	}
 
 	if m.connections > 0 && len(m.xmuxClients) < int(m.connections) {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConnections was not hit, xmuxClients = ", len(m.xmuxClients))
-		return m.newXmuxClient()
+		return m.newXmuxClientLocked()
 	}
 
 	xmuxClients := make([]*XmuxClient, 0)
@@ -425,7 +472,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 
 	if len(xmuxClients) == 0 {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConcurrency was hit, xmuxClients = ", len(m.xmuxClients))
-		return m.newXmuxClient()
+		return m.newXmuxClientLocked()
 	}
 
 	// RTT-aware min-inflight scheduling:
