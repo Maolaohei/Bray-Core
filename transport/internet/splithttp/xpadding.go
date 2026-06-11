@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/http2/hpack"
 )
@@ -37,6 +38,14 @@ type XPaddingConfig struct {
 	Method    PaddingMethod
 }
 
+// randBufPool reuses the 256-byte buffer used in randStringFromCharset.
+var randBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 256)
+		return &b
+	},
+}
+
 func randStringFromCharset(n int, charset string) (string, bool) {
 	if n <= 0 || len(charset) == 0 {
 		return "", false
@@ -48,9 +57,11 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 	result := make([]byte, n)
 	i := 0
 
-	buf := make([]byte, 256)
+	sp := randBufPool.Get().(*[]byte)
+	buf := *sp
 	for i < n {
 		if _, err := rand.Read(buf); err != nil {
+			randBufPool.Put(sp)
 			return "", false
 		}
 		for _, rb := range buf {
@@ -64,6 +75,7 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 			}
 		}
 	}
+	randBufPool.Put(sp)
 
 	return string(result), true
 }
@@ -176,12 +188,15 @@ func ApplyPaddingToQuery(u *url.URL, key, value string) {
 	u.RawQuery = q.Encode()
 }
 
+// Pre-allocated default RangeConfig for XPaddingBytes.
+var defaultRangeConfigXPaddingBytes = &RangeConfig{
+	From: 100,
+	To:   1000,
+}
+
 func (c *Config) GetNormalizedXPaddingBytes() *RangeConfig {
 	if c.XPaddingBytes == nil || c.XPaddingBytes.To == 0 {
-		return &RangeConfig{
-			From: 100,
-			To:   1000,
-		}
+		return defaultRangeConfigXPaddingBytes
 	}
 
 	return c.XPaddingBytes
