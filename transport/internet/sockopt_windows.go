@@ -84,7 +84,7 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 		// 此处对 config.TcpCongestion 不做处理（直接忽略），防止跨平台配置导致 Windows 端运行报错。
 	}
 
-		if len(config.CustomSockopt) > 0 {
+	if len(config.CustomSockopt) > 0 {
 		for _, custom := range config.CustomSockopt {
 			if custom.System != "" && custom.System != runtime.GOOS {
 				errors.LogDebug(context.Background(), "CustomSockopt system not match: ", "want ", custom.System, " got ", runtime.GOOS)

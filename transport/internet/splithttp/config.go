@@ -18,12 +18,12 @@ import (
 
 // Pre-allocated default RangeConfig values to avoid per-request heap allocations.
 var (
-	defaultRangeConfigMaxPostBytes    = &RangeConfig{From: 1000000, To: 1000000}
-	defaultRangeConfigMinPostInterval = &RangeConfig{From: 30, To: 30}
-	defaultRangeConfigStreamUpSecs    = &RangeConfig{From: 20, To: 80}
+	defaultRangeConfigMaxPostBytes      = &RangeConfig{From: 1000000, To: 1000000}
+	defaultRangeConfigMinPostInterval   = &RangeConfig{From: 30, To: 30}
+	defaultRangeConfigStreamUpSecs      = &RangeConfig{From: 20, To: 80}
 	defaultRangeConfigUplinkChunkCookie = &RangeConfig{From: 2 * 1024, To: 3 * 1024}
 	defaultRangeConfigUplinkChunkHeader = &RangeConfig{From: 3 * 1000, To: 4 * 1000}
-	defaultRangeConfigZero            = &RangeConfig{From: 0, To: 0}
+	defaultRangeConfigZero              = &RangeConfig{From: 0, To: 0}
 )
 
 func (c *Config) GetNormalizedPath() string {

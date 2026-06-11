@@ -167,12 +167,12 @@ func (c *SimNetConn) SetWriteDeadline(t time.Time) error { return nil }
 // ============================================================================
 
 type vlessXhttpResult struct {
-	TotalBytes   int64
-	TotalErrors  int64
-	TotalReads   int64
-	TotalWrites  int64
-	Duration     time.Duration
-	RecoverTime  time.Duration // idle 后首次恢复时间
+	TotalBytes  int64
+	TotalErrors int64
+	TotalReads  int64
+	TotalWrites int64
+	Duration    time.Duration
+	RecoverTime time.Duration // idle 后首次恢复时间
 }
 
 func setupVlessXhttpServer(t *testing.T, mode string) (net.Port, func()) {
@@ -234,18 +234,18 @@ func setupVlessXhttpServer(t *testing.T, mode string) (net.Port, func()) {
 
 // NetworkProfile 模拟不同网络环境
 type NetworkProfile struct {
-	Name     string
-	Latency  time.Duration
-	Jitter   time.Duration
-	LossRate float64
+	Name      string
+	Latency   time.Duration
+	Jitter    time.Duration
+	LossRate  float64
 	Bandwidth int64
 }
 
 var networkProfiles = []NetworkProfile{
-	{"GoodLAN", 1 * time.Millisecond, 0, 0, 0},                              // 局域网
-	{"GoodWiFi", 5 * time.Millisecond, 2 * time.Millisecond, 0, 0},          // 好 WiFi
-	{"4G", 30 * time.Millisecond, 10 * time.Millisecond, 0.01, 10 * 1024 * 1024}, // 4G
-	{"BadWiFi", 50 * time.Millisecond, 20 * time.Millisecond, 0.05, 5 * 1024 * 1024}, // 差 WiFi
+	{"GoodLAN", 1 * time.Millisecond, 0, 0, 0},                                         // 局域网
+	{"GoodWiFi", 5 * time.Millisecond, 2 * time.Millisecond, 0, 0},                     // 好 WiFi
+	{"4G", 30 * time.Millisecond, 10 * time.Millisecond, 0.01, 10 * 1024 * 1024},       // 4G
+	{"BadWiFi", 50 * time.Millisecond, 20 * time.Millisecond, 0.05, 5 * 1024 * 1024},   // 差 WiFi
 	{"Oversea", 150 * time.Millisecond, 30 * time.Millisecond, 0.02, 20 * 1024 * 1024}, // 跨境
 }
 
@@ -387,8 +387,8 @@ func testContinuousTransfer(t *testing.T, profile NetworkProfile, duration time.
 					ProtocolSettings: &splithttp.Config{Path: "/bench"},
 					SecurityType:     "tls",
 					SecuritySettings: &tls.Config{
-						ServerName:         "localhost",
-						AllowInsecure:      true,
+						ServerName:           "localhost",
+						AllowInsecure:        true,
 						PinnedPeerCertSha256: [][]byte{ctHash[:]},
 					},
 				}),

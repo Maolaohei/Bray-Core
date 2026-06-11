@@ -238,16 +238,16 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 					err  error
 					body []byte
 				)
-			if first {
-				req, err = http.NewRequest("GET", firstURL, nil)
-			} else {
-				maps.Lock()
-				req, err = http.NewRequest("GET", string(prefix)+spiderPickPath(paths), nil)
-				maps.Unlock()
-			}
-			if err != nil || req == nil {
-				return
-			}
+				if first {
+					req, err = http.NewRequest("GET", firstURL, nil)
+				} else {
+					maps.Lock()
+					req, err = http.NewRequest("GET", string(prefix)+spiderPickPath(paths), nil)
+					maps.Unlock()
+				}
+				if err != nil || req == nil {
+					return
+				}
 				headerModes := []string{"nav", "chrome", "firefox", "safari"}
 				utils.TryDefaultHeadersWith(req.Header, headerModes[crypto.RandBetween(0, int64(len(headerModes)-1))])
 				if first && config.Show {

@@ -553,14 +553,14 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					dynamicHTTPClient, dynamicXmuxClient = getHTTPClient(ctx, dest, streamSettings)
 				}
 
-			go func(hClient DialerClient) {
-				err := hClient.PostPacket(
-					ctx,
-					requestURLStr,
-					sessionId,
-					seqStr,
-					chunk,
-				)
+				go func(hClient DialerClient) {
+					err := hClient.PostPacket(
+						ctx,
+						requestURLStr,
+						sessionId,
+						seqStr,
+						chunk,
+					)
 					wroteRequest.Close()
 					if err != nil {
 						errors.LogInfoInner(ctx, err, "failed to send upload")
