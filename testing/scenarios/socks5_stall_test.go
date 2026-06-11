@@ -2,9 +2,7 @@ package scenarios
 
 import (
 	"fmt"
-	"io"
 	"net"
-	"sync"
 	"testing"
 	"time"
 )
