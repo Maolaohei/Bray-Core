@@ -19,6 +19,7 @@ type XmuxClient struct {
 	leftUsage    int32
 	LeftRequests atomic.Int32
 	UnreusableAt time.Time
+	createdAt    time.Time
 	lastRTT      atomic.Int64 // nanoseconds, for RTT-aware scheduling
 }
 
@@ -64,8 +65,9 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		stopCh:      make(chan struct{}),
 	}
 
-	// Start pre-connect goroutine to maintain warm connections.
+	// Start background goroutines for connection management.
 	go m.preConnectLoop()
+	go m.healthCheckLoop()
 
 	return m
 }
@@ -88,9 +90,18 @@ func (m *XmuxManager) preConnectLoop() {
 	}
 }
 
-// healthCheckLoop periodically removes closed connections and ensures
-// the pool maintains a minimum number of healthy connections.
-// This provides fast fault detection (5s interval) and automatic recovery.
+const (
+	// maxRTTBeforeRemove is the maximum RTT (in ms) before a connection is considered unhealthy.
+	maxRTTBeforeRemove = 5000
+	// coldStartProtectionMs is the minimum age (in ms) before a connection can be removed by health check.
+	coldStartProtectionMs = 10000
+)
+
+// healthCheckLoop periodically checks connection health and removes unhealthy ones.
+// Improvements over original:
+// - Cold start protection: new connections (<10s) are not removed
+// - RTT-based: only remove if RTT > 5000ms (not just IsClosed)
+// - Does not remove active connections with low OpenUsage
 func (m *XmuxManager) healthCheckLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -100,20 +111,42 @@ func (m *XmuxManager) healthCheckLoop() {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			removed := 0
+			now := time.Now()
 			for i := 0; i < len(m.xmuxClients); {
 				xmuxClient := m.xmuxClients[i]
+
+				// Always remove closed connections immediately
 				if xmuxClient.XmuxConn.IsClosed() {
 					errors.LogDebug(context.Background(), "XMUX: health-check removing closed xmuxClient")
 					m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
-					removed++
-				} else {
-					i++
+					continue
 				}
+
+				// Skip if connection is actively being used
+				if xmuxClient.OpenUsage.Load() > 0 {
+					i++
+					continue
+				}
+
+				// Cold start protection: don't remove connections younger than 10s
+				if xmuxClient.createdAt.After(now.Add(-coldStartProtectionMs * time.Millisecond)) {
+					i++
+					continue
+				}
+
+				// RTT-based removal: only remove if RTT is extremely high
+				rttMs := xmuxClient.GetRTT().Milliseconds()
+				if rttMs > maxRTTBeforeRemove && xmuxClient.GetRTT() > 0 {
+					errors.LogDebug(context.Background(), "XMUX: health-check removing high-RTT xmuxClient, rtt=", rttMs, "ms")
+					m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
+					continue
+				}
+
+				i++
 			}
 
-			// If we removed connections, ensure pool stays above minimum
-			if removed > 0 && len(m.xmuxClients) == 0 {
+			// Ensure pool stays above minimum
+			if len(m.xmuxClients) == 0 {
 				errors.LogDebug(context.Background(), "XMUX: health-check creating xmuxClient because pool is empty after cleanup")
 				m.newXmuxClient()
 			}
@@ -130,6 +163,7 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 	xmuxClient := &XmuxClient{
 		XmuxConn:  m.newConnFunc(),
 		leftUsage: -1,
+		createdAt: time.Now(),
 	}
 	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
 		xmuxClient.leftUsage = x - 1
