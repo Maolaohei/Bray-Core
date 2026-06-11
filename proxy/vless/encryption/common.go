@@ -58,12 +58,8 @@ func (c *CommonConn) Write(b []byte) (int, error) {
 		n += len(b)
 		headerAndData := outBytes[:5+len(b)+16]
 		EncodeHeader(headerAndData, len(b)+16)
-		max := false
-		if bytes.Equal(c.AEAD.Nonce[:], MaxNonce) {
-			max = true
-		}
 		c.AEAD.Seal(headerAndData[:5], nil, b, headerAndData[:5])
-		if max {
+		if c.AEAD.IsMax {
 			c.AEAD = NewAEAD(headerAndData, c.UnitedKey, c.UseAES)
 		}
 		if c.PreWrite != nil {
@@ -132,7 +128,7 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 		dst = b[:len(dst)] // avoids another copy()
 	}
 	var newAEAD *AEAD
-	if bytes.Equal(c.PeerAEAD.Nonce[:], MaxNonce) {
+	if c.PeerAEAD.IsMax {
 		newAEAD = NewAEAD(append(peerHeader[:], peerData...), c.UnitedKey, c.UseAES)
 	}
 	_, err = c.PeerAEAD.Open(dst[:0], nil, peerData, peerHeader[:])
@@ -152,6 +148,7 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 type AEAD struct {
 	cipher.AEAD
 	Nonce [12]byte
+	IsMax bool // true when Nonce == MaxNonce
 }
 
 func NewAEAD(ctx, key []byte, useAES bool) *AEAD {
@@ -170,6 +167,7 @@ func NewAEAD(ctx, key []byte, useAES bool) *AEAD {
 func (a *AEAD) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 	if nonce == nil {
 		nonce = IncreaseNonce(a.Nonce[:])
+		a.IsMax = bytes.Equal(a.Nonce[:], MaxNonce)
 	}
 	return a.AEAD.Seal(dst, nonce, plaintext, additionalData)
 }
@@ -177,6 +175,7 @@ func (a *AEAD) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 func (a *AEAD) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
 	if nonce == nil {
 		nonce = IncreaseNonce(a.Nonce[:])
+		a.IsMax = bytes.Equal(a.Nonce[:], MaxNonce)
 	}
 	return a.AEAD.Open(dst, nonce, ciphertext, additionalData)
 }

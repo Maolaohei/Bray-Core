@@ -18,6 +18,28 @@ type Packet struct {
 	Seq     uint64
 }
 
+// PacketPool reuses Packet structs to reduce GC pressure.
+var PacketPool = sync.Pool{
+	New: func() any {
+		return &Packet{}
+	},
+}
+
+func NewPacket(reader io.ReadCloser, payload []byte, seq uint64) *Packet {
+	p := PacketPool.Get().(*Packet)
+	p.Reader = reader
+	p.Payload = payload
+	p.Seq = seq
+	return p
+}
+
+func ReleasePacket(p *Packet) {
+	p.Reader = nil
+	p.Payload = nil
+	p.Seq = 0
+	PacketPool.Put(p)
+}
+
 type uploadQueue struct {
 	reader          io.ReadCloser
 	nomore          bool
