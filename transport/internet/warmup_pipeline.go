@@ -16,18 +16,18 @@ var errNoIPsAvailable = errors.New("warmup: no IPs available")
 // WarmupPipeline orchestrates the full warmup flow:
 // DNS Warmup → Happy Eyeballs → PreConnect → Ready Connection
 type WarmupPipeline struct {
-	dnsResolver  DNSResolver
-	dialFunc     func(ctx context.Context, dest net.Destination, sockopt *SocketConfig) (net.Conn, error)
-	sockopt      *SocketConfig
-	domain       string
-	port         net.Port
+	dnsResolver DNSResolver
+	dialFunc    func(ctx context.Context, dest net.Destination, sockopt *SocketConfig) (net.Conn, error)
+	sockopt     *SocketConfig
+	domain      string
+	port        net.Port
 
 	// Results
-	resolvedIPs  []net.IP
-	bestConn     net.Conn
-	err          error
-	done         chan struct{}
-	once         sync.Once
+	resolvedIPs []net.IP
+	bestConn    net.Conn
+	err         error
+	done        chan struct{}
+	once        sync.Once
 }
 
 // DNSResolver resolves domain names to IP addresses.
@@ -132,8 +132,8 @@ func (p *WarmupPipeline) Result() WarmupResult {
 
 // WarmupManager manages warmup pipelines for multiple domains.
 type WarmupManager struct {
-	mu        sync.RWMutex
-	pipelines map[string]*WarmupPipeline
+	mu          sync.RWMutex
+	pipelines   map[string]*WarmupPipeline
 	dnsResolver DNSResolver
 	dialFunc    func(ctx context.Context, dest net.Destination, sockopt *SocketConfig) (net.Conn, error)
 	sockopt     *SocketConfig
@@ -146,7 +146,7 @@ func NewWarmupManager(
 	sockopt *SocketConfig,
 ) *WarmupManager {
 	return &WarmupManager{
-		pipelines:  make(map[string]*WarmupPipeline),
+		pipelines:   make(map[string]*WarmupPipeline),
 		dnsResolver: dnsResolver,
 		dialFunc:    dialFunc,
 		sockopt:     sockopt,

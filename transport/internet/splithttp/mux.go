@@ -68,15 +68,15 @@ type XmuxManager struct {
 	warmupQueue  []WarmupTarget
 	warmupMu     sync.Mutex
 	warmupSem    chan struct{} // semaphore for concurrent warmups
-	netHash      string       // current network hash for change detection
+	netHash      string        // current network hash for change detection
 	lastNetCheck time.Time
 
 	// Metrics for quantifiable validation
 	metrics struct {
 		// Connection reuse vs new
-		reuseHit  atomic.Int64 // XMUX pool hit (reuse connection)
-		newConn   atomic.Int64 // New connection created
-		warmupHit atomic.Int64 // Connection came from warmup
+		reuseHit   atomic.Int64 // XMUX pool hit (reuse connection)
+		newConn    atomic.Int64 // New connection created
+		warmupHit  atomic.Int64 // Connection came from warmup
 		warmupMiss atomic.Int64 // Warmup failed or not ready
 
 		// TTFB tracking (nanoseconds)
@@ -89,9 +89,9 @@ type XmuxManager struct {
 		netRecoveryTime  atomic.Int64 // Last recovery time (nanoseconds)
 
 		// Warmup stats
-		warmupEnqueue   atomic.Int64 // Domains enqueued
-		warmupSuccess   atomic.Int64 // Warmup connections established
-		warmupFailed    atomic.Int64 // Warmup connections failed
+		warmupEnqueue atomic.Int64 // Domains enqueued
+		warmupSuccess atomic.Int64 // Warmup connections established
+		warmupFailed  atomic.Int64 // Warmup connections failed
 	}
 }
 
@@ -538,18 +538,18 @@ func (m *XmuxManager) GetMetrics() XmuxMetrics {
 	}
 
 	return XmuxMetrics{
-		ReuseHit:       reuseHit,
-		NewConn:        newConn,
-		WarmupHit:      warmupHit,
-		WarmupMiss:     m.metrics.warmupMiss.Load(),
-		ReuseRate:      reuseRate,
-		AvgTTFB:        avgTTFB,
-		MaxTTFB:        time.Duration(m.metrics.ttfbMax.Load()),
-		TTFBSamples:    ttfbCount,
-		NetRecovery:    m.metrics.netRecoveryCount.Load(),
-		WarmupEnqueue:  m.metrics.warmupEnqueue.Load(),
-		WarmupSuccess:  m.metrics.warmupSuccess.Load(),
-		WarmupFailed:   m.metrics.warmupFailed.Load(),
+		ReuseHit:      reuseHit,
+		NewConn:       newConn,
+		WarmupHit:     warmupHit,
+		WarmupMiss:    m.metrics.warmupMiss.Load(),
+		ReuseRate:     reuseRate,
+		AvgTTFB:       avgTTFB,
+		MaxTTFB:       time.Duration(m.metrics.ttfbMax.Load()),
+		TTFBSamples:   ttfbCount,
+		NetRecovery:   m.metrics.netRecoveryCount.Load(),
+		WarmupEnqueue: m.metrics.warmupEnqueue.Load(),
+		WarmupSuccess: m.metrics.warmupSuccess.Load(),
+		WarmupFailed:  m.metrics.warmupFailed.Load(),
 	}
 }
 

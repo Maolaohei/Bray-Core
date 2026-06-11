@@ -21,12 +21,12 @@ type mockHandler struct {
 	senderSettings *serial.TypedMessage
 }
 
-func (h *mockHandler) Tag() string                                      { return h.tag }
-func (h *mockHandler) Start() error                                     { return nil }
-func (h *mockHandler) Close() error                                     { return nil }
+func (h *mockHandler) Tag() string                                        { return h.tag }
+func (h *mockHandler) Start() error                                       { return nil }
+func (h *mockHandler) Close() error                                       { return nil }
 func (h *mockHandler) Dispatch(ctx context.Context, link *transport.Link) {}
-func (h *mockHandler) ProxySettings() *serial.TypedMessage              { return h.proxySettings }
-func (h *mockHandler) SenderSettings() *serial.TypedMessage             { return h.senderSettings }
+func (h *mockHandler) ProxySettings() *serial.TypedMessage                { return h.proxySettings }
+func (h *mockHandler) SenderSettings() *serial.TypedMessage               { return h.senderSettings }
 
 type mockManager struct {
 	handlers []outbound.Handler
@@ -96,7 +96,7 @@ func TestExtractWarmupDomains_WithVlessConfig(t *testing.T) {
 	proxySettings := serial.ToTypedMessage(config)
 
 	handler := &mockHandler{
-		tag:            "test-vless",
+		tag:           "test-vless",
 		proxySettings: proxySettings,
 	}
 
@@ -126,7 +126,7 @@ func TestExtractWarmupDomains_IPNotExtracted(t *testing.T) {
 	proxySettings := serial.ToTypedMessage(config)
 
 	handler := &mockHandler{
-		tag:            "test-ip-only",
+		tag:           "test-ip-only",
 		proxySettings: proxySettings,
 	}
 
@@ -161,12 +161,12 @@ func TestExtractWarmupDomains_Deduplication(t *testing.T) {
 	}
 
 	handler1 := &mockHandler{
-		tag:            "test-1",
-		proxySettings:  serial.ToTypedMessage(config1),
+		tag:           "test-1",
+		proxySettings: serial.ToTypedMessage(config1),
 	}
 	handler2 := &mockHandler{
-		tag:            "test-2",
-		proxySettings:  serial.ToTypedMessage(config2),
+		tag:           "test-2",
+		proxySettings: serial.ToTypedMessage(config2),
 	}
 
 	mgr := &mockManager{handlers: []outbound.Handler{handler1, handler2}}

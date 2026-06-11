@@ -57,7 +57,7 @@ type HappyIPRecord struct {
 	smoothedRTT atomic.Int64 // nanoseconds, EWMA
 }
 
-func (r *HappyIPRecord) getFails() int        { return int(r.fails.Load()) }
+func (r *HappyIPRecord) getFails() int         { return int(r.fails.Load()) }
 func (r *HappyIPRecord) getSuccesses() int     { return int(r.successes.Load()) }
 func (r *HappyIPRecord) getSmoothedRTT() int64 { return r.smoothedRTT.Load() }
 

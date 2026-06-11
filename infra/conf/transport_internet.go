@@ -1044,15 +1044,15 @@ type CustomSockoptConfig struct {
 }
 
 type HappyEyeballsConfig struct {
-	PrioritizeIPv6       bool    `json:"prioritizeIPv6"`
-	TryDelayMs           uint64  `json:"tryDelayMs"`
-	Interleave           uint32  `json:"interleave"`
-	MaxConcurrentTry     uint32  `json:"maxConcurrentTry"`
-	V3Enabled            bool    `json:"v3Enabled"`
-	InitialRTTMs         int64   `json:"initialRTTMs"`
-	RTTWeight            float64 `json:"rttWeight"`
-	FailPenalty          float64 `json:"failPenalty"`
-	AdaptiveConcurrency  bool    `json:"adaptiveConcurrency"`
+	PrioritizeIPv6      bool    `json:"prioritizeIPv6"`
+	TryDelayMs          uint64  `json:"tryDelayMs"`
+	Interleave          uint32  `json:"interleave"`
+	MaxConcurrentTry    uint32  `json:"maxConcurrentTry"`
+	V3Enabled           bool    `json:"v3Enabled"`
+	InitialRTTMs        int64   `json:"initialRTTMs"`
+	RTTWeight           float64 `json:"rttWeight"`
+	FailPenalty         float64 `json:"failPenalty"`
+	AdaptiveConcurrency bool    `json:"adaptiveConcurrency"`
 }
 
 func (h *HappyEyeballsConfig) UnmarshalJSON(data []byte) error {
