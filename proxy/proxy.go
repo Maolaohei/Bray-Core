@@ -514,7 +514,7 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
 		contentLen = b.Len()
 	}
 	// P1: Use crypto/rand backed buffer pool instead of per-packet syscall.
-	// randpool.Global.IntN reads from a 64KB pre-filled crypto/rand buffer,
+	// randpool.Global.IntN reads from a 128KB pre-filled crypto/rand buffer,
 	// providing cryptographic security with ~3 syscalls/s instead of ~100K/s.
 	if contentLen < int32(testseed[0]) && longPadding {
 		if testseed[1] > 1 {

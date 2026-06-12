@@ -1,13 +1,13 @@
 package splithttp
 
 import (
-	"crypto/rand"
 	"math"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 
+	"github.com/xtls/xray-core/common/randpool"
 	"golang.org/x/net/http2/hpack"
 )
 
@@ -71,6 +71,21 @@ var paddingResultPool = sync.Pool{
 // to avoid repeated parsing of the same RawURL across requests.
 var parsedURLCache = sync.Map{}
 
+// huffmanLenCache caches HuffmanEncodeLength results by string length.
+// For base62 charset, encoding length depends only on string length, not content.
+// Security loss: 0 — this is a pure compute optimization.
+var huffmanLenCache sync.Map
+
+func cachedHuffmanLen(n int) int {
+	if v, ok := huffmanLenCache.Load(n); ok {
+		return v.(int)
+	}
+	s := strings.Repeat("A", n)
+	realLen := int(hpack.HuffmanEncodeLength(s))
+	huffmanLenCache.Store(n, realLen)
+	return realLen
+}
+
 func randStringFromCharset(n int, charset string) (string, bool) {
 	if n <= 0 || len(charset) == 0 {
 		return "", false
@@ -86,10 +101,8 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 	sp := randBufPool.Get().(*[]byte)
 	buf := *sp
 	for i < n {
-		if _, err := rand.Read(buf); err != nil {
-			randBufPool.Put(sp)
-			paddingResultPool.Put(rp)
-			return "", false
+		for j := range buf {
+			buf[j] = byte(randpool.Global.IntN(256))
 		}
 		for _, rb := range buf {
 			if rb >= limit {
@@ -116,7 +129,31 @@ func absInt(x int) int {
 	return x
 }
 
-func GenerateTokenishPaddingBase62(targetHuffmanBytes int) string {
+// tokenishPools per-length sync.Pool for pre-generated Tokenish padding.
+// Covers 32~1024 every 32 bytes. Init fills once; GC reclaims naturally.
+var tokenishPools [32]sync.Pool
+
+func init() {
+	for i := range tokenishPools {
+		huffmanLen := 32 + i*32
+		s := generateTokenishPaddingBase62Raw(huffmanLen)
+		tokenishPools[i].Put(&s)
+	}
+}
+
+func tokenishPoolIndex(huffmanLen int) int {
+	return (huffmanLen - 32) / 32
+}
+
+func getOrGenTokenish(huffmanLen int) string {
+	idx := tokenishPoolIndex(huffmanLen)
+	if item := tokenishPools[idx].Get(); item != nil {
+		return *item.(*string)
+	}
+	return generateTokenishPaddingBase62Raw(huffmanLen)
+}
+
+func generateTokenishPaddingBase62Raw(targetHuffmanBytes int) string {
 	n := int(math.Ceil(float64(targetHuffmanBytes) / avgHuffmanBytesPerCharBase62))
 	if n < 1 {
 		n = 1
@@ -132,7 +169,7 @@ func GenerateTokenishPaddingBase62(targetHuffmanBytes int) string {
 
 	// Adjust until close enough
 	for iter := 0; iter < maxIter; iter++ {
-		currentLength := int(hpack.HuffmanEncodeLength(randBase62Str))
+		currentLength := cachedHuffmanLen(len(randBase62Str))
 		diff := currentLength - targetHuffmanBytes
 
 		if absInt(diff) <= validationTolerance {
@@ -186,7 +223,10 @@ func GeneratePadding(method PaddingMethod, length int) string {
 	case PaddingMethodRepeatX:
 		return generateRepeatX(length)
 	case PaddingMethodTokenish:
-		paddingValue := GenerateTokenishPaddingBase62(length)
+		if length >= 32 && length <= 1024 && (length-32)%32 == 0 {
+			return getOrGenTokenish(length)
+		}
+		paddingValue := generateTokenishPaddingBase62Raw(length)
 		if paddingValue == "" {
 			return generateRepeatX(length)
 		}
@@ -382,7 +422,7 @@ func (c *Config) IsPaddingValid(paddingValue string, from, to int32, method Padd
 	case PaddingMethodTokenish:
 		const tolerance = int32(validationTolerance)
 
-		n := int32(hpack.HuffmanEncodeLength(paddingValue))
+		n := int32(cachedHuffmanLen(len(paddingValue)))
 		f := from - tolerance
 		t := to + tolerance
 		if f < 0 {

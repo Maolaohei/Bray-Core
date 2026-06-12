@@ -11,23 +11,25 @@ import (
 const bufferSize = 128 * 1024
 
 type Pool struct {
-	buf        [bufferSize]byte
-	offset     atomic.Uint32
+	buf       []byte
+	offset    atomic.Uint32
 	refillLock sync.Mutex
 }
 
 var Global Pool
 
 func init() {
+	Global.buf = make([]byte, bufferSize)
 	Global.refill()
 }
 
-func (p *Pool) refill() {
-	_, err := crand.Read(p.buf[:])
+func (p *Pool) refill() error {
+	_, err := crand.Read(p.buf)
 	if err != nil {
-		panic("randpool: crypto/rand.Read failed: " + err.Error())
+		return err
 	}
 	p.offset.Store(0)
+	return nil
 }
 
 func (p *Pool) ensure() {
@@ -43,9 +45,13 @@ func (p *Pool) ensure() {
 }
 
 func (p *Pool) nextUint32() uint32 {
-	p.ensure()
-	pos := p.offset.Add(4)
-	return binary.LittleEndian.Uint32(p.buf[pos-4 : pos])
+	for {
+		p.ensure()
+		old := p.offset.Add(4) - 4
+		if old+4 <= bufferSize {
+			return binary.LittleEndian.Uint32(p.buf[old : old+4])
+		}
+	}
 }
 
 func (p *Pool) IntN(n int) int {
