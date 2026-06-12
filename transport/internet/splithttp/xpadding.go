@@ -46,6 +46,31 @@ var randBufPool = sync.Pool{
 	},
 }
 
+// paddingBytePool reuses byte slices for RepeatX padding generation.
+// Sizing: common padding range is 100-1000 bytes; 8192 covers edge cases.
+var paddingBytePool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 8192)
+		for i := range b {
+			b[i] = 'X'
+		}
+		return &b
+	},
+}
+
+// paddingResultPool reuses result buffers for randStringFromCharset
+// to avoid per-request heap allocation.
+var paddingResultPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 8192)
+		return &b
+	},
+}
+
+// parsedURLCache caches url.Parse results for PlacementQueryInHeader
+// to avoid repeated parsing of the same RawURL across requests.
+var parsedURLCache = sync.Map{}
+
 func randStringFromCharset(n int, charset string) (string, bool) {
 	if n <= 0 || len(charset) == 0 {
 		return "", false
@@ -54,7 +79,8 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 	m := len(charset)
 	limit := byte(256 - (256 % m))
 
-	result := make([]byte, n)
+	rp := paddingResultPool.Get().(*[]byte)
+	result := (*rp)[:n]
 	i := 0
 
 	sp := randBufPool.Get().(*[]byte)
@@ -62,6 +88,7 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 	for i < n {
 		if _, err := rand.Read(buf); err != nil {
 			randBufPool.Put(sp)
+			paddingResultPool.Put(rp)
 			return "", false
 		}
 		for _, rb := range buf {
@@ -77,7 +104,9 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 	}
 	randBufPool.Put(sp)
 
-	return string(result), true
+	s := string(result)
+	paddingResultPool.Put(rp)
+	return s, true
 }
 
 func absInt(x int) int {
@@ -132,6 +161,16 @@ func GenerateTokenishPaddingBase62(targetHuffmanBytes int) string {
 	return randBase62Str
 }
 
+func generateRepeatX(length int) string {
+	if length <= 8192 {
+		bp := paddingBytePool.Get().(*[]byte)
+		s := string((*bp)[:length])
+		paddingBytePool.Put(bp)
+		return s
+	}
+	return strings.Repeat("X", length)
+}
+
 func GeneratePadding(method PaddingMethod, length int) string {
 	if length <= 0 {
 		return ""
@@ -145,15 +184,15 @@ func GeneratePadding(method PaddingMethod, length int) string {
 
 	switch method {
 	case PaddingMethodRepeatX:
-		return strings.Repeat("X", length)
+		return generateRepeatX(length)
 	case PaddingMethodTokenish:
 		paddingValue := GenerateTokenishPaddingBase62(length)
 		if paddingValue == "" {
-			return strings.Repeat("X", length)
+			return generateRepeatX(length)
 		}
 		return paddingValue
 	default:
-		return strings.Repeat("X", length)
+		return generateRepeatX(length)
 	}
 }
 
@@ -213,12 +252,20 @@ func (c *Config) ApplyXPaddingToHeader(h http.Header, config XPaddingConfig) {
 	case PlacementHeader:
 		h.Set(p.Header, paddingValue)
 	case PlacementQueryInHeader:
-		u, err := url.Parse(p.RawURL)
-		if err != nil || u == nil {
-			return
+		var baseURL *url.URL
+		if cached, ok := parsedURLCache.Load(p.RawURL); ok {
+			baseURL = cached.(*url.URL)
+		} else {
+			u, err := url.Parse(p.RawURL)
+			if err != nil || u == nil {
+				return
+			}
+			baseURL = u
+			parsedURLCache.Store(p.RawURL, baseURL)
 		}
-		u.RawQuery = p.Key + "=" + paddingValue
-		h.Set(p.Header, u.String())
+		clone := *baseURL
+		clone.RawQuery = p.Key + "=" + paddingValue
+		h.Set(p.Header, clone.String())
 	}
 }
 

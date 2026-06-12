@@ -1,7 +1,6 @@
 package splithttp
 
 import (
-	"bytes"
 	"context"
 	gotls "crypto/tls"
 	"encoding/base64"
@@ -226,18 +225,24 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				writer.Header().Set("Cache-Control", "no-store")
 				writer.WriteHeader(http.StatusOK)
 				scStreamUpServerSecs := h.config.GetNormalizedScStreamUpServerSecs()
-				referrer := request.Header.Get("Referer")
-				if referrer != "" && scStreamUpServerSecs.To > 0 {
-					go func() {
-						for {
-							_, err := httpSC.Write(bytes.Repeat([]byte{'X'}, int(h.config.GetNormalizedXPaddingBytes().rand())))
-							if err != nil {
-								break
-							}
-							time.Sleep(time.Duration(scStreamUpServerSecs.rand()) * time.Second)
+			referrer := request.Header.Get("Referer")
+			if referrer != "" && scStreamUpServerSecs.To > 0 {
+				go func() {
+					bp := paddingBytePool.Get().(*[]byte)
+					defer paddingBytePool.Put(bp)
+					for {
+						n := int(h.config.GetNormalizedXPaddingBytes().rand())
+						if n > len(*bp) {
+							n = len(*bp)
 						}
-					}()
-				}
+						_, err := httpSC.Write((*bp)[:n])
+						if err != nil {
+							break
+						}
+						time.Sleep(time.Duration(scStreamUpServerSecs.rand()) * time.Second)
+					}
+				}()
+			}
 				select {
 				case <-request.Context().Done():
 				case <-httpSC.Wait():
