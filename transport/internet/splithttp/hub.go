@@ -225,24 +225,24 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				writer.Header().Set("Cache-Control", "no-store")
 				writer.WriteHeader(http.StatusOK)
 				scStreamUpServerSecs := h.config.GetNormalizedScStreamUpServerSecs()
-			referrer := request.Header.Get("Referer")
-			if referrer != "" && scStreamUpServerSecs.To > 0 {
-				go func() {
-					bp := paddingBytePool.Get().(*[]byte)
-					defer paddingBytePool.Put(bp)
-					for {
-						n := int(h.config.GetNormalizedXPaddingBytes().rand())
-						if n > len(*bp) {
-							n = len(*bp)
+				referrer := request.Header.Get("Referer")
+				if referrer != "" && scStreamUpServerSecs.To > 0 {
+					go func() {
+						bp := paddingBytePool.Get().(*[]byte)
+						defer paddingBytePool.Put(bp)
+						for {
+							n := int(h.config.GetNormalizedXPaddingBytes().rand())
+							if n > len(*bp) {
+								n = len(*bp)
+							}
+							_, err := httpSC.Write((*bp)[:n])
+							if err != nil {
+								break
+							}
+							time.Sleep(time.Duration(scStreamUpServerSecs.rand()) * time.Second)
 						}
-						_, err := httpSC.Write((*bp)[:n])
-						if err != nil {
-							break
-						}
-						time.Sleep(time.Duration(scStreamUpServerSecs.rand()) * time.Second)
-					}
-				}()
-			}
+					}()
+				}
 				select {
 				case <-request.Context().Done():
 				case <-httpSC.Wait():
