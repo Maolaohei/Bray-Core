@@ -11,8 +11,8 @@ import (
 const bufferSize = 128 * 1024
 
 type Pool struct {
-	buf       []byte
-	offset    atomic.Uint32
+	buf        []byte
+	offset     atomic.Uint32
 	refillLock sync.Mutex
 }
 
