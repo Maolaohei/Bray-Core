@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"math/rand/v2"
 	"runtime"
 	"strconv"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/randpool"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
@@ -513,20 +513,18 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
 	if b != nil {
 		contentLen = b.Len()
 	}
-	// P1: Use math/rand/v2 pseudo-random instead of crypto/rand syscall.
-	// Padding length does not need cryptographic strength — ChaCha8 is sufficient
-	// and avoids a per-packet getrandom() / BCryptGenRandom syscall.
-	// Int64N panics on n<=0; the original crypto/rand+bignum path returns 0 for n<=1
-	// (range [0,0) → 0). Guard with the same threshold to preserve semantics.
+	// P1: Use crypto/rand backed buffer pool instead of per-packet syscall.
+	// randpool.Global.IntN reads from a 64KB pre-filled crypto/rand buffer,
+	// providing cryptographic security with ~3 syscalls/s instead of ~100K/s.
 	if contentLen < int32(testseed[0]) && longPadding {
 		if testseed[1] > 1 {
-			paddingLen = int32(rand.Int64N(int64(testseed[1]))) + int32(testseed[2]) - contentLen
+			paddingLen = int32(randpool.Global.IntN(int(testseed[1]))) + int32(testseed[2]) - contentLen
 		} else {
 			paddingLen = int32(testseed[2]) - contentLen
 		}
 	} else {
 		if testseed[3] > 1 {
-			paddingLen = int32(rand.Int64N(int64(testseed[3])))
+			paddingLen = int32(randpool.Global.IntN(int(testseed[3])))
 		}
 	}
 	if paddingLen > buf.Size-21-contentLen {
