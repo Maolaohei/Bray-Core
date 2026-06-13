@@ -72,9 +72,10 @@ func TestMetricsOutput(t *testing.T) {
 }
 
 type mockConn struct {
-	id int
+	id     int
+	closed bool
 }
 
 func (c *mockConn) IsClosed() bool {
-	return false
+	return c.closed
 }

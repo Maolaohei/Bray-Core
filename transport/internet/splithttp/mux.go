@@ -468,8 +468,17 @@ func (m *XmuxManager) healthCheckLoop() {
 				i++
 			}
 
-			// Ensure pool stays above minimum
-			if len(m.xmuxClients) == 0 {
+			// V2.1: Connection Migration — proactively create replacements
+			// When pool drops below effective limit, create new connections immediately
+			// instead of waiting for the next preConnectLoop tick.
+			effectiveConns := m.effectiveConnections()
+			if effectiveConns > 0 {
+				for len(m.xmuxClients) < int(effectiveConns) {
+					errors.LogDebug(context.Background(), "XMUX: migration creating xmuxClient, pool=", len(m.xmuxClients), ", target=", effectiveConns)
+					m.newXmuxClientLocked()
+				}
+			} else if len(m.xmuxClients) == 0 {
+				// Fallback: ensure at least 1 connection
 				errors.LogDebug(context.Background(), "XMUX: health-check creating xmuxClient because pool is empty after cleanup")
 				m.newXmuxClientLocked()
 			}

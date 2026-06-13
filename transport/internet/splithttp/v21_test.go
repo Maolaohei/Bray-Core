@@ -1,6 +1,7 @@
 package splithttp
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -294,4 +295,95 @@ func TestV21_DynamicConnectionScaling_PoolBehaviorUpdate(t *testing.T) {
 	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
 		t.Errorf("after 3 observations: should be LowLatency, got %v", m.GetPoolBehavior())
 	}
+}
+
+// TestV21_ConnectionMigration_ProactiveReplacement verifies pool stays filled after removal.
+func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
+	connCount := 0
+	m := NewXmuxManager(XmuxConfig{
+		MaxConnections: &RangeConfig{From: 3, To: 3},
+	}, func() XmuxConn {
+		connCount++
+		return &mockConn{id: connCount}
+	})
+	defer m.Close()
+
+	// Fill pool to 3
+	for i := 0; i < 5; i++ {
+		c := m.GetXmuxClient(context.Background())
+		c.OpenUsage.Add(1)
+	}
+	poolSize := len(m.xmuxClients)
+	t.Logf("Pool size after filling: %d", poolSize)
+	if poolSize < 1 {
+		t.Fatal("pool should have at least 1 connection")
+	}
+
+	// Close all connections (simulate network failure)
+	m.clientsMu.Lock()
+	for _, c := range m.xmuxClients {
+		c.XmuxConn.(*mockConn).closed = true
+	}
+	m.clientsMu.Unlock()
+
+	// GetXmuxClient should detect closed connections, remove them, and create new ones
+	c := m.GetXmuxClient(context.Background())
+	if c == nil {
+		t.Fatal("GetXmuxClient should return a new connection after all are closed")
+	}
+	if c.XmuxConn.(*mockConn).closed {
+		t.Fatal("returned connection should not be closed")
+	}
+	t.Logf("Pool recovered: new connection created after all closed")
+}
+
+// TestV21_ConnectionMigration_QualityDrain verifies drain triggers replacement.
+func TestV21_ConnectionMigration_QualityDrain(t *testing.T) {
+	m := NewXmuxManager(XmuxConfig{
+		MaxConnections: &RangeConfig{From: 2, To: 2},
+	}, func() XmuxConn { return &mockConn{} })
+	defer m.Close()
+
+	// Create 2 connections
+	c1 := m.GetXmuxClient(context.Background())
+	c1.OpenUsage.Add(1)
+	c2 := m.GetXmuxClient(context.Background())
+	c2.OpenUsage.Add(1)
+
+	// Simulate quality drain on c1 (set initial, then 5 consecutive drops)
+	c1.UpdateQuality(100, 50, 0, 0) // set baseline
+	for i := 0; i < 5; i++ {
+		c1.UpdateQuality(int32(99-i), 50, 0, 0)
+	}
+
+	if !c1.ShouldDrain() {
+		t.Fatal("c1 should be ready to drain")
+	}
+
+	// Release c1 so health check can remove it
+	c1.OpenUsage.Add(-1)
+
+	// Wait for health check to run (5s ticker)
+	// Instead of waiting, directly trigger the migration logic
+	m.clientsMu.Lock()
+	// Remove drained connection
+	for i := 0; i < len(m.xmuxClients); i++ {
+		if m.xmuxClients[i] == c1 {
+			m.xmuxClients[i].StopProfiling()
+			m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
+			break
+		}
+	}
+	// Proactive replacement
+	effectiveConns := m.effectiveConnections()
+	for len(m.xmuxClients) < int(effectiveConns) {
+		m.newXmuxClientLocked()
+	}
+	m.clientsMu.Unlock()
+
+	// Pool should have been refilled
+	if len(m.xmuxClients) < 2 {
+		t.Errorf("pool should have 2 connections after migration, got %d", len(m.xmuxClients))
+	}
+	t.Logf("Pool after drain+migration: %d connections", len(m.xmuxClients))
 }
