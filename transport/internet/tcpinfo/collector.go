@@ -16,6 +16,11 @@ type Collector interface {
 
 	// Source identifies the data source for this collector.
 	Source() quality.Source
+
+	// FeedRTT provides RTT measurements from the HTTP layer.
+	// Used by fallback collectors to estimate quality when TCP_INFO is unavailable.
+	// No-op on platforms with real TCP_INFO.
+	FeedRTT(rtt time.Duration)
 }
 
 // DefaultInterval is the default sampling interval.

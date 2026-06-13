@@ -77,6 +77,13 @@ func (p *Profile) OnUpdate(fn func(*quality.Snapshot)) {
 	p.onUpdate = fn
 }
 
+// FeedRTT provides RTT measurements from the HTTP layer to the collector.
+// On Linux this is a no-op (real TCP_INFO is used).
+// On Windows/macOS this feeds the estimated collector.
+func (p *Profile) FeedRTT(rtt time.Duration) {
+	p.collector.FeedRTT(rtt)
+}
+
 // Snapshot returns the current immutable snapshot. Lock-free read.
 func (p *Profile) Snapshot() *quality.Snapshot {
 	return (*quality.Snapshot)(atomic.LoadPointer(&p.snapshot))

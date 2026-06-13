@@ -84,8 +84,15 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	// Set RTT callback on DefaultDialerClient for RTT-aware scheduling
 	if dc, ok := client.(*DefaultDialerClient); ok {
+		// Shared profile reference — set by onNewConn, read by onRTT
+		var activeProfile interface{ FeedRTT(time.Duration) }
+
 		dc.SetOnRTT(func(rtt time.Duration) {
 			xmuxClient.UpdateRTT(rtt)
+			// Feed RTT to Profile collector (no-op on Linux, estimated on Windows)
+			if activeProfile != nil {
+				activeProfile.FeedRTT(rtt)
+			}
 		})
 
 		// Wire up TransportProfile: raw TCP socket → Profile → UpdateQuality → scoreClient
@@ -106,6 +113,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 			})
 			profile.Start()
 			xmuxClient.StartProfiling(profile)
+			activeProfile = profile
 		})
 	}
 

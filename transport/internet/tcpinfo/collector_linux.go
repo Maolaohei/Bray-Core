@@ -22,6 +22,9 @@ func (c *linuxCollector) Source() quality.Source {
 	return quality.SourceTCPInfo
 }
 
+// FeedRTT is a no-op on Linux — real RTT comes from getsockopt(TCP_INFO).
+func (c *linuxCollector) FeedRTT(rtt time.Duration) {}
+
 func (c *linuxCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 	tcpConn, ok := conn.(*net.TCPConn)
 	if !ok {
