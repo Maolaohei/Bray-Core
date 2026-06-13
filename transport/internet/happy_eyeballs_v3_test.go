@@ -75,11 +75,11 @@ func TestHappyIPRecord_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if record.getSuccesses() != 100 {
-		t.Errorf("expected 100 successes, got %d", record.getSuccesses())
-	}
-	if record.getFails() != 100 {
-		t.Errorf("expected 100 fails, got %d", record.getFails())
+	// EWMA: 100 successes + 100 failures with 0.95 decay.
+	// The failure rate should be around 0.5 (balanced success/fail).
+	rate := record.getFailureRate()
+	if rate < 0.3 || rate > 0.7 {
+		t.Errorf("expected failure rate around 0.5, got %f", rate)
 	}
 	if record.getSmoothedRTT() == 0 {
 		t.Error("expected non-zero smoothed RTT")
@@ -202,8 +202,8 @@ func TestClampRTT(t *testing.T) {
 
 func TestScore_NoRTTNotDominant(t *testing.T) {
 	// New IP with no RTT sample should NOT beat a known-good 20ms IP
-	known := HappyIPScore{IP: net.ParseIP("1.1.1.1"), RTT: 20e6, Successes: 10, Fails: 0}
-	newIP := HappyIPScore{IP: net.ParseIP("2.2.2.2"), RTT: 0, Successes: 0, Fails: 0}
+	known := HappyIPScore{IP: net.ParseIP("1.1.1.1"), RTT: 20e6, FailRate: 0.0}
+	newIP := HappyIPScore{IP: net.ParseIP("2.2.2.2"), RTT: 0, FailRate: 0.0}
 	if newIP.score() < known.score() {
 		t.Errorf("new IP (RTT=0) scored %.0f < known IP (RTT=20ms) %.0f — should not happen", newIP.score(), known.score())
 	}
@@ -211,8 +211,8 @@ func TestScore_NoRTTNotDominant(t *testing.T) {
 
 func TestScore_HighRTTNotInverted(t *testing.T) {
 	// High RTT IP should NOT beat low RTT IP
-	low := HappyIPScore{IP: net.ParseIP("1.1.1.1"), RTT: 20e6, Successes: 10, Fails: 0}
-	high := HappyIPScore{IP: net.ParseIP("2.2.2.2"), RTT: 3000e6, Successes: 10, Fails: 0}
+	low := HappyIPScore{IP: net.ParseIP("1.1.1.1"), RTT: 20e6, FailRate: 0.0}
+	high := HappyIPScore{IP: net.ParseIP("2.2.2.2"), RTT: 3000e6, FailRate: 0.0}
 	if high.score() < low.score() {
 		t.Errorf("high RTT (%.0f) scored lower than low RTT (%.0f) — score inversion", high.score(), low.score())
 	}

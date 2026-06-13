@@ -1,18 +1,6 @@
 # Bray-Core
 
-> 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能分支，专注 TCP 栈优化、连接池调度和安全性强化。
-
----
-
-## 项目简介
-
-Bray-Core 是 Xray-core 的增强分支，在保持 **100% 协议兼容性** 的前提下，提供：
-
-- **TCP 网络栈自动优化** — BBR、TCP_NOTSENT_LOWAT、DEFER_ACCEPT 默认启用
-- **XMUX 连接池** — 多路复用 + min-inflight 调度，降低延迟
-- **密码学安全随机数** — 128KB crypto/rand 缓冲池，syscall ↓99.997%
-- **Happy Eyeballs v3** — 新一代 IP 选择算法
-- **连接预热管道** — DNS 预热 + 连接预建 + 健康检查
+> 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能增强分支，专注于 TCP 优化、连接调度与智能网络决策，在保持 100% 协议兼容性的前提下提升复杂网络环境下的稳定性与连接成功率。
 
 ---
 
@@ -24,28 +12,6 @@ Bray-Core 是 Xray-core 的增强分支，在保持 **100% 协议兼容性** 的
 |------|------|
 | **Windows** | [V2rayN (原版内核)](https://github.com/2dust/v2rayn/releases) |
 | **Android** | [V2rayNG (Bray-Core 内核)](https://github.com/Maolaohei/v2rayNG/releases) |
-
-> Android 客户端仅替换内核，Windows 需手动替换 `bin/xray/` 路径下的内核文件。
-
-### 配置示例
-
-```json
-{
-  "streamSettings": {
-    "network": "xhttp",
-    "security": "reality",
-    "realitySettings": {},
-    "sockopt": {
-      "tcpFastOpen": true,
-      "happyEyeballs": {
-        "v3Enabled": true
-      }
-    }
-  }
-}
-```
-
-> BBR 和 TCP_NOTSENT_LOWAT 已默认启用，无需在配置中填写。
 
 ### 编译
 
@@ -69,7 +35,55 @@ sysctl -w net.core.wmem_max=16777216
 
 ---
 
-## 核心优化
+## Roadmap
+
+### V1.x — Performance & Stability ✅
+
+**已完成：**
+
+- TCP 网络栈优化 — BBR / TCP_NOTSENT_LOWAT / DEFER_ACCEPT / NODELAY / QUICKACK
+- XHTTP / VLESS 优化 — Vision Fast Path、手写 protobuf、AddonsPool
+- XMUX v3 — Min-Inflight Scheduling、RTT-aware Scheduling、Connection Reuse Metrics
+- Happy Eyeballs v3 — Dynamic Parallelism、Historical Learning、Score-based IP Selection
+- Warmup Pipeline — 连接预热 + DNS 预热 + 健康检查
+- 安全性强化 — CSPRNG 缓冲池、rejection sampling、Huffman 缓存
+
+### V2.0 — Transport Intelligence Layer ✅
+
+**状态：已完成**
+
+核心原则：Observe → Decide → Control
+
+TransportProfile 仅负责观测网络状态，不参与决策逻辑。
+
+**已实现：**
+
+| 模块 | 状态 |
+|------|------|
+| TransportProfile — RTT / Loss / Retrans / Confidence / Source / Timestamp | ✅ |
+| Quality Model — Overall / Latency / Loss / Stability 多维评分 | ✅ |
+| XMUX V2.0 — QualityScore / Trend / Graceful Drain | ✅ |
+| HEv3 V2.0 — EWMA Failure Tracking / Quality-aware Scoring | ✅ |
+| Debug API — Snapshot / Reason / History (64-sample ring buffer) | ✅ |
+| NetworkLearner — Behavior Classification (6 types) | ✅ |
+| Pipeline Integration — Profile → UpdateQuality → scoreClient | ✅ |
+
+### V2.1 — Adaptive Transport (规划中)
+
+- Adaptive XMUX — Dynamic Concurrency / Dynamic Connection Scaling
+- Feedback-driven Scheduling
+- 需建立在成熟的 TransportProfile 与 Quality Model 之上
+
+### V3.x — Network Learning (研究阶段)
+
+- IPv4/IPv6 行为学习
+- 运营商行为识别
+- 链路退化趋势预测
+- Transport Behavior Recognition（不依赖算法名称，基于真实链路行为）
+
+---
+
+## 核心架构
 
 ### TCP 网络栈（默认即最优）
 
@@ -80,80 +94,75 @@ sysctl -w net.core.wmem_max=16777216
 | TCP_DEFER_ACCEPT (3s) | 省一次上下文切换 | 未启用 |
 | TCP_NODELAY | 禁用 Nagle，延迟降低 | 未启用 |
 | TCP_QUICKACK | 禁用延迟 ACK，TLS 加速 | 未启用 |
-| Dial 超时 16s→8s | 更快失败恢复 | 16 秒 |
 
-### 安全性强化
+### XMUX 连接池
 
-| 优化 | 说明 | 效果 |
-|------|------|------|
-| randpool 缓冲池 | 128KB crypto/rand 预读 | syscall ↓99.997% |
-| rejection sampling | 消除 modulo bias | 完全无偏随机 |
-| Huffman 缓存 | sync.Map 按长度缓存 | 安全性损失为零 |
-| Tokenish 分池 | [32]sync.Pool，按需生成 | 性能 + 安全性 |
-
-### 性能优化
-
-| 优化 | 说明 | 效果 |
-|------|------|------|
-| URL 解析缓存 | sync.Map 缓存 url.Parse | 解析次数 ↓95% |
-| 默认值缓存 | 预分配 RangeConfig | 内存分配 ↓ |
-| requestURL 预计算 | 循环外计算 | 每请求省一次计算 |
-| VLESS AddonsPool | 复用 Addons 结构体 | 每连接省 1 次堆分配 |
-| VLESS Vision Fast Path | 预编码 xtls-rprx-vision | 零分配 |
-| VLESS 手写 protobuf | 移除反射开销 | 性能提升 |
-| fmt.Sprintf → strconv | 134+ 处替换 | 减少反射分配 |
-
-### 功能增强
-
-| 功能 | 说明 |
+| 特性 | 说明 |
 |------|------|
-| XMUX 连接池 | 多路复用 + min-inflight 调度 |
-| Happy Eyeballs v3 | 新一代 IP 选择算法 |
-| Warmup 管道 | 连接预热 + DNS 预热 + 健康检查 |
-| H3 fallback | HTTP/3 降级机制 |
-| REALITY 增强 | 连接复用 + Session Tickets |
+| Min-Inflight Scheduling | 选择最少在途请求的连接 |
+| RTT-aware Scheduling | 基于 EWMA 平滑 RTT 调度 |
+| QualityScore V2.0 | inflight×10000 + rttMs×10 + retrans×50 + lossRate/20 |
+| Graceful Drain | 连续 5 次质量下降 + confidence≥30 时优雅移除 |
+| Pre-connect | 后台每 5s 检查池，空池自动创建 |
+| Health Check | 5s 周期，RTT>5s / Closed / Drain 三重检测 |
 
-### 稳定性修复
+### Happy Eyeballs v3
 
-| 修复 | 说明 |
+| 特性 | 说明 |
 |------|------|
-| splitConn.Close | 返回正确 error 而非 nil |
-| WebSocket 心跳泄漏 | goroutine 正确退出 |
-| retry 致命错误短路 | 不可达地址不重试 |
-| TLS Session Tickets | 启用减少握手 |
-| ECH h2c 修复 | DNS over HTTPS 路由 |
-| 预连接指数退避 | 避免雷鸣群效应 |
+| Score-based Selection | priority×1e9 + rttTerm×(1 + failRate×10 + lossPenalty) |
+| EWMA Failure Tracking | 0.95 衰减，无双计数器，无清理协程 |
+| Quality-aware Scoring | Loss penalty 来自 TransportProfile |
+| Dynamic Parallelism | 自适应并行连接数 |
+
+### Transport Intelligence
+
+```
+TCP socket → Profile.Collect(TCP_INFO) → Snapshot
+    ↓
+Quality Score (Overall/Latency/Loss/Stability)
+    ↓
+XMUX.UpdateQuality() → scoreClient() → scheduling decision
+    ↓
+HEv3.UpdateQuality() → score() → IP selection
+```
 
 ---
 
 ## 性能数据
 
-### pprof 验证
+**测试环境**: i5-13600KF, Windows, amd64, Go 1.26
 
-| 指标 | 上游 | 魔改 | 改善 |
-|------|------|------|------|
-| Padding syscall/秒 | ~100K | ~3 | **↓99.997%** |
-| Huffman 计算 | 每次 | 缓存 | **↓~90%** |
-| URL 解析 | 每次 | 缓存 | **↓~95%** |
-| GC marking CPU | 7.08% | 3.77% | **↓47%** |
-| 内存分配 | 基线 | 优化 | **↓15-20%** |
+### Bray vs 上游 Xray-core
 
-### 吞吐测试
+| Benchmark | 上游 (ns/op) | Bray (ns/op) | Delta |
+|-----------|-------------|-------------|-------|
+| NewBuffer | 47.15 | 43.13 | **-8.5%** |
+| NewBufferStack | 30.06 | 28.16 | **-6.3%** |
+| Copy | 98.13 | 90.71 | **-7.6%** |
+| SplitBytes | 159.4 | 156.0 | **-2.1%** |
+| ChaCha20 | 625 MB/s | 598 MB/s | ~0 |
+| AES Encryption | 1006 MB/s | 1004 MB/s | ~0 |
+| FrameWrite | 47.93 | 47.34 | ~0 |
 
-| 版本 | H2C | H2 (TLS) |
-|------|:---:|:--------:|
-| 上游 | 38.0 Mbps | 38.0 Mbps |
-| **Bray-Core** | **38.0 Mbps** | **38.0 Mbps** |
+### XMUX Hot Paths
 
-> XHTTP 性能与上游持平。实际网络场景下，BBR 默认启用和 TCP 栈优化会带来真实吞吐提升。
+| Benchmark | ns/op | allocs |
+|-----------|-------|--------|
+| GetXmuxClient | 17 | 0 |
+| RTTEWMA | 8.4 | 0 |
+| WarmupEnqueue | 10.8 | 0 |
+| Metrics | 11.0 | 0 |
+| ConcurrentRW (16 workers) | 32,269 | 0 |
 
-### XMUX 指标
+### Happy Eyeballs v3
 
-| 指标 | 测试值 | 目标 |
-|------|--------|------|
-| Reuse Rate | 93.3% | ≥ 90% ✅ |
-| Avg TTFB | 38.5ms | < 100ms ✅ |
-| Max TTFB | 67ms | < 200ms ✅ |
+| Benchmark | ns/op | allocs |
+|-----------|-------|--------|
+| Score | 0.21 | 0 |
+| ClampRTT | 0.10 | 0 |
+| SortIPs (large) | 1,965 | - |
+| ScoreIPs | 1,124 | - |
 
 ---
 
@@ -161,21 +170,24 @@ sysctl -w net.core.wmem_max=16777216
 
 | 场景 | 兼容性 |
 |------|--------|
-| 上游客户端 → 魔改服务器 | ✅ 100% |
-| 魔改客户端 → 上游服务器 | ✅ 100% |
+| 上游客户端 → Bray 服务器 | ✅ 100% |
+| Bray 客户端 → 上游服务器 | ✅ 100% |
 | 配置格式 | ✅ 向后兼容 |
 
 ---
 
-## 测试覆盖
+## 测试
 
-| 测试 | 说明 |
-|------|------|
-| 压力测试 | 5 网络环境 × 5 场景 |
-| 耐久测试 | 长时间运行验证 |
-| 指标测试 | XMUX 性能指标 |
-| SOCKS5 停滞测试 | 真实环境连接测试 |
-| VLESS encoding benchmark | Vision Fast Path 零分配 |
+```bash
+# XMUX 单元测试
+go test -run "TestXMUX|TestMetrics" ./transport/internet/splithttp/
+
+# XMUX benchmarks
+go test -bench "^BenchmarkXMUX" -run "^$" -timeout 30s ./transport/internet/splithttp/
+
+# 全量 benchmarks
+go test -bench "BenchmarkNewBuffer|BenchmarkCopy|BenchmarkSplitBytes" -run "^$" -timeout 60s ./common/buf/
+```
 
 ---
 

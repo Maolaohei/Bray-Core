@@ -24,6 +24,10 @@ func TestMaxConnections(t *testing.T) {
 	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
 		return &fakeRoundTripper{}
 	})
+	defer xmuxManager.Close()
+
+	// preConnectLoop creates 1 initial connection. Drain it first.
+	xmuxManager.GetXmuxClient(context.Background())
 
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 8; i++ {
@@ -44,13 +48,20 @@ func TestCMaxReuseTimes(t *testing.T) {
 		return &fakeRoundTripper{}
 	})
 
+	// Let preConnectLoop finish creating the initial connection, then close.
+	xmuxManager.Close()
+
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {
 		xmuxClients[xmuxManager.GetXmuxClient(context.Background())] = struct{}{}
 	}
 
-	if len(xmuxClients) != 32 {
-		t.Error("did not get 32 distinct clients, got ", len(xmuxClients))
+	// preConnectLoop may create 1 extra client before Close takes effect.
+	// With CMaxReuseTimes=2: 64 calls / 2 = 32 clients from the test loop.
+	// Plus possibly 1 from preConnectLoop = 32 or 33.
+	n := len(xmuxClients)
+	if n != 32 && n != 33 {
+		t.Error("expected 32 or 33 distinct clients, got ", n)
 	}
 }
 
@@ -81,6 +92,7 @@ func TestDefault(t *testing.T) {
 	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
 		return &fakeRoundTripper{}
 	})
+	defer xmuxManager.Close()
 
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {

@@ -39,6 +39,7 @@ type requestHandler struct {
 	sessions       sync.Map
 	localAddr      net.Addr
 	socketSettings *internet.SocketConfig
+	stopCh         chan struct{}
 }
 
 type httpSession struct {
@@ -75,8 +76,11 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 
 	shouldReap := done.New()
 	go func() {
-		time.Sleep(30 * time.Second)
-		shouldReap.Close()
+		select {
+		case <-time.After(30 * time.Second):
+			shouldReap.Close()
+		case <-h.stopCh:
+		}
 	}()
 	go func() {
 		select {
@@ -84,6 +88,9 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 			h.sessions.Delete(sessionId)
 			s.uploadQueue.Close()
 		case <-s.isFullyConnected.Wait():
+		case <-h.stopCh:
+			h.sessions.Delete(sessionId)
+			s.uploadQueue.Close()
 		}
 	}()
 
@@ -239,7 +246,12 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 							if err != nil {
 								break
 							}
-							time.Sleep(time.Duration(scStreamUpServerSecs.rand()) * time.Second)
+							sleepDur := time.Duration(scStreamUpServerSecs.rand()) * time.Second
+							select {
+							case <-time.After(sleepDur):
+							case <-request.Context().Done():
+								return
+							}
 						}
 					}()
 				}
@@ -447,6 +459,7 @@ type Listener struct {
 	h3listener http3.QUICListener
 	config     *Config
 	addConn    internet.ConnHandler
+	handler    *requestHandler
 	isH3       bool
 }
 
@@ -468,7 +481,9 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		sessionMu:      &sync.Mutex{},
 		sessions:       sync.Map{},
 		socketSettings: streamSettings.SocketSettings,
+		stopCh:         make(chan struct{}),
 	}
+	l.handler = handler
 	tlsConfig := getTLSConfig(streamSettings)
 	l.isH3 = len(tlsConfig.NextProtos) == 1 && tlsConfig.NextProtos[0] == "h3"
 
@@ -598,6 +613,9 @@ func (ln *Listener) Addr() net.Addr {
 
 // Close implements net.Listener.Close().
 func (ln *Listener) Close() error {
+	if ln.handler != nil {
+		close(ln.handler.stopCh)
+	}
 	if ln.h3server != nil {
 		if err := ln.h3server.Close(); err != nil {
 			return err

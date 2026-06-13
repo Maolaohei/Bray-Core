@@ -24,6 +24,16 @@ type XmuxClient struct {
 	UnreusableAt time.Time
 	createdAt    time.Time
 	lastRTT      atomic.Int64 // nanoseconds, for RTT-aware scheduling
+
+	// V2.0: link-quality metrics for smarter scheduling
+	lastRetrans   atomic.Int32 // cumulative retransmit count from TCP_INFO
+	lastLoss      atomic.Int64 // loss rate × 10000 (fixed-point, 0-10000)
+	qualityScore  atomic.Int32 // 0-100, computed by TransportProfile
+	confidence    atomic.Int32 // 0-100, how much we trust the quality data
+	consecDrops   atomic.Int32 // consecutive quality drops, for drain
+
+	// TransportProfile for this connection. Created when TCP connection is established.
+	profile interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
 }
 
 // UpdateRTT updates the smoothed RTT for this connection using EWMA.
@@ -49,6 +59,48 @@ func (c *XmuxClient) GetRTT() time.Duration {
 	return time.Duration(c.lastRTT.Load())
 }
 
+// UpdateQuality updates link-quality metrics from a TransportProfile snapshot.
+// Called by the profile's background collector or XMUX integration layer.
+func (c *XmuxClient) UpdateQuality(qualityScore, confidence, retrans int32, lossRate int64) {
+	oldScore := c.qualityScore.Load()
+	c.qualityScore.Store(qualityScore)
+	c.confidence.Store(confidence)
+	c.lastRetrans.Store(retrans)
+	c.lastLoss.Store(lossRate)
+
+	// Track consecutive quality drops for drain
+	if qualityScore < oldScore && oldScore > 0 {
+		c.consecDrops.Add(1)
+	} else {
+		c.consecDrops.Store(0)
+	}
+}
+
+// ShouldDrain returns true if this connection should be drained
+// due to consecutive quality drops (5+ drops in a row).
+func (c *XmuxClient) ShouldDrain() bool {
+	return c.consecDrops.Load() >= 5
+}
+
+// StartProfiling attaches a TransportProfile to this client.
+// The profile periodically collects TCP_INFO and feeds it to UpdateQuality.
+// The conn must be the raw TCP socket (before TLS/REALITY wrapping).
+func (c *XmuxClient) StartProfiling(conn interface{ Stop() }) {
+	if conn == nil {
+		return
+	}
+	c.StopProfiling() // stop any existing profile
+	c.profile = conn
+}
+
+// StopProfiling stops the TransportProfile background goroutine.
+func (c *XmuxClient) StopProfiling() {
+	if c.profile != nil {
+		c.profile.Stop()
+		c.profile = nil
+	}
+}
+
 // WarmupTarget represents a domain that should be pre-connected.
 type WarmupTarget struct {
 	Domain    string
@@ -64,6 +116,7 @@ type XmuxManager struct {
 	xmuxClients []*XmuxClient
 	clientsMu   sync.Mutex // protects xmuxClients slice
 	stopCh      chan struct{}
+	doneCh      chan struct{} // closed when all goroutines exit
 
 	// Dynamic warmup queue
 	warmupQueue  []WarmupTarget
@@ -104,14 +157,21 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		newConnFunc: newConnFunc,
 		xmuxClients: make([]*XmuxClient, 0),
 		stopCh:      make(chan struct{}),
+		doneCh:      make(chan struct{}),
 		warmupQueue: make([]WarmupTarget, 0),
 		warmupSem:   make(chan struct{}, 2), // max 2 concurrent warmups
 	}
 
 	// Start background goroutines for connection management.
-	go m.preConnectLoop()
-	go m.healthCheckLoop()
-	go m.networkWatchLoop()
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() { defer wg.Done(); m.preConnectLoop() }()
+		go func() { defer wg.Done(); m.healthCheckLoop() }()
+		go func() { defer wg.Done(); m.networkWatchLoop() }()
+		wg.Wait()
+		close(m.doneCh)
+	}()
 
 	return m
 }
@@ -338,6 +398,7 @@ func (m *XmuxManager) healthCheckLoop() {
 				// Always remove closed connections immediately
 				if xmuxClient.XmuxConn.IsClosed() {
 					errors.LogDebug(context.Background(), "XMUX: health-check removing closed xmuxClient")
+					xmuxClient.StopProfiling()
 					m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
 					continue
 				}
@@ -354,10 +415,19 @@ func (m *XmuxManager) healthCheckLoop() {
 					continue
 				}
 
+				// V2.0: Quality-based drain — consecutive quality drops
+				if xmuxClient.ShouldDrain() && xmuxClient.confidence.Load() >= 30 {
+					errors.LogDebug(context.Background(), "XMUX: health-check draining quality-degraded xmuxClient, consecutiveDrops=", xmuxClient.consecDrops.Load())
+					xmuxClient.StopProfiling()
+					m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
+					continue
+				}
+
 				// RTT-based removal: only remove if RTT is extremely high
 				rttMs := xmuxClient.GetRTT().Milliseconds()
 				if rttMs > maxRTTBeforeRemove && xmuxClient.GetRTT() > 0 {
 					errors.LogDebug(context.Background(), "XMUX: health-check removing high-RTT xmuxClient, rtt=", rttMs, "ms")
+					xmuxClient.StopProfiling()
 					m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
 					continue
 				}
@@ -375,9 +445,10 @@ func (m *XmuxManager) healthCheckLoop() {
 	}
 }
 
-// Close stops the background goroutines.
+// Close stops the background goroutines and waits for them to finish.
 func (m *XmuxManager) Close() {
 	close(m.stopCh)
+	<-m.doneCh
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
@@ -498,8 +569,16 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 
 // scoreClient computes a scheduling score for a connection.
 // Lower score = better candidate.
-// Formula: inflight * 1000 + rtt_ms
-// This ensures inflight is the primary factor, with RTT as tiebreaker.
+//
+// V2.0 formula (weighted by confidence):
+//
+//	base = inflight * 10000 + rttMs * 10
+//	retransPenalty = retransCount * 50  (if available)
+//	lossPenalty = lossRate * 10000      (if available)
+//	confidence = connection.confidence (0-100)
+//
+// When confidence < 30, penalties are reduced (data not trustworthy).
+// When confidence >= 80, full penalties applied.
 func scoreClient(c *XmuxClient) int64 {
 	inflight := int64(c.OpenUsage.Load())
 	rttMs := c.GetRTT().Milliseconds()
@@ -508,7 +587,23 @@ func scoreClient(c *XmuxClient) int64 {
 	} else if rttMs > 999 {
 		rttMs = 999 // cap at 999ms to prevent score inversion
 	}
-	return inflight*1000 + rttMs
+
+	score := inflight*10000 + rttMs*10
+
+	// V2.0: retrans and loss penalties
+	// Retrans penalty: each retrans costs 50 points
+	retrans := int64(c.lastRetrans.Load())
+	if retrans > 100 {
+		retrans = 100 // cap
+	}
+	score += retrans * 50
+
+	// Loss penalty: lossRate is fixed-point × 10000 (0-10000)
+	// At 5% loss → 500, penalty = 25 points
+	lossRate := c.lastLoss.Load()
+	score += lossRate / 20
+
+	return score
 }
 
 // Metrics methods for quantifiable validation

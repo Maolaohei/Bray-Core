@@ -32,6 +32,8 @@ import (
 	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
+	"github.com/xtls/xray-core/transport/internet/tcpinfo"
+	"github.com/xtls/xray-core/transport/internet/quality"
 	"github.com/xtls/xray-core/transport/pipe"
 	"golang.org/x/net/http2"
 )
@@ -85,6 +87,26 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		dc.SetOnRTT(func(rtt time.Duration) {
 			xmuxClient.UpdateRTT(rtt)
 		})
+
+		// Wire up TransportProfile: raw TCP socket → Profile → UpdateQuality → scoreClient
+		dc.SetOnNewConn(func(rawConn net.Conn) {
+			profile := tcpinfo.NewProfile(rawConn, nil)
+			profile.OnUpdate(func(snap *quality.Snapshot) {
+				q := int32(snap.Quality.Overall)
+				conf := int32(snap.Confidence)
+				var retrans int32
+				if snap.Retrans.Valid {
+					retrans = int32(snap.Retrans.Value)
+				}
+				var lossRate int64
+				if snap.Loss.Valid {
+					lossRate = int64(snap.Loss.Value * 10000)
+				}
+				xmuxClient.UpdateQuality(q, conf, retrans, lossRate)
+			})
+			profile.Start()
+			xmuxClient.StartProfiling(profile)
+		})
 	}
 
 	return client, xmuxClient
@@ -126,15 +148,27 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 
 	transportConfig := streamSettings.ProtocolSettings.(*Config)
 
+	dc := &DefaultDialerClient{
+		transportConfig: transportConfig,
+		httpVersion:     httpVersion,
+	}
+
 	dialContext := func(ctxInner context.Context) (net.Conn, error) {
 		t0 := time.Now()
-		conn, err := internet.DialSystem(ctxInner, dest, streamSettings.SocketSettings)
+		rawConn, err := internet.DialSystem(ctxInner, dest, streamSettings.SocketSettings)
 		tcpDur := time.Since(t0)
 		if err != nil {
 			errors.LogDebug(ctxInner, "XHTTP dial: TCP failed in ", tcpDur.Round(time.Millisecond), ": ", err)
 			return nil, err
 		}
 		errors.LogDebug(ctxInner, "XHTTP dial: TCP connected in ", tcpDur.Round(time.Millisecond))
+
+		// Notify profiling: raw TCP socket before TLS/REALITY wrapping
+		if dc.onNewConn != nil {
+			dc.onNewConn(rawConn)
+		}
+
+		conn := rawConn
 
 		if streamSettings.TcpmaskManager != nil {
 			newConn, err := streamSettings.TcpmaskManager.WrapConnClient(conn)
@@ -333,17 +367,13 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		}
 	}
 
-	client := &DefaultDialerClient{
-		transportConfig: transportConfig,
-		client: &http.Client{
-			Transport: transport,
-		},
-		httpVersion:    httpVersion,
-		uploadRawPool:  &sync.Pool{},
-		dialUploadConn: dialContext,
+	dc.client = &http.Client{
+		Transport: transport,
 	}
+	dc.uploadRawPool = &sync.Pool{}
+	dc.dialUploadConn = dialContext
 
-	return client
+	return dc
 }
 
 func init() {
@@ -567,7 +597,14 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				seq += 1
 
 				if scMinPostsIntervalMs.From > 0 {
-					time.Sleep(time.Duration(scMinPostsIntervalMs.rand())*time.Millisecond - time.Since(lastWrite))
+					sleepDur := time.Duration(scMinPostsIntervalMs.rand())*time.Millisecond - time.Since(lastWrite)
+					if sleepDur > 0 {
+						select {
+						case <-time.After(sleepDur):
+						case <-ctx.Done():
+							return
+						}
+					}
 				}
 
 				lastWrite = time.Now()

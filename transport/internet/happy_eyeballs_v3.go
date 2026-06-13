@@ -11,11 +11,13 @@ import (
 
 // HappyIPScore holds scoring data for a single IP address used in v3 sorting.
 type HappyIPScore struct {
-	IP        net.IP
-	Priority  int64 // from DNS SVCB/HTTPS record, lower = higher priority
-	RTT       int64 // smoothed RTT in nanoseconds
-	Successes int
-	Fails     int
+	IP       net.IP
+	Priority int64  // from DNS SVCB/HTTPS record, lower = higher priority
+	RTT      int64  // smoothed RTT in nanoseconds
+	FailRate float64 // V2.0: EWMA failure rate 0.0-1.0 (replaces Successes/Fails)
+
+	// V2.0: loss rate from TransportProfile (0-10000 fixed-point, 0=none, 10000=100%)
+	LastLoss int64
 }
 
 const (
@@ -41,30 +43,89 @@ func clampRTT(rtt int64) int64 {
 }
 
 // score computes a composite priority score. Lower is better.
+//
+// V2.0 formula:
+//
+//	base = priority * 1e9
+//	rttTerm = rttNs * (1 + failRate*10 + lossPenalty)
+//
+// failRate comes from EWMA (0.0-1.0), no counters needed.
+// lossPenalty comes from external quality data (TCP_INFO).
 func (s *HappyIPScore) score() float64 {
-	failRate := float64(0)
-	if s.Successes+s.Fails > 0 {
-		failRate = float64(s.Fails) / float64(s.Successes+s.Fails)
-	}
 	rttScore := float64(clampRTT(s.RTT))
-	return float64(s.Priority)*1e9 + rttScore*(1+failRate*10)
+
+	// V2.0: loss penalty (0-1.0 scale, increases RTT effective cost)
+	var lossPenalty float64
+	if s.LastLoss > 0 {
+		lossPenalty = float64(s.LastLoss) / 10000.0
+	}
+
+	rttTerm := rttScore * (1 + s.FailRate*10 + lossPenalty)
+	return float64(s.Priority)*1e9 + rttTerm
 }
 
 // HappyIPRecord tracks historical connection metrics for an IP.
+//
+// V2.0: Uses EWMA for failure rate (no dual counters, no cleanup goroutine).
+// Decay factor 0.95 → ~14 successes to halve failure rate.
 type HappyIPRecord struct {
-	fails       atomic.Int64
-	successes   atomic.Int64
 	smoothedRTT atomic.Int64 // nanoseconds, EWMA
 	lastSeen    atomic.Int64 // Unix timestamp of last activity
+	lastLoss    atomic.Int64 // V2.0: loss rate 0-10000 fixed-point, from TransportProfile
+
+	// V2.0 EWMA failure rate (0-10000 fixed-point, replaces fails/successes counters).
+	// On success: rate = rate * 9500 / 10000
+	// On failure: rate = rate * 9500 / 10000 + 500
+	failureRate atomic.Int64 // fixed-point × 10000 to avoid float64 atomic
 }
 
-func (r *HappyIPRecord) getFails() int         { return int(r.fails.Load()) }
-func (r *HappyIPRecord) getSuccesses() int     { return int(r.successes.Load()) }
+const ewmaDecayNumerator = 9500   // 0.95 × 10000
+const ewmaDecayDenominator = 10000
+const ewmaFailWeight = 500        // (1-0.95) × 10000
+
+func (r *HappyIPRecord) getFailureRate() float64 {
+	return float64(r.failureRate.Load()) / 10000.0
+}
+
+// getFails/getSuccesses kept for backward compatibility with score().
+// Returns approximated values from EWMA.
+func (r *HappyIPRecord) getFails() int {
+	rate := r.failureRate.Load()
+	if rate == 0 {
+		return 0
+	}
+	// Approximate: if rate=0.1 (1000/10000), and we've had some observations
+	// We return a pseudo-count that makes score() behave similarly
+	return int(rate / 100) // scale to reasonable range
+}
+
+func (r *HappyIPRecord) getSuccesses() int {
+	rate := r.failureRate.Load()
+	if rate == 0 {
+		return 10 // new connection with no failures → high success
+	}
+	return int((10000 - rate) / 100)
+}
+
 func (r *HappyIPRecord) getSmoothedRTT() int64 { return r.smoothedRTT.Load() }
+func (r *HappyIPRecord) getLoss() int64        { return r.lastLoss.Load() }
+
+// UpdateLoss sets the loss rate from TransportProfile (0-10000 fixed-point).
+func (r *HappyIPRecord) UpdateLoss(lossRate int64) {
+	r.lastLoss.Store(lossRate)
+}
 
 func (r *HappyIPRecord) recordSuccess(rtt time.Duration) {
 	r.lastSeen.Store(time.Now().Unix())
-	r.successes.Add(1)
+	// Update EWMA failure rate: rate *= 0.95 (decays toward 0)
+	for {
+		old := r.failureRate.Load()
+		newRate := old * ewmaDecayNumerator / ewmaDecayDenominator
+		if r.failureRate.CompareAndSwap(old, newRate) {
+			break
+		}
+	}
+	// Update RTT EWMA
 	newRTT := int64(rtt)
 	for {
 		old := r.smoothedRTT.Load()
@@ -82,7 +143,17 @@ func (r *HappyIPRecord) recordSuccess(rtt time.Duration) {
 
 func (r *HappyIPRecord) recordFail() {
 	r.lastSeen.Store(time.Now().Unix())
-	r.fails.Add(1)
+	// Update EWMA failure rate: rate = rate*0.95 + 0.05 (decays toward 1.0)
+	for {
+		old := r.failureRate.Load()
+		newRate := old*ewmaDecayNumerator/ewmaDecayDenominator + ewmaFailWeight
+		if newRate > 10000 {
+			newRate = 10000
+		}
+		if r.failureRate.CompareAndSwap(old, newRate) {
+			return
+		}
+	}
 }
 
 // HappyIPDB is the global database for per-IP historical metrics.
@@ -170,11 +241,11 @@ func scoreIPs(ips []net.IP, prioritizeIPv6 bool, svcbPriorities map[string]int64
 		}
 
 		scores = append(scores, HappyIPScore{
-			IP:        ip,
-			Priority:  priority + ipv6Boost,
-			RTT:       record.getSmoothedRTT(),
-			Successes: record.getSuccesses(),
-			Fails:     record.getFails(),
+			IP:       ip,
+			Priority: priority + ipv6Boost,
+			RTT:      record.getSmoothedRTT(),
+			FailRate: record.getFailureRate(), // V2.0: EWMA failure rate
+			LastLoss: record.getLoss(),
 		})
 	}
 

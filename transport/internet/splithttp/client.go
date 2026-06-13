@@ -40,6 +40,10 @@ type DefaultDialerClient struct {
 	// onRTT is called after each request completes with the measured RTT.
 	// Used for RTT-aware scheduling in XmuxManager.
 	onRTT func(rtt time.Duration)
+	// onNewConn is called when a new raw TCP connection is established.
+	// Used by TransportProfile to start TCP_INFO sampling.
+	// The conn argument is the raw TCP socket (before TLS/REALITY wrapping).
+	onNewConn func(conn net.Conn)
 }
 
 func (c *DefaultDialerClient) IsClosed() bool {
@@ -49,6 +53,11 @@ func (c *DefaultDialerClient) IsClosed() bool {
 // SetOnRTT sets the callback for RTT measurement.
 func (c *DefaultDialerClient) SetOnRTT(fn func(rtt time.Duration)) {
 	c.onRTT = fn
+}
+
+// SetOnNewConn sets the callback for new raw TCP connections.
+func (c *DefaultDialerClient) SetOnNewConn(fn func(conn net.Conn)) {
+	c.onNewConn = fn
 }
 
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {

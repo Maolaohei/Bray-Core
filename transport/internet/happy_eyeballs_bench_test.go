@@ -55,11 +55,10 @@ func BenchmarkSortIPScores(b *testing.B) {
 	scores := make([]HappyIPScore, 50)
 	for i := range scores {
 		scores[i] = HappyIPScore{
-			IP:        net.IPv4(byte(10), byte(i/256), byte(i%256), 1),
-			Priority:  int64(i),
-			RTT:       int64(time.Duration(10+i*3) * time.Millisecond),
-			Successes: i % 10,
-			Fails:     i % 3,
+			IP:       net.IPv4(byte(10), byte(i/256), byte(i%256), 1),
+			Priority: int64(i),
+			RTT:      int64(time.Duration(10+i*3) * time.Millisecond),
+			FailRate: float64(i%3) / 10.0,
 		}
 	}
 
@@ -213,11 +212,10 @@ func BenchmarkClampRTT(b *testing.B) {
 // BenchmarkHappyIPScore_Score measures score computation throughput.
 func BenchmarkHappyIPScore_Score(b *testing.B) {
 	s := HappyIPScore{
-		IP:        net.ParseIP("1.1.1.1"),
-		Priority:  5,
-		RTT:       50e6,
-		Successes: 100,
-		Fails:     5,
+		IP:       net.ParseIP("1.1.1.1"),
+		Priority: 5,
+		RTT:      50e6,
+		FailRate: 0.05,
 	}
 
 	b.ResetTimer()
@@ -229,11 +227,10 @@ func BenchmarkHappyIPScore_Score(b *testing.B) {
 // BenchmarkHappyIPScore_ScoreWithHighFailRate measures score with high failure rate.
 func BenchmarkHappyIPScore_ScoreWithHighFailRate(b *testing.B) {
 	s := HappyIPScore{
-		IP:        net.ParseIP("1.1.1.1"),
-		Priority:  0,
-		RTT:       50e6,
-		Successes: 10,
-		Fails:     90,
+		IP:       net.ParseIP("1.1.1.1"),
+		Priority: 0,
+		RTT:      50e6,
+		FailRate: 0.9,
 	}
 
 	b.ResetTimer()
