@@ -12,8 +12,8 @@ import (
 // HappyIPScore holds scoring data for a single IP address used in v3 sorting.
 type HappyIPScore struct {
 	IP       net.IP
-	Priority int64  // from DNS SVCB/HTTPS record, lower = higher priority
-	RTT      int64  // smoothed RTT in nanoseconds
+	Priority int64   // from DNS SVCB/HTTPS record, lower = higher priority
+	RTT      int64   // smoothed RTT in nanoseconds
 	FailRate float64 // V2.0: EWMA failure rate 0.0-1.0 (replaces Successes/Fails)
 
 	// V2.0: loss rate from TransportProfile (0-10000 fixed-point, 0=none, 10000=100%)
@@ -79,9 +79,9 @@ type HappyIPRecord struct {
 	failureRate atomic.Int64 // fixed-point × 10000 to avoid float64 atomic
 }
 
-const ewmaDecayNumerator = 9500   // 0.95 × 10000
+const ewmaDecayNumerator = 9500 // 0.95 × 10000
 const ewmaDecayDenominator = 10000
-const ewmaFailWeight = 500        // (1-0.95) × 10000
+const ewmaFailWeight = 500 // (1-0.95) × 10000
 
 func (r *HappyIPRecord) getFailureRate() float64 {
 	return float64(r.failureRate.Load()) / 10000.0

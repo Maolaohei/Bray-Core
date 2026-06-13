@@ -30,8 +30,8 @@ type NetworkLearner struct {
 	dominant Behavior
 
 	// Transition tracking: how often behavior changes
-	transitions    int
-	lastBehavior   Behavior
+	transitions  int
+	lastBehavior Behavior
 }
 
 // NewNetworkLearner creates a new learner.
@@ -105,11 +105,11 @@ func (l *NetworkLearner) BehaviorDistribution() map[Behavior]float64 {
 
 // Stats returns a summary of the learner state.
 type LearnerStats struct {
-	Dominant      Behavior
+	Dominant       Behavior
 	TransitionRate float64
-	TotalSamples  int
-	Transitions   int
-	Distribution  map[Behavior]float64
+	TotalSamples   int
+	Transitions    int
+	Distribution   map[Behavior]float64
 }
 
 func (l *NetworkLearner) Stats() LearnerStats {

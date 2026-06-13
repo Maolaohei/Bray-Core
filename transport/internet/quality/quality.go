@@ -5,10 +5,10 @@ package quality
 // This avoids the single-score ambiguity where different failure modes
 // produce the same Overall number.
 type Quality struct {
-	Overall    uint8
-	Latency    uint8
-	Loss       uint8
-	Stability  uint8
+	Overall   uint8
+	Latency   uint8
+	Loss      uint8
+	Stability uint8
 }
 
 // UnknownQuality returns a Quality with all zeros and no valid data.

@@ -26,11 +26,11 @@ type XmuxClient struct {
 	lastRTT      atomic.Int64 // nanoseconds, for RTT-aware scheduling
 
 	// V2.0: link-quality metrics for smarter scheduling
-	lastRetrans   atomic.Int32 // cumulative retransmit count from TCP_INFO
-	lastLoss      atomic.Int64 // loss rate × 10000 (fixed-point, 0-10000)
-	qualityScore  atomic.Int32 // 0-100, computed by TransportProfile
-	confidence    atomic.Int32 // 0-100, how much we trust the quality data
-	consecDrops   atomic.Int32 // consecutive quality drops, for drain
+	lastRetrans  atomic.Int32 // cumulative retransmit count from TCP_INFO
+	lastLoss     atomic.Int64 // loss rate × 10000 (fixed-point, 0-10000)
+	qualityScore atomic.Int32 // 0-100, computed by TransportProfile
+	confidence   atomic.Int32 // 0-100, how much we trust the quality data
+	consecDrops  atomic.Int32 // consecutive quality drops, for drain
 
 	// TransportProfile for this connection. Created when TCP connection is established.
 	profile interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle

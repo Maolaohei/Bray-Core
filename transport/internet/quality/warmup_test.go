@@ -7,11 +7,11 @@ import (
 
 func TestCalcWarmupDelay(t *testing.T) {
 	tests := []struct {
-		name      string
-		rtt       time.Duration
-		loss      float64
-		minDelay  time.Duration
-		maxDelay  time.Duration
+		name     string
+		rtt      time.Duration
+		loss     float64
+		minDelay time.Duration
+		maxDelay time.Duration
 	}{
 		{"baseline 20ms no loss", 20 * time.Millisecond, 0, 50 * time.Millisecond, 70 * time.Millisecond},
 		{"20ms 5% loss", 20 * time.Millisecond, 0.05, 70 * time.Millisecond, 80 * time.Millisecond},

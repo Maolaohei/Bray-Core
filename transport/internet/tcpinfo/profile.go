@@ -23,7 +23,7 @@ import (
 //	// Read (lock-free, zero-alloc):
 //	snap := prof.Snapshot()
 type Profile struct {
-	conn     net.Conn
+	conn      net.Conn
 	collector Collector
 	interval  time.Duration
 	maxStale  time.Duration
@@ -38,7 +38,7 @@ type Profile struct {
 	onUpdate func(*quality.Snapshot)
 
 	// Lifecycle
-	stopCh chan struct{}
+	stopCh  chan struct{}
 	stopped atomic.Bool
 }
 

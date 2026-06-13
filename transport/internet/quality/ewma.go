@@ -5,10 +5,10 @@ package quality
 //
 // Usage:
 //
-//   rate := NewEWMA(0.05)   // initial rate 5%
-//   rate.OnSuccess()         // rate *= 0.95
-//   rate.OnFailure()         // rate = rate*0.95 + 0.05
-//   current := rate.Value()  // read current rate
+//	rate := NewEWMA(0.05)   // initial rate 5%
+//	rate.OnSuccess()         // rate *= 0.95
+//	rate.OnFailure()         // rate = rate*0.95 + 0.05
+//	current := rate.Value()  // read current rate
 //
 // Decay factor 0.95 means ~14 successes to halve the failure rate.
 // No cleanup goroutine needed — natural time decay via EWMA.

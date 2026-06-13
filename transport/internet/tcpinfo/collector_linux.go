@@ -127,7 +127,7 @@ func computeQuality(snap *quality.Snapshot) quality.Quality {
 		} else if jitterRatio > 0.5 {
 			q.Stability = 0
 		} else {
-			q.Stability = uint8(100 - ((jitterRatio - 0.05) / 0.45) * 100)
+			q.Stability = uint8(100 - ((jitterRatio-0.05)/0.45)*100)
 		}
 	} else {
 		q.Stability = 50 // unknown → middle

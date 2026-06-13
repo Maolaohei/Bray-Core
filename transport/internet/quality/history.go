@@ -4,12 +4,12 @@ package quality
 // Used by Debug API to provide temporal context ("why was it slow just now?").
 // Memory cost: ~4KB for 64 samples.
 type History struct {
-	rtt      [64]int64
-	loss     [64]float64
-	quality  [64]uint8
-	conf     [64]uint8
-	head     int
-	count    int
+	rtt     [64]int64
+	loss    [64]float64
+	quality [64]uint8
+	conf    [64]uint8
+	head    int
+	count   int
 }
 
 // Push appends a new sample to the ring buffer.
