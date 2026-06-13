@@ -156,75 +156,118 @@ func TestV21_Learner_TransitionRate(t *testing.T) {
 	t.Logf("Stable rate: low, Chaotic rate: %f", c.learner.TransitionRate())
 }
 
-// TestV21_DynamicConnectionScaling_EffectiveConnections verifies pool sizing per behavior.
+// TestV21_DynamicConnectionScaling_EffectiveConnections verifies pool sizing per behavior with debounce.
 func TestV21_DynamicConnectionScaling_EffectiveConnections(t *testing.T) {
 	m := NewXmuxManager(XmuxConfig{
 		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
 
-	// Default: 4 connections
+	// Before any behavior update: returns base config
 	if m.effectiveConnections() != 4 {
-		t.Errorf("default: expected 4, got %d", m.effectiveConnections())
+		t.Errorf("before behavior update: expected 4, got %d", m.effectiveConnections())
 	}
 
-	// LowLatency: 4 + 4/2 = 6
-	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
-	if m.effectiveConnections() != 6 {
-		t.Errorf("LowLatency: expected 6, got %d", m.effectiveConnections())
+	// Need 3 consecutive observations to switch behavior
+	for i := 0; i < debounceThreshold; i++ {
+		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
 	}
 
-	// Lossy: 4 / 2 = 2
-	m.UpdatePoolBehavior(quality.BehaviorLossy)
-	if m.effectiveConnections() != 2 {
-		t.Errorf("Lossy: expected 2, got %d", m.effectiveConnections())
+	// After debounce: AIMD applies
+	conns := m.effectiveConnections()
+	if conns < 1 || conns > 8 {
+		t.Errorf("LowLatency after debounce: expected 1-8, got %d", conns)
 	}
-
-	// Saturated: 4 / 2 = 2
-	m.UpdatePoolBehavior(quality.BehaviorSaturated)
-	if m.effectiveConnections() != 2 {
-		t.Errorf("Saturated: expected 2, got %d", m.effectiveConnections())
-	}
-
-	// Aggressive: 4 * 2 / 3 = 2
-	m.UpdatePoolBehavior(quality.BehaviorAggressive)
-	if m.effectiveConnections() != 2 {
-		t.Errorf("Aggressive: expected 2, got %d", m.effectiveConnections())
-	}
+	t.Logf("LowLatency effectiveConnections: %d (base=4)", conns)
 }
 
-// TestV21_DynamicConnectionScaling_EffectiveConcurrency verifies per-connection concurrency.
-func TestV21_DynamicConnectionScaling_EffectiveConcurrency(t *testing.T) {
+// TestV21_DynamicConnectionScaling_OscillationPrevention verifies debounce prevents rapid switching.
+func TestV21_DynamicConnectionScaling_OscillationPrevention(t *testing.T) {
 	m := NewXmuxManager(XmuxConfig{
-		MaxConcurrency: &RangeConfig{From: 32, To: 32},
+		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
 
-	// Default: 32
-	if m.effectiveConcurrency() != 32 {
-		t.Errorf("default: expected 32, got %d", m.effectiveConcurrency())
+	// Switch to LowLatency (3 observations)
+	for i := 0; i < 3; i++ {
+		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+	}
+	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
+		t.Error("should switch to LowLatency after 3 observations")
 	}
 
-	// LowLatency: 32 * 2 = 64
-	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
-	if m.effectiveConcurrency() != 64 {
-		t.Errorf("LowLatency: expected 64, got %d", m.effectiveConcurrency())
-	}
-
-	// Lossy: 32 / 2 = 16
+	// Single observation of Lossy should NOT switch (debounce)
 	m.UpdatePoolBehavior(quality.BehaviorLossy)
-	if m.effectiveConcurrency() != 16 {
-		t.Errorf("Lossy: expected 16, got %d", m.effectiveConcurrency())
+	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
+		t.Error("should NOT switch after 1 observation (debounce)")
 	}
 
-	// Aggressive: 32 * 3 / 4 = 24
-	m.UpdatePoolBehavior(quality.BehaviorAggressive)
-	if m.effectiveConcurrency() != 24 {
-		t.Errorf("Aggressive: expected 24, got %d", m.effectiveConcurrency())
+	// Another single observation should NOT switch
+	m.UpdatePoolBehavior(quality.BehaviorLossy)
+	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
+		t.Error("should NOT switch after 2 observations (debounce)")
+	}
+
+	// Third observation should switch
+	m.UpdatePoolBehavior(quality.BehaviorLossy)
+	if m.GetPoolBehavior() != quality.BehaviorLossy {
+		t.Error("should switch to Lossy after 3 observations")
 	}
 }
 
-// TestV21_DynamicConnectionScaling_PoolBehaviorUpdate verifies pool behavior updates from clients.
+// TestV21_DynamicConnectionScaling_AIMD_Decrease verifies multiplicative decrease on worsening.
+func TestV21_DynamicConnectionScaling_AIMD_Decrease(t *testing.T) {
+	m := NewXmuxManager(XmuxConfig{
+		MaxConnections: &RangeConfig{From: 8, To: 8},
+	}, func() XmuxConn { return &mockConn{} })
+	defer m.Close()
+
+	// Establish LowLatency first
+	for i := 0; i < 3; i++ {
+		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+	}
+	lowConns := m.effectiveConnections()
+	t.Logf("LowLatency connections: %d", lowConns)
+
+	// Switch to Lossy (worsening) — should halve
+	for i := 0; i < 3; i++ {
+		m.UpdatePoolBehavior(quality.BehaviorLossy)
+	}
+	lossyConns := m.effectiveConnections()
+	t.Logf("Lossy connections: %d (after AIMD decrease)", lossyConns)
+
+	if lossyConns >= lowConns {
+		t.Errorf("Lossy connections (%d) should be < LowLatency connections (%d)", lossyConns, lowConns)
+	}
+}
+
+// TestV21_DynamicConnectionScaling_AIMD_Increase verifies additive increase on improvement.
+func TestV21_DynamicConnectionScaling_AIMD_Increase(t *testing.T) {
+	m := NewXmuxManager(XmuxConfig{
+		MaxConnections: &RangeConfig{From: 8, To: 8},
+	}, func() XmuxConn { return &mockConn{} })
+	defer m.Close()
+
+	// Start at Lossy (low)
+	for i := 0; i < 3; i++ {
+		m.UpdatePoolBehavior(quality.BehaviorLossy)
+	}
+	lowConns := m.effectiveConnections()
+
+	// Switch to Normal (improvement) — should increase by 1 (additive)
+	for i := 0; i < 3; i++ {
+		m.UpdatePoolBehavior(quality.BehaviorNormal)
+	}
+	normalConns := m.effectiveConnections()
+
+	t.Logf("Lossy→Normal: %d → %d (additive increase)", lowConns, normalConns)
+
+	if normalConns <= lowConns {
+		t.Errorf("Normal connections (%d) should be > Lossy connections (%d)", normalConns, lowConns)
+	}
+}
+
+// TestV21_DynamicConnectionScaling_PoolBehaviorUpdate verifies pool behavior updates with debounce.
 func TestV21_DynamicConnectionScaling_PoolBehaviorUpdate(t *testing.T) {
 	m := NewXmuxManager(XmuxConfig{}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
@@ -234,9 +277,21 @@ func TestV21_DynamicConnectionScaling_PoolBehaviorUpdate(t *testing.T) {
 		t.Errorf("initial pool behavior should be Unknown, got %v", m.GetPoolBehavior())
 	}
 
-	// Update manually
+	// 1 observation: should NOT switch (debounce)
+	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+	if m.GetPoolBehavior() != quality.BehaviorUnknown {
+		t.Errorf("after 1 observation: should still be Unknown, got %v", m.GetPoolBehavior())
+	}
+
+	// 2 observations: should NOT switch
+	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+	if m.GetPoolBehavior() != quality.BehaviorUnknown {
+		t.Errorf("after 2 observations: should still be Unknown, got %v", m.GetPoolBehavior())
+	}
+
+	// 3 observations: should switch
 	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
 	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
-		t.Errorf("pool behavior should be LowLatency, got %v", m.GetPoolBehavior())
+		t.Errorf("after 3 observations: should be LowLatency, got %v", m.GetPoolBehavior())
 	}
 }

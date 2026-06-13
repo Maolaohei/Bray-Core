@@ -146,8 +146,13 @@ type XmuxManager struct {
 	doneCh      chan struct{} // closed when all goroutines exit
 
 	// V2.1: Dynamic Connection Scaling
-	poolBehavior   quality.Behavior // dominant behavior across all clients
-	poolBehaviorMu sync.RWMutex
+	poolBehavior    quality.Behavior // dominant behavior across all clients
+	poolBehaviorMu  sync.RWMutex
+	behaviorStreak  int  // consecutive observations of same behavior (for debounce)
+	streakBehavior  quality.Behavior // behavior being streaked
+_dynamicConns  int32 // current effective connections (AIMD smoothed)
+_dynamicConc   int32 // current effective concurrency (AIMD smoothed)
+	scaledOnce    bool  // whether dynamic scaling has been applied at least once
 
 	// Dynamic warmup queue
 	warmupQueue  []WarmupTarget
@@ -495,11 +500,140 @@ func (m *XmuxManager) Close() {
 
 // V2.1: Dynamic Connection Scaling
 
-// UpdatePoolBehavior updates the pool's dominant behavior from client observations.
+const (
+	// debounceThreshold is how many consecutive observations needed before switching behavior.
+	debounceThreshold = 3
+	// aimdStep is the additive increase step for connections/concurrency.
+	aimdStep = 1
+)
+
+// UpdatePoolBehavior updates the pool's dominant behavior with debouncing.
+// Requires debounceThreshold consecutive observations of the same behavior before switching.
 func (m *XmuxManager) UpdatePoolBehavior(b quality.Behavior) {
 	m.poolBehaviorMu.Lock()
 	defer m.poolBehaviorMu.Unlock()
-	m.poolBehavior = b
+
+	if b == m.streakBehavior {
+		m.behaviorStreak++
+	} else {
+		m.streakBehavior = b
+		m.behaviorStreak = 1
+	}
+
+	// Only switch after debounce threshold
+	if m.behaviorStreak >= debounceThreshold && b != m.poolBehavior {
+		prevBehavior := m.poolBehavior // save old behavior before update
+		m.poolBehavior = b
+		m.behaviorStreak = 0
+		// Apply AIMD adjustment on behavior change
+		m.applyAIMD(b, prevBehavior)
+	}
+}
+
+// applyAIMD adjusts effective connections/concurrency using AIMD.
+// Additive Increase: when behavior improves, increase by step
+// Multiplicative Decrease: when behavior worsens, multiply by 0.5
+func (m *XmuxManager) applyAIMD(b, prevBehavior quality.Behavior) {
+	baseConns := m.connections
+	baseConc := m.concurrency
+
+	if !m.scaledOnce {
+		// First time: set initial values based on behavior
+		m._dynamicConns = m.computeTargetConns(b, baseConns)
+		m._dynamicConc = m.computeTargetConc(b, baseConc)
+		m.scaledOnce = true
+		return
+	}
+
+	if isBehaviorImprovement(b, prevBehavior) {
+		// Additive Increase: move toward target by 1 step
+		targetConns := m.computeTargetConns(b, baseConns)
+		if m._dynamicConns < targetConns {
+			m._dynamicConns += aimdStep
+		}
+		targetConc := m.computeTargetConc(b, baseConc)
+		if m._dynamicConc < targetConc {
+			m._dynamicConc += aimdStep
+		}
+	} else if isBehaviorWorsening(b, prevBehavior) {
+		// Multiplicative Decrease: halve immediately
+		m._dynamicConns = m._dynamicConns / 2
+		m._dynamicConc = m._dynamicConc / 2
+	}
+
+	// Clamp to sane bounds
+	if m._dynamicConns < 1 {
+		m._dynamicConns = 1
+	}
+	if baseConns > 0 && m._dynamicConns > baseConns*2 {
+		m._dynamicConns = baseConns * 2
+	}
+	if m._dynamicConc < 1 {
+		m._dynamicConc = 1
+	}
+	if baseConc > 0 && m._dynamicConc > baseConc*2 {
+		m._dynamicConc = baseConc * 2
+	}
+}
+
+// computeTargetConns returns the ideal connection count for a behavior.
+func (m *XmuxManager) computeTargetConns(b quality.Behavior, base int32) int32 {
+	if base <= 0 {
+		return 0
+	}
+	switch b {
+	case quality.BehaviorLowLatency:
+		return base + base/2 // +50%
+	case quality.BehaviorLossy, quality.BehaviorSaturated:
+		return base / 2 // -50%
+	case quality.BehaviorAggressive:
+		return base * 2 / 3 // -33%
+	default:
+		return base
+	}
+}
+
+// computeTargetConc returns the ideal concurrency for a behavior.
+func (m *XmuxManager) computeTargetConc(b quality.Behavior, base int32) int32 {
+	if base <= 0 {
+		return 0
+	}
+	switch b {
+	case quality.BehaviorLowLatency:
+		return base * 2 // 2x
+	case quality.BehaviorLossy, quality.BehaviorSaturated:
+		return base / 2 // 0.5x
+	case quality.BehaviorAggressive:
+		return base * 3 / 4 // 0.75x
+	default:
+		return base
+	}
+}
+
+// isBehaviorImprovement returns true if b is "better" than prev.
+func isBehaviorImprovement(b, prev quality.Behavior) bool {
+	score := func(b quality.Behavior) int {
+		switch b {
+		case quality.BehaviorLowLatency:
+			return 5
+		case quality.BehaviorNormal:
+			return 3
+		case quality.BehaviorAggressive:
+			return 2
+		case quality.BehaviorLossy:
+			return 1
+		case quality.BehaviorSaturated:
+			return 0
+		default:
+			return 3
+		}
+	}
+	return score(b) > score(prev)
+}
+
+// isBehaviorWorsening returns true if b is "worse" than prev.
+func isBehaviorWorsening(b, prev quality.Behavior) bool {
+	return isBehaviorImprovement(prev, b)
 }
 
 // GetPoolBehavior returns the current dominant pool behavior.
@@ -509,55 +643,24 @@ func (m *XmuxManager) GetPoolBehavior() quality.Behavior {
 	return m.poolBehavior
 }
 
-// effectiveConnections returns the behavior-adjusted max connections.
-// LowLatency → more connections allowed (fast links, parallelism helps)
-// Lossy/Saturated → fewer connections (avoid head-of-line blocking)
-// Aggressive → fewer connections (avoid over-stacking)
+// effectiveConnections returns the AIMD-smoothed connection limit.
 func (m *XmuxManager) effectiveConnections() int32 {
-	base := m.connections
-	if base <= 0 {
-		return base // unlimited
+	m.poolBehaviorMu.RLock()
+	defer m.poolBehaviorMu.RUnlock()
+	if !m.scaledOnce {
+		return m.connections
 	}
-
-	b := m.GetPoolBehavior()
-	switch b {
-	case quality.BehaviorLowLatency:
-		// Fast link: allow 50% more connections for parallelism
-		return base + base/2
-	case quality.BehaviorLossy, quality.BehaviorSaturated:
-		// Problematic link: reduce to 50% connections
-		return base / 2
-	case quality.BehaviorAggressive:
-		// Brute sender: reduce to 67% connections
-		return base * 2 / 3
-	default:
-		return base
-	}
+	return m._dynamicConns
 }
 
-// effectiveConcurrency returns the behavior-adjusted max concurrency per connection.
-// LowLatency → higher concurrency (fast link handles more streams)
-// Lossy/Saturated → lower concurrency (avoid overwhelming the link)
+// effectiveConcurrency returns the AIMD-smoothed concurrency limit.
 func (m *XmuxManager) effectiveConcurrency() int32 {
-	base := m.concurrency
-	if base <= 0 {
-		return base // unlimited
+	m.poolBehaviorMu.RLock()
+	defer m.poolBehaviorMu.RUnlock()
+	if !m.scaledOnce {
+		return m.concurrency
 	}
-
-	b := m.GetPoolBehavior()
-	switch b {
-	case quality.BehaviorLowLatency:
-		// Fast link: double concurrency
-		return base * 2
-	case quality.BehaviorLossy, quality.BehaviorSaturated:
-		// Problematic link: halve concurrency
-		return base / 2
-	case quality.BehaviorAggressive:
-		// Brute sender: reduce to 75%
-		return base * 3 / 4
-	default:
-		return base
-	}
+	return m._dynamicConc
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
