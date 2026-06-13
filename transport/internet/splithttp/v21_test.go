@@ -155,3 +155,88 @@ func TestV21_Learner_TransitionRate(t *testing.T) {
 	}
 	t.Logf("Stable rate: low, Chaotic rate: %f", c.learner.TransitionRate())
 }
+
+// TestV21_DynamicConnectionScaling_EffectiveConnections verifies pool sizing per behavior.
+func TestV21_DynamicConnectionScaling_EffectiveConnections(t *testing.T) {
+	m := NewXmuxManager(XmuxConfig{
+		MaxConnections: &RangeConfig{From: 4, To: 4},
+	}, func() XmuxConn { return &mockConn{} })
+	defer m.Close()
+
+	// Default: 4 connections
+	if m.effectiveConnections() != 4 {
+		t.Errorf("default: expected 4, got %d", m.effectiveConnections())
+	}
+
+	// LowLatency: 4 + 4/2 = 6
+	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+	if m.effectiveConnections() != 6 {
+		t.Errorf("LowLatency: expected 6, got %d", m.effectiveConnections())
+	}
+
+	// Lossy: 4 / 2 = 2
+	m.UpdatePoolBehavior(quality.BehaviorLossy)
+	if m.effectiveConnections() != 2 {
+		t.Errorf("Lossy: expected 2, got %d", m.effectiveConnections())
+	}
+
+	// Saturated: 4 / 2 = 2
+	m.UpdatePoolBehavior(quality.BehaviorSaturated)
+	if m.effectiveConnections() != 2 {
+		t.Errorf("Saturated: expected 2, got %d", m.effectiveConnections())
+	}
+
+	// Aggressive: 4 * 2 / 3 = 2
+	m.UpdatePoolBehavior(quality.BehaviorAggressive)
+	if m.effectiveConnections() != 2 {
+		t.Errorf("Aggressive: expected 2, got %d", m.effectiveConnections())
+	}
+}
+
+// TestV21_DynamicConnectionScaling_EffectiveConcurrency verifies per-connection concurrency.
+func TestV21_DynamicConnectionScaling_EffectiveConcurrency(t *testing.T) {
+	m := NewXmuxManager(XmuxConfig{
+		MaxConcurrency: &RangeConfig{From: 32, To: 32},
+	}, func() XmuxConn { return &mockConn{} })
+	defer m.Close()
+
+	// Default: 32
+	if m.effectiveConcurrency() != 32 {
+		t.Errorf("default: expected 32, got %d", m.effectiveConcurrency())
+	}
+
+	// LowLatency: 32 * 2 = 64
+	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+	if m.effectiveConcurrency() != 64 {
+		t.Errorf("LowLatency: expected 64, got %d", m.effectiveConcurrency())
+	}
+
+	// Lossy: 32 / 2 = 16
+	m.UpdatePoolBehavior(quality.BehaviorLossy)
+	if m.effectiveConcurrency() != 16 {
+		t.Errorf("Lossy: expected 16, got %d", m.effectiveConcurrency())
+	}
+
+	// Aggressive: 32 * 3 / 4 = 24
+	m.UpdatePoolBehavior(quality.BehaviorAggressive)
+	if m.effectiveConcurrency() != 24 {
+		t.Errorf("Aggressive: expected 24, got %d", m.effectiveConcurrency())
+	}
+}
+
+// TestV21_DynamicConnectionScaling_PoolBehaviorUpdate verifies pool behavior updates from clients.
+func TestV21_DynamicConnectionScaling_PoolBehaviorUpdate(t *testing.T) {
+	m := NewXmuxManager(XmuxConfig{}, func() XmuxConn { return &mockConn{} })
+	defer m.Close()
+
+	// Initially unknown
+	if m.GetPoolBehavior() != quality.BehaviorUnknown {
+		t.Errorf("initial pool behavior should be Unknown, got %v", m.GetPoolBehavior())
+	}
+
+	// Update manually
+	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
+		t.Errorf("pool behavior should be LowLatency, got %v", m.GetPoolBehavior())
+	}
+}

@@ -137,13 +137,17 @@ type WarmupTarget struct {
 
 type XmuxManager struct {
 	xmuxConfig  XmuxConfig
-	concurrency int32
-	connections int32
+	concurrency int32 // base concurrency (from config)
+	connections int32 // base connections (from config)
 	newConnFunc func() XmuxConn
 	xmuxClients []*XmuxClient
 	clientsMu   sync.Mutex // protects xmuxClients slice
 	stopCh      chan struct{}
 	doneCh      chan struct{} // closed when all goroutines exit
+
+	// V2.1: Dynamic Connection Scaling
+	poolBehavior   quality.Behavior // dominant behavior across all clients
+	poolBehaviorMu sync.RWMutex
 
 	// Dynamic warmup queue
 	warmupQueue  []WarmupTarget
@@ -464,6 +468,20 @@ func (m *XmuxManager) healthCheckLoop() {
 				errors.LogDebug(context.Background(), "XMUX: health-check creating xmuxClient because pool is empty after cleanup")
 				m.newXmuxClientLocked()
 			}
+
+			// V2.1: Update pool behavior from client observations
+			// Use the most recent behavior from any active client
+			var dominantBehavior quality.Behavior
+			for _, c := range m.xmuxClients {
+				if b := c.GetBehavior(); b != quality.BehaviorUnknown {
+					dominantBehavior = b
+					break // use first known behavior
+				}
+			}
+			if dominantBehavior != quality.BehaviorUnknown {
+				m.UpdatePoolBehavior(dominantBehavior)
+			}
+
 			m.clientsMu.Unlock()
 		}
 	}
@@ -473,6 +491,73 @@ func (m *XmuxManager) healthCheckLoop() {
 func (m *XmuxManager) Close() {
 	close(m.stopCh)
 	<-m.doneCh
+}
+
+// V2.1: Dynamic Connection Scaling
+
+// UpdatePoolBehavior updates the pool's dominant behavior from client observations.
+func (m *XmuxManager) UpdatePoolBehavior(b quality.Behavior) {
+	m.poolBehaviorMu.Lock()
+	defer m.poolBehaviorMu.Unlock()
+	m.poolBehavior = b
+}
+
+// GetPoolBehavior returns the current dominant pool behavior.
+func (m *XmuxManager) GetPoolBehavior() quality.Behavior {
+	m.poolBehaviorMu.RLock()
+	defer m.poolBehaviorMu.RUnlock()
+	return m.poolBehavior
+}
+
+// effectiveConnections returns the behavior-adjusted max connections.
+// LowLatency → more connections allowed (fast links, parallelism helps)
+// Lossy/Saturated → fewer connections (avoid head-of-line blocking)
+// Aggressive → fewer connections (avoid over-stacking)
+func (m *XmuxManager) effectiveConnections() int32 {
+	base := m.connections
+	if base <= 0 {
+		return base // unlimited
+	}
+
+	b := m.GetPoolBehavior()
+	switch b {
+	case quality.BehaviorLowLatency:
+		// Fast link: allow 50% more connections for parallelism
+		return base + base/2
+	case quality.BehaviorLossy, quality.BehaviorSaturated:
+		// Problematic link: reduce to 50% connections
+		return base / 2
+	case quality.BehaviorAggressive:
+		// Brute sender: reduce to 67% connections
+		return base * 2 / 3
+	default:
+		return base
+	}
+}
+
+// effectiveConcurrency returns the behavior-adjusted max concurrency per connection.
+// LowLatency → higher concurrency (fast link handles more streams)
+// Lossy/Saturated → lower concurrency (avoid overwhelming the link)
+func (m *XmuxManager) effectiveConcurrency() int32 {
+	base := m.concurrency
+	if base <= 0 {
+		return base // unlimited
+	}
+
+	b := m.GetPoolBehavior()
+	switch b {
+	case quality.BehaviorLowLatency:
+		// Fast link: double concurrency
+		return base * 2
+	case quality.BehaviorLossy, quality.BehaviorSaturated:
+		// Problematic link: halve concurrency
+		return base / 2
+	case quality.BehaviorAggressive:
+		// Brute sender: reduce to 75%
+		return base * 3 / 4
+	default:
+		return base
+	}
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
@@ -551,15 +636,18 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 		return m.newXmuxClientLocked()
 	}
 
-	if m.connections > 0 && len(m.xmuxClients) < int(m.connections) {
-		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConnections was not hit, xmuxClients = ", len(m.xmuxClients))
+	// V2.1: Dynamic Connection Scaling — use behavior-adjusted limits
+	effectiveConns := m.effectiveConnections()
+	if effectiveConns > 0 && len(m.xmuxClients) < int(effectiveConns) {
+		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConnections was not hit, xmuxClients = ", len(m.xmuxClients), ", effective = ", effectiveConns)
 		return m.newXmuxClientLocked()
 	}
 
 	xmuxClients := make([]*XmuxClient, 0)
-	if m.concurrency > 0 {
+	effectiveConc := m.effectiveConcurrency()
+	if effectiveConc > 0 {
 		for _, xmuxClient := range m.xmuxClients {
-			if xmuxClient.OpenUsage.Load() < m.concurrency {
+			if xmuxClient.OpenUsage.Load() < effectiveConc {
 				xmuxClients = append(xmuxClients, xmuxClient)
 			}
 		}
