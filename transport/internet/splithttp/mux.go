@@ -273,17 +273,14 @@ func (m *XmuxManager) processWarmupQueue() {
 func (m *XmuxManager) executeWarmup(target WarmupTarget) {
 	errors.LogDebug(context.Background(), "XMUX: warmup starting for ", target.Domain)
 
-	// Create connection using the connection function
-	// The connection function already handles DNS, TLS, REALITY
-	conn := m.newConnFunc()
-	if conn == nil {
+	// Create connection and add to pool via newXmuxClient
+	xmuxClient := m.newXmuxClient()
+	if xmuxClient == nil || xmuxClient.XmuxConn == nil {
 		errors.LogDebug(context.Background(), "XMUX: warmup failed for ", target.Domain)
 		m.RecordWarmupFailed()
 		return
 	}
 
-	// If connection was created successfully, it's already in the pool
-	// via newXmuxClient logic
 	errors.LogDebug(context.Background(), "XMUX: warmup completed for ", target.Domain)
 	m.RecordWarmupSuccess()
 }
@@ -590,18 +587,31 @@ func scoreClient(c *XmuxClient) int64 {
 
 	score := inflight*10000 + rttMs*10
 
-	// V2.0: retrans and loss penalties
-	// Retrans penalty: each retrans costs 50 points
+	// V2.0: confidence-weighted penalties
+	// confidence 0-29:   scale = 0.2 (penalties largely ignored)
+	// confidence 30-79:  scale = 0.2 + (conf-30)*0.02 (linear ramp)
+	// confidence 80-100: scale = 1.0 (full penalties)
+	conf := int64(c.confidence.Load())
+	var penaltyScale float64
+	switch {
+	case conf >= 80:
+		penaltyScale = 1.0
+	case conf >= 30:
+		penaltyScale = 0.2 + float64(conf-30)*0.02
+	default:
+		penaltyScale = 0.2
+	}
+
+	// Retrans penalty: each retrans costs 50 points (scaled by confidence)
 	retrans := int64(c.lastRetrans.Load())
 	if retrans > 100 {
 		retrans = 100 // cap
 	}
-	score += retrans * 50
+	score += int64(float64(retrans*50) * penaltyScale)
 
 	// Loss penalty: lossRate is fixed-point × 10000 (0-10000)
-	// At 5% loss → 500, penalty = 25 points
 	lossRate := c.lastLoss.Load()
-	score += lossRate / 20
+	score += int64(float64(lossRate/20) * penaltyScale)
 
 	return score
 }

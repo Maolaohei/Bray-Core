@@ -100,6 +100,37 @@ func TestPipeline_UpdateQuality_QualityScoreUpdate(t *testing.T) {
 	}
 }
 
+// TestPipeline_ScoreClient_ConfidenceWeighting verifies confidence reduces penalties.
+func TestPipeline_ScoreClient_ConfidenceWeighting(t *testing.T) {
+	// High confidence (80+) — full penalties
+	cHi := &XmuxClient{createdAt: time.Now()}
+	cHi.LeftRequests.Store(999999)
+	cHi.UpdateQuality(80, 90, 10, 500)
+	scoreHi := scoreClient(cHi)
+
+	// Low confidence (10) — reduced penalties (20%)
+	cLo := &XmuxClient{createdAt: time.Now()}
+	cLo.LeftRequests.Store(999999)
+	cLo.UpdateQuality(80, 10, 10, 500)
+	scoreLo := scoreClient(cLo)
+
+	// Low confidence should have lower score (less penalty)
+	if scoreLo >= scoreHi {
+		t.Errorf("low confidence score (%d) should be < high confidence score (%d)", scoreLo, scoreHi)
+	}
+
+	// Difference should be roughly 80% of the penalty
+	// retrans penalty: 10*50 = 500, loss penalty: 500/20 = 25, total raw = 525
+	// high conf (90): scale=1.0, penalty=525
+	// low conf (10): scale=0.2, penalty=105
+	// expected delta: ~420
+	delta := scoreHi - scoreLo
+	if delta < 300 || delta > 600 {
+		t.Errorf("confidence delta %d outside expected range [300, 600]", delta)
+	}
+	t.Logf("confidence 10→90 reduces score by %d (retrans+loss penalties scaled)", delta)
+}
+
 // TestPipeline_ShouldDrain_TracksConsecutiveDrops verifies drain triggers after 5 consecutive drops.
 func TestPipeline_ShouldDrain_TracksConsecutiveDrops(t *testing.T) {
 	c := &XmuxClient{createdAt: time.Now()}
