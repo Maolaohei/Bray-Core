@@ -56,6 +56,13 @@ errorgen
 # Coverage reports
 coverage.*
 
+# Profiling outputs
+*.prof
+
+# Dev tools
+dev/
+race_test.bat
+
 # Node modules (in case of frontend assets)
 node_modules/
 
