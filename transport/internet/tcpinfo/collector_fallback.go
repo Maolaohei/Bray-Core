@@ -14,10 +14,11 @@ import (
 // fallbackCollector provides estimated TCP_INFO on platforms without getsockopt.
 // Uses RTT measurements from the HTTP layer (onRTT callback) to estimate quality.
 type fallbackCollector struct {
-	mu       sync.Mutex
-	lastRTT  time.Duration // latest RTT from HTTP layer
-	rttCount int           // number of samples received
-	ewmaRTT  float64       // EWMA-smoothed RTT (nanoseconds)
+	mu           sync.Mutex
+	lastRTT      time.Duration // latest RTT from HTTP layer
+	rttCount     int           // number of samples received
+	ewmaRTT      float64       // EWMA-smoothed RTT (nanoseconds)
+	maxDeviation float64       // peak RTT deviation (decays over time)
 }
 
 func newDefaultCollector() Collector {
@@ -44,6 +45,14 @@ func (c *fallbackCollector) FeedRTT(rtt time.Duration) {
 		// EWMA: 80% old + 20% new
 		c.ewmaRTT = c.ewmaRTT*0.8 + newRTT*0.2
 	}
+
+	// Track peak deviation for loss estimation
+	deviation := math.Abs(newRTT-c.ewmaRTT) / c.ewmaRTT
+	if deviation > c.maxDeviation {
+		c.maxDeviation = deviation
+	}
+	// Decay max deviation slowly so it adapts to changing conditions
+	c.maxDeviation *= 0.99
 }
 
 func (c *fallbackCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
@@ -53,6 +62,7 @@ func (c *fallbackCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 	rtt := c.lastRTT
 	ewma := c.ewmaRTT
 	count := c.rttCount
+	maxDev := c.maxDeviation
 	c.mu.Unlock()
 
 	snap := &quality.Snapshot{
@@ -64,17 +74,16 @@ func (c *fallbackCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 	if rtt > 0 {
 		snap.RTT = quality.NewMetric(time.Duration(ewma))
 
-		// RTT variance estimate: if current RTT deviates significantly from EWMA,
-		// treat it as jitter (proxy for loss/congestion).
+		// RTT variance estimate
 		if ewma > 0 {
 			deviation := math.Abs(float64(rtt)-ewma) / ewma
 			rttVar := time.Duration(deviation * ewma)
 			snap.RTTVar = quality.NewMetric(rttVar)
 
-			// Estimate loss from RTT instability:
-			// High deviation (>50% of EWMA) suggests packet loss or congestion.
-			if deviation > 0.5 {
-				lossPct := math.Min(deviation*20, 100) // scale: 50% deviation → 10% loss
+			// Estimate loss from peak RTT instability:
+			// maxDeviation > 30% suggests packet loss or congestion.
+			if maxDev > 0.3 {
+				lossPct := math.Min(maxDev*30, 100) // 30% deviation → ~9% loss
 				snap.Loss = quality.NewMetric(lossPct / 100.0)
 			} else {
 				snap.Loss = quality.NewMetric(0.0)
