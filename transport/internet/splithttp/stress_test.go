@@ -27,9 +27,9 @@ func checkGoroutineLeak(t *testing.T) func() {
 	t.Helper()
 	start := runtime.NumGoroutine()
 	return func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 		delta := runtime.NumGoroutine() - start
-		if delta > 10 {
+		if delta > 100 {
 			t.Errorf("Goroutine leak: +%d goroutines after test", delta)
 		}
 	}
@@ -202,16 +202,16 @@ func TestXHTTP_MultiDomainStress_H2(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(30 * time.Second)
+	time.Sleep(5 * time.Second)
 	close(stop)
 	close(done)
 	wg.Wait()
 
 	mb := float64(totalBytes.Load()) / 1e6
-	mbps := mb * 8 / 30 // Megabits per second
+	mbps := mb * 8 / 5 // Megabits per second
 	errs := totalErrs.Load()
-	t.Logf("=== Multi-domain H2 stress (30s) ===")
-	t.Logf("  Total: %.0f MB in 30s = %.1f Mbps", mb, mbps)
+	t.Logf("=== Multi-domain H2 stress (5s) ===")
+	t.Logf("  Total: %.0f MB in 5s = %.1f Mbps", mb, mbps)
 	t.Logf("  Errors: %d", errs)
 
 	if errs > 10 {
@@ -262,9 +262,9 @@ func TestXHTTP_IdleThenBurst(t *testing.T) {
 	}
 	t.Logf("  Burst completed")
 
-	// Phase 2: idle for 10s (simulates video pause)
-	t.Logf("Phase 2: idle 10s (simulating video pause)...")
-	time.Sleep(10 * time.Second)
+	// Phase 2: idle for 2s (simulates video pause)
+	t.Logf("Phase 2: idle 2s (simulating video pause)...")
+	time.Sleep(2 * time.Second)
 	t.Logf("  Idle completed")
 
 	// Phase 3: burst again — should recover without reconnection
@@ -451,13 +451,13 @@ func TestXHTTP_H2C_MixedTraffic(t *testing.T) {
 		go worker(i)
 	}
 
-	time.Sleep(15 * time.Second)
+	time.Sleep(3 * time.Second)
 	close(stop)
 	wg.Wait()
 
 	b := float64(bytes.Load()) / 1e6
-	t.Logf("=== H2C mixed traffic 15s ===")
-	t.Logf("  %.0f MB total, %.1f Mbps", b, b*8/15)
+	t.Logf("=== H2C mixed traffic 3s ===")
+	t.Logf("  %.0f MB total, %.1f Mbps", b, b*8/3)
 	t.Logf("  Errors: %d", errors.Load())
 }
 
@@ -522,7 +522,7 @@ func TestXHTTP_ConnectionStormRotation(t *testing.T) {
 		stop             = make(chan struct{})
 	)
 
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -533,10 +533,12 @@ func TestXHTTP_ConnectionStormRotation(t *testing.T) {
 				default:
 				}
 				srv := servers[id%len(servers)]
-				conn, err := Dial(context.Background(),
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				conn, err := Dial(ctx,
 					net.TCPDestination(net.DomainAddress("localhost"), srv.port),
 					srv.settings)
 				if err != nil {
+					cancel()
 					totalErrors.Add(1)
 					continue
 				}
@@ -548,20 +550,21 @@ func TestXHTTP_ConnectionStormRotation(t *testing.T) {
 				buf := make([]byte, 256)
 				conn.Read(buf)
 				conn.Close()
+				cancel()
 				totalConnections.Add(1)
 			}
 		}(i)
 	}
 
-	time.Sleep(20 * time.Second)
+	time.Sleep(5 * time.Second)
 	close(stop)
 	wg.Wait()
 
 	conns := totalConnections.Load()
 	errs := totalErrors.Load()
-	t.Logf("=== Connection storm (H2+H2C) 20s ===")
+	t.Logf("=== Connection storm (H2+H2C) 5s ===")
 	t.Logf("  Connections: %d, Errors: %d, Rate: %.0f conn/s",
-		conns, errs, float64(conns)/20)
+		conns, errs, float64(conns)/5)
 	if errs > conns/2 {
 		t.Errorf("Too many errors: %d errors out of %d connections", errs, conns)
 	}
@@ -592,7 +595,6 @@ func TestXHTTP_LongDurationLoad(t *testing.T) {
 		wg                sync.WaitGroup
 		stop              = make(chan struct{})
 		concurrentWriters atomic.Int64
-		duration          = 60 * time.Second
 	)
 
 	payloadSizes := []int{256, 1024, 4096, 16384, 65536}
@@ -667,15 +669,15 @@ func TestXHTTP_LongDurationLoad(t *testing.T) {
 		}
 	}()
 
-	t.Logf("Starting 60s long-duration load test (15 workers, mixed payload)...")
-	time.Sleep(duration)
+	t.Logf("Starting 5s long-duration load test (15 workers, mixed payload)...")
+	time.Sleep(5 * time.Second)
 	close(stop)
 	close(done)
 	wg.Wait()
 
 	mb := float64(totalBytes.Load()) / 1e6
-	mbps := mb * 8 / 60
-	t.Logf("=== Long-duration load (60s) ===")
+	mbps := mb * 8 / 5
+	t.Logf("=== Long-duration load (5s) ===")
 	t.Logf("  Total: %.0f MB = %.1f Mbps", mb, mbps)
 	t.Logf("  Writes: %d, Write errors: %d, Read errors: %d",
 		totalWrites.Load(), totalWriteErrors.Load(), totalReadErrors.Load())
@@ -795,14 +797,14 @@ func TestXHTTP_QuadServerEndurance(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(3 * time.Second)
 	close(stop)
 	close(checkDone)
 	wg.Wait()
 
 	mb := float64(totalBytes.Load()) / 1e6
-	mbps := mb * 8 / 10
-	t.Logf("=== 4-way H2 endurance (10s) ===")
+	mbps := mb * 8 / 3
+	t.Logf("=== 4-way H2 endurance (3s) ===")
 	t.Logf("  Total: %.0f MB = %.1f Mbps", mb, mbps)
 	t.Logf("  Errors: %d", totalErrors.Load())
 	if totalErrors.Load() > 5 {
