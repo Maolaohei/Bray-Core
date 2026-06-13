@@ -146,13 +146,13 @@ type XmuxManager struct {
 	doneCh      chan struct{} // closed when all goroutines exit
 
 	// V2.1: Dynamic Connection Scaling
-	poolBehavior    quality.Behavior // dominant behavior across all clients
-	poolBehaviorMu  sync.RWMutex
-	behaviorStreak  int  // consecutive observations of same behavior (for debounce)
-	streakBehavior  quality.Behavior // behavior being streaked
-_dynamicConns  int32 // current effective connections (AIMD smoothed)
-_dynamicConc   int32 // current effective concurrency (AIMD smoothed)
-	scaledOnce    bool  // whether dynamic scaling has been applied at least once
+	poolBehavior   quality.Behavior // dominant behavior across all clients
+	poolBehaviorMu sync.RWMutex
+	behaviorStreak int              // consecutive observations of same behavior (for debounce)
+	streakBehavior quality.Behavior // behavior being streaked
+	_dynamicConns  int32            // current effective connections (AIMD smoothed)
+	_dynamicConc   int32            // current effective concurrency (AIMD smoothed)
+	scaledOnce     bool             // whether dynamic scaling has been applied at least once
 
 	// Dynamic warmup queue
 	warmupQueue  []WarmupTarget
