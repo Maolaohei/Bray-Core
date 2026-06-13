@@ -1,0 +1,82 @@
+name: Benchmark Guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      - name: Run benchmarks (PR)
+        run: |
+          go test -bench "BenchmarkNewBuffer|BenchmarkNewBufferStack|BenchmarkCopy|BenchmarkSplitBytes|BenchmarkFrameWrite" \
+            -benchmem -count=6 -timeout 120s \
+            ./common/buf/ ./common/mux/ > bench_pr.txt 2>&1 || true
+
+          go test -bench "BenchmarkXMUXRTTEWMA|BenchmarkXMUXWarmupEnqueue|BenchmarkXMUXMetrics" \
+            -benchmem -count=6 -run "^$" -timeout 60s \
+            ./transport/internet/splithttp/ >> bench_pr.txt 2>&1 || true
+
+          go test -bench "BenchmarkClampRTT|BenchmarkHappyIPScore_Score" \
+            -benchmem -count=6 -run "^$" -timeout 60s \
+            ./transport/internet/ >> bench_pr.txt 2>&1 || true
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          clean: false
+
+      - name: Run benchmarks (Base)
+        run: |
+          go test -bench "BenchmarkNewBuffer|BenchmarkNewBufferStack|BenchmarkCopy|BenchmarkSplitBytes|BenchmarkFrameWrite" \
+            -benchmem -count=6 -timeout 120s \
+            ./common/buf/ ./common/mux/ > bench_base.txt 2>&1 || true
+
+          go test -bench "BenchmarkXMUXRTTEWMA|BenchmarkXMUXWarmupEnqueue|BenchmarkXMUXMetrics" \
+            -benchmem -count=6 -run "^$" -timeout 60s \
+            ./transport/internet/splithttp/ >> bench_base.txt 2>&1 || true
+
+          go test -bench "BenchmarkClampRTT|BenchmarkHappyIPScore_Score" \
+            -benchmem -count=6 -run "^$" -timeout 60s \
+            ./transport/internet/ >> bench_base.txt 2>&1 || true
+
+      - name: Compare benchmarks
+        run: |
+          echo "=== Benchmark Comparison ==="
+          benchstat -alpha 0.05 bench_base.txt bench_pr.txt || true
+
+          # Check for regressions > 5%
+          FAIL=0
+          while IFS= read -r line; do
+            if echo "$line" | grep -qE "^[a-zA-Z].*-.*[0-9]+.*ns/op"; then
+              # Extract delta percentage
+              DELTA=$(echo "$line" | grep -oE '[+-][0-9]+%' | head -1 | tr -d '+%')
+              if [ -n "$DELTA" ] && [ "$DELTA" -gt 5 ] 2>/dev/null; then
+                echo "FAIL: Regression detected: $line"
+                FAIL=1
+              fi
+            fi
+          done < <(benchstat -alpha 0.05 bench_base.txt bench_pr.txt 2>/dev/null || true)
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "❌ Benchmark regression > 5% detected!"
+            echo "Review the changes or update baseline if regression is acceptable."
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ No significant benchmark regression detected."
