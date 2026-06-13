@@ -17,7 +17,7 @@ type fallbackCollector struct {
 	mu       sync.Mutex
 	lastRTT  time.Duration // latest RTT from HTTP layer
 	rttCount int           // number of samples received
-	ewmaRTT float64       // EWMA-smoothed RTT (nanoseconds)
+	ewmaRTT  float64       // EWMA-smoothed RTT (nanoseconds)
 }
 
 func newDefaultCollector() Collector {
@@ -67,7 +67,7 @@ func (c *fallbackCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 		// RTT variance estimate: if current RTT deviates significantly from EWMA,
 		// treat it as jitter (proxy for loss/congestion).
 		if ewma > 0 {
-			deviation := math.Abs(float64(rtt) - ewma) / ewma
+			deviation := math.Abs(float64(rtt)-ewma) / ewma
 			rttVar := time.Duration(deviation * ewma)
 			snap.RTTVar = quality.NewMetric(rttVar)
 
@@ -86,7 +86,7 @@ func (c *fallbackCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 		snap.Loss = quality.Unknown[float64]()
 	}
 
-	snap.Retrans = quality.Unknown[uint32]()  // not available on Windows
+	snap.Retrans = quality.Unknown[uint32]() // not available on Windows
 	snap.Unacked = quality.Unknown[uint32]() // not available on Windows
 
 	snap.Quality = computeQuality(snap)
