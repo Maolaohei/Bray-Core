@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/transport/internet/quality"
 )
 
 type XmuxConn interface {
@@ -31,6 +32,9 @@ type XmuxClient struct {
 	qualityScore atomic.Int32 // 0-100, computed by TransportProfile
 	confidence   atomic.Int32 // 0-100, how much we trust the quality data
 	consecDrops  atomic.Int32 // consecutive quality drops, for drain
+
+	// V2.1: behavior learning for adaptive scheduling
+	learner *quality.NetworkLearner // tracks link behavior patterns
 
 	// TransportProfile for this connection. Created when TCP connection is established.
 	profile interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
@@ -74,6 +78,29 @@ func (c *XmuxClient) UpdateQuality(qualityScore, confidence, retrans int32, loss
 	} else {
 		c.consecDrops.Store(0)
 	}
+
+	// V2.1: Feed learner for behavior classification
+	if c.learner != nil {
+		rtt := c.GetRTT()
+		snap := &quality.Snapshot{
+			Timestamp:  time.Now(),
+			Source:     quality.SourceEstimated,
+			Confidence: uint8(confidence),
+			RTT:        quality.NewMetric(rtt),
+			Loss:       quality.NewMetric(float64(lossRate) / 10000.0),
+			Retrans:    quality.NewMetric(uint32(retrans)),
+			Quality:    quality.Quality{Overall: uint8(qualityScore)},
+		}
+		c.learner.Record(snap)
+	}
+}
+
+// GetBehavior returns the current dominant behavior learned from observations.
+func (c *XmuxClient) GetBehavior() quality.Behavior {
+	if c.learner == nil {
+		return quality.BehaviorUnknown
+	}
+	return c.learner.Dominant()
 }
 
 // ShouldDrain returns true if this connection should be drained
@@ -455,6 +482,7 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 		XmuxConn:  m.newConnFunc(),
 		leftUsage: -1,
 		createdAt: time.Now(),
+		learner:   quality.NewNetworkLearner(),
 	}
 	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
 		xmuxClient.leftUsage = x - 1
@@ -481,6 +509,7 @@ func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
 		XmuxConn:  m.newConnFunc(),
 		leftUsage: -1,
 		createdAt: time.Now(),
+		learner:   quality.NewNetworkLearner(),
 	}
 	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
 		xmuxClient.leftUsage = x - 1
@@ -567,15 +596,18 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 // scoreClient computes a scheduling score for a connection.
 // Lower score = better candidate.
 //
-// V2.0 formula (weighted by confidence):
+// V2.1 formula (behavior-aware, confidence-weighted):
 //
 //	base = inflight * 10000 + rttMs * 10
-//	retransPenalty = retransCount * 50  (if available)
-//	lossPenalty = lossRate * 10000      (if available)
+//	retransPenalty = retransCount * 50 * behaviorScale
+//	lossPenalty = lossRate * 10000 * behaviorScale
 //	confidence = connection.confidence (0-100)
 //
-// When confidence < 30, penalties are reduced (data not trustworthy).
-// When confidence >= 80, full penalties applied.
+// behaviorScale varies by detected behavior:
+//   - LowLatency: 0.5 (penalties reduced — fast link)
+//   - Normal: 1.0 (standard penalties)
+//   - Lossy/Saturated: 1.5 (penalties increased — problematic link)
+//   - Aggressive: 1.2 (slightly higher — avoid over-stacking)
 func scoreClient(c *XmuxClient) int64 {
 	inflight := int64(c.OpenUsage.Load())
 	rttMs := c.GetRTT().Milliseconds()
@@ -588,32 +620,49 @@ func scoreClient(c *XmuxClient) int64 {
 	score := inflight*10000 + rttMs*10
 
 	// V2.0: confidence-weighted penalties
-	// confidence 0-29:   scale = 0.2 (penalties largely ignored)
-	// confidence 30-79:  scale = 0.2 + (conf-30)*0.02 (linear ramp)
-	// confidence 80-100: scale = 1.0 (full penalties)
 	conf := int64(c.confidence.Load())
-	var penaltyScale float64
+	var confidenceScale float64
 	switch {
 	case conf >= 80:
-		penaltyScale = 1.0
+		confidenceScale = 1.0
 	case conf >= 30:
-		penaltyScale = 0.2 + float64(conf-30)*0.02
+		confidenceScale = 0.2 + float64(conf-30)*0.02
 	default:
-		penaltyScale = 0.2
+		confidenceScale = 0.2
 	}
 
-	// Retrans penalty: each retrans costs 50 points (scaled by confidence)
+	// V2.1: behavior-aware penalty scaling
+	behaviorScale := behaviorPenaltyScale(c.GetBehavior())
+
+	// Combined scale = confidence × behavior
+	combinedScale := confidenceScale * behaviorScale
+
+	// Retrans penalty: each retrans costs 50 points
 	retrans := int64(c.lastRetrans.Load())
 	if retrans > 100 {
 		retrans = 100 // cap
 	}
-	score += int64(float64(retrans*50) * penaltyScale)
+	score += int64(float64(retrans*50) * combinedScale)
 
 	// Loss penalty: lossRate is fixed-point × 10000 (0-10000)
 	lossRate := c.lastLoss.Load()
-	score += int64(float64(lossRate/20) * penaltyScale)
+	score += int64(float64(lossRate/20) * combinedScale)
 
 	return score
+}
+
+// behaviorPenaltyScale returns a multiplier for penalties based on detected behavior.
+func behaviorPenaltyScale(b quality.Behavior) float64 {
+	switch b {
+	case quality.BehaviorLowLatency:
+		return 0.5 // fast link, reduce penalties
+	case quality.BehaviorAggressive:
+		return 1.2 // brute-force sender, slightly higher
+	case quality.BehaviorLossy, quality.BehaviorSaturated:
+		return 1.5 // problematic link, increase penalties
+	default:
+		return 1.0 // Normal or Unknown
+	}
 }
 
 // Metrics methods for quantifiable validation
