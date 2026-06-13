@@ -4,11 +4,10 @@ package tcpinfo
 
 import (
 	"net"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/xtls/xray-core/transport/internet/quality"
+	"golang.org/x/sys/unix"
 )
 
 // linuxCollector reads TCP_INFO via getsockopt syscall.
@@ -34,10 +33,10 @@ func (c *linuxCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 		return nil, err
 	}
 
-	var info syscall.TCPInfo
+	var info *unix.TCPInfo
 	var sysErr error
 	err = raw.Control(func(fd uintptr) {
-		sysErr = getsockoptTCPInfo(int(fd), &info)
+		info, sysErr = unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
 	})
 	if err != nil {
 		return nil, err
@@ -49,7 +48,7 @@ func (c *linuxCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 	snap := &quality.Snapshot{
 		Timestamp:  time.Now(),
 		Source:     quality.SourceTCPInfo,
-		Confidence: computeConfidence(&info),
+		Confidence: computeConfidence(info),
 	}
 
 	snap.RTT = quality.NewMetric(time.Duration(info.Rtt) * time.Microsecond)
@@ -75,7 +74,7 @@ func (c *linuxCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 }
 
 // computeConfidence returns a confidence score based on how much data we have.
-func computeConfidence(info *syscall.TCPInfo) uint8 {
+func computeConfidence(info *unix.TCPInfo) uint8 {
 	// Use Unacked + Total_retrans as proxy for connection maturity
 	// (Segs_in not available on all architectures)
 	totalSamples := int(info.Unacked) + int(info.Total_retrans)
@@ -143,21 +142,4 @@ func computeQuality(snap *quality.Snapshot) quality.Quality {
 	q.Overall = quality.DefaultXMUXWeights().ComputeOverall(q)
 
 	return q
-}
-
-func getsockoptTCPInfo(fd int, info *syscall.TCPInfo) error {
-	size := uint32(unsafe.Sizeof(*info))
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS_GETSOCKOPT,
-		uintptr(fd),
-		syscall.IPPROTO_TCP,
-		syscall.TCP_INFO,
-		uintptr(unsafe.Pointer(info)),
-		uintptr(unsafe.Pointer(&size)),
-		0,
-	)
-	if errno != 0 {
-		return errno
-	}
-	return nil
 }
