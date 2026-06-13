@@ -57,15 +57,16 @@ func (c *linuxCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 	snap.Retrans = quality.NewMetric(info.Total_retrans)
 	snap.Unacked = quality.NewMetric(info.Unacked)
 
-	// Compute loss rate from lost/received
-	if info.Segs_in > 0 {
-		lossRate := float64(info.Lost) / float64(info.Segs_in)
-		if lossRate > 1.0 {
-			lossRate = 1.0
+	// Compute loss from Lost count (absolute, not ratio — Segs_in not available on all archs)
+	if info.Lost > 0 {
+		// Scale: 1 lost packet → 5% loss, capped at 100%
+		lossPct := float64(info.Lost) * 5.0
+		if lossPct > 100 {
+			lossPct = 100
 		}
-		snap.Loss = quality.NewMetric(lossRate)
+		snap.Loss = quality.NewMetric(lossPct / 100.0)
 	} else {
-		snap.Loss = quality.Unknown[float64]()
+		snap.Loss = quality.NewMetric(0.0)
 	}
 
 	snap.Quality = computeQuality(snap)
@@ -75,17 +76,22 @@ func (c *linuxCollector) Collect(conn net.Conn) (*quality.Snapshot, error) {
 
 // computeConfidence returns a confidence score based on how much data we have.
 func computeConfidence(info *syscall.TCPInfo) uint8 {
-	// More retransmits and received segments = more data to judge from
-	if info.Segs_in == 0 {
-		return 10 // barely connected
+	// Use Unacked + Total_retrans as proxy for connection maturity
+	// (Segs_in not available on all architectures)
+	totalSamples := int(info.Unacked) + int(info.Total_retrans)
+	if totalSamples == 0 && info.Rtt == 0 {
+		return 10 // barely connected, no RTT yet
 	}
-	if info.Segs_in < 10 {
-		return 30
+	if info.Rtt == 0 {
+		return 20 // have some data but no RTT measurement
 	}
-	if info.Segs_in < 50 {
+	if totalSamples < 5 {
+		return 40
+	}
+	if totalSamples < 20 {
 		return 60
 	}
-	if info.Segs_in < 200 {
+	if totalSamples < 100 {
 		return 80
 	}
 	return 95
