@@ -39,24 +39,15 @@ sysctl -w net.core.wmem_max=16777216
 
 ### V1.x — Performance & Stability ✅
 
-**已完成：**
-
 - TCP 网络栈优化 — BBR / TCP_NOTSENT_LOWAT / DEFER_ACCEPT / NODELAY / QUICKACK
 - XHTTP / VLESS 优化 — Vision Fast Path、手写 protobuf、AddonsPool
 - XMUX v3 — Min-Inflight Scheduling、RTT-aware Scheduling、Connection Reuse Metrics
 - Happy Eyeballs v3 — Dynamic Parallelism、Historical Learning、Score-based IP Selection
 - Warmup Pipeline — 连接预热 + DNS 预热 + 健康检查
-- 安全性强化 — CSPRNG 缓冲池、rejection sampling、Huffman 缓存
 
 ### V2.0 — Transport Intelligence Layer ✅
 
-**状态：已完成**
-
 核心原则：Observe → Decide → Control
-
-TransportProfile 仅负责观测网络状态，不参与决策逻辑。
-
-**已实现：**
 
 | 模块 | 状态 |
 |------|------|
@@ -67,19 +58,22 @@ TransportProfile 仅负责观测网络状态，不参与决策逻辑。
 | Debug API — Snapshot / Reason / History (64-sample ring buffer) | ✅ |
 | NetworkLearner — Behavior Classification (6 types) | ✅ |
 | Pipeline Integration — Profile → UpdateQuality → scoreClient | ✅ |
+| Windows Fallback — HTTP RTT → estimated quality | ✅ |
 
-### V2.1 — Adaptive Transport (规划中)
+### V2.1 — Adaptive Transport ✅
 
-- Adaptive XMUX — Dynamic Concurrency / Dynamic Connection Scaling
-- Feedback-driven Scheduling
-- 需建立在成熟的 TransportProfile 与 Quality Model 之上
+| 功能 | 状态 |
+|------|------|
+| Adaptive XMUX — behavior-aware penalty scaling | ✅ |
+| Dynamic Connection Scaling — AIMD pool sizing | ✅ |
+| Oscillation Prevention — debounce (3 observations) | ✅ |
+| Connection Migration — proactive pool refill | ✅ |
 
 ### V3.x — Network Learning (研究阶段)
 
 - IPv4/IPv6 行为学习
 - 运营商行为识别
 - 链路退化趋势预测
-- Transport Behavior Recognition（不依赖算法名称，基于真实链路行为）
 
 ---
 
@@ -101,10 +95,14 @@ TransportProfile 仅负责观测网络状态，不参与决策逻辑。
 |------|------|
 | Min-Inflight Scheduling | 选择最少在途请求的连接 |
 | RTT-aware Scheduling | 基于 EWMA 平滑 RTT 调度 |
-| QualityScore V2.0 | inflight×10000 + rttMs×10 + retrans×50 + lossRate/20 |
+| QualityScore V2.1 | inflight×10000 + rttMs×10 + (retrans×50 + loss/20) × behaviorScale × confidenceScale |
+| Behavior-aware Scaling | LowLatency 0.5x / Lossy 1.5x / Aggressive 1.2x 惩罚系数 |
+| Dynamic Connection Scaling | AIMD: 改善 +1, 恶化 ×0.5, 平滑过渡 |
+| Connection Migration | 断线/质量下降时主动创建替代连接 |
 | Graceful Drain | 连续 5 次质量下降 + confidence≥30 时优雅移除 |
+| Oscillation Prevention | 连续 3 次观察到同一行为才切换，防止反复横跳 |
 | Pre-connect | 后台每 5s 检查池，空池自动创建 |
-| Health Check | 5s 周期，RTT>5s / Closed / Drain 三重检测 |
+| Health Check | 5s 周期，主动迁移低于 effectiveConnections 的池 |
 
 ### Happy Eyeballs v3
 
@@ -119,12 +117,16 @@ TransportProfile 仅负责观测网络状态，不参与决策逻辑。
 
 ```
 TCP socket → Profile.Collect(TCP_INFO) → Snapshot
-    ↓
+    ↓ (Linux: getsockopt, Windows: HTTP RTT estimation)
 Quality Score (Overall/Latency/Loss/Stability)
     ↓
-XMUX.UpdateQuality() → scoreClient() → scheduling decision
+NetworkLearner.Record() → ClassifyBehavior (6 types)
     ↓
-HEv3.UpdateQuality() → score() → IP selection
+scoreClient() × behaviorScale × confidenceScale → scheduling decision
+    ↓
+Dynamic Connection Scaling (AIMD) → pool sizing
+    ↓
+Connection Migration → proactive pool refill
 ```
 
 ---
@@ -137,32 +139,53 @@ HEv3.UpdateQuality() → score() → IP selection
 
 | Benchmark | 上游 (ns/op) | Bray (ns/op) | Delta |
 |-----------|-------------|-------------|-------|
-| NewBuffer | 47.15 | 43.13 | **-8.5%** |
-| NewBufferStack | 30.06 | 28.16 | **-6.3%** |
-| Copy | 98.13 | 90.71 | **-7.6%** |
-| SplitBytes | 159.4 | 156.0 | **-2.1%** |
-| ChaCha20 | 625 MB/s | 598 MB/s | ~0 |
-| AES Encryption | 1006 MB/s | 1004 MB/s | ~0 |
-| FrameWrite | 47.93 | 47.34 | ~0 |
+| NewBuffer | 47.15 | 39.15 | **-16.9%** |
+| NewBufferStack | 30.06 | 24.05 | **-20.0%** |
+| Copy | 98.13 | 89.02 | **-9.3%** |
+| SplitBytes | 159.4 | 143.8 | **-9.8%** |
 
 ### XMUX Hot Paths
 
 | Benchmark | ns/op | allocs |
 |-----------|-------|--------|
-| GetXmuxClient | 17 | 0 |
-| RTTEWMA | 8.4 | 0 |
+| RTTEWMA | 8.5 | 0 |
 | WarmupEnqueue | 10.8 | 0 |
 | Metrics | 11.0 | 0 |
-| ConcurrentRW (16 workers) | 32,269 | 0 |
+| PoolScheduling (pool_1) | 24 | 0 |
+| PoolScheduling (pool_4) | 32 | 0 |
+| PoolScheduling (pool_8) | 44 | 0 |
+| PoolScheduling (pool_16) | 78 | 0 |
+| PoolScheduling (pool_32) | 148 | 0 |
 
 ### Happy Eyeballs v3
 
 | Benchmark | ns/op | allocs |
 |-----------|-------|--------|
-| Score | 0.21 | 0 |
+| Score | 0.19 | 0 |
 | ClampRTT | 0.10 | 0 |
-| SortIPs (large) | 1,965 | - |
-| ScoreIPs | 1,124 | - |
+
+---
+
+## 多租户说明
+
+### 连接池隔离
+
+| 部署方式 | 池隔离 | V2.0/V2.1 效果 |
+|----------|--------|---------------|
+| **客户端** (每用户独立实例) | ✅ 天然隔离 | 每个用户独立池，互不影响 |
+| **服务端** (多用户共享出站) | ⚠️ 按目标共享池 | 池质量反映网络质量，非用户质量 |
+
+### 服务端多用户行为
+
+- 连接池按 `destination + streamSettings` 隔离，不同目标的池互不影响
+- 同一目标的多用户共享池 — 这是正确行为：如果到某目标的网络丢包，所有连接都应被视为 lossy
+- NetworkLearner 跟踪每个连接的行为，池行为取活跃连接的主导行为
+- 单个差连接不会污染整个池（debounce + 取主导行为）
+
+### 建议
+
+- 客户端部署：每个用户独立 Xray 实例 → 完全隔离
+- 服务端部署：共享池是预期行为，网络级别的调度决策对所有用户公平
 
 ---
 
@@ -173,14 +196,15 @@ HEv3.UpdateQuality() → score() → IP selection
 | 上游客户端 → Bray 服务器 | ✅ 100% |
 | Bray 客户端 → 上游服务器 | ✅ 100% |
 | 配置格式 | ✅ 向后兼容 |
+| 跨平台编译 | ✅ Linux/Windows/macOS/Android/FreeBSD/OpenBSD |
 
 ---
 
 ## 测试
 
 ```bash
-# XMUX 单元测试
-go test -run "TestXMUX|TestMetrics" ./transport/internet/splithttp/
+# 全量单元测试
+go test -short -timeout 60s ./transport/internet/tcpinfo/ ./transport/internet/quality/ ./transport/internet/splithttp/
 
 # XMUX benchmarks
 go test -bench "^BenchmarkXMUX" -run "^$" -timeout 30s ./transport/internet/splithttp/
