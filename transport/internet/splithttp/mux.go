@@ -484,12 +484,45 @@ func (m *XmuxManager) healthCheckLoop() {
 			}
 
 			// V2.1: Update pool behavior from client observations
-			// Use the most recent behavior from any active client
+			// Use voting mechanism: count behaviors from all active clients
+			// Non-linear punishment: bad behavior (Lossy/Saturated) needs >40% to trigger degradation
 			var dominantBehavior quality.Behavior
-			for _, c := range m.xmuxClients {
-				if b := c.GetBehavior(); b != quality.BehaviorUnknown {
-					dominantBehavior = b
-					break // use first known behavior
+			if len(m.xmuxClients) > 0 {
+				behaviorCounts := make(map[quality.Behavior]int)
+				totalKnown := 0
+				badCount := 0 // Lossy or Saturated
+
+				for _, c := range m.xmuxClients {
+					if b := c.GetBehavior(); b != quality.BehaviorUnknown {
+						behaviorCounts[b]++
+						totalKnown++
+						if b == quality.BehaviorLossy || b == quality.BehaviorSaturated {
+							badCount++
+						}
+					}
+				}
+
+				if totalKnown > 0 {
+					// Find most common behavior (voting)
+					maxCount := 0
+					for b, count := range behaviorCounts {
+						if count > maxCount {
+							maxCount = count
+							dominantBehavior = b
+						}
+					}
+
+					// Non-linear punishment: only degrade if bad connections exceed 40%
+					// Bad connections harm multiplexing more than good connections help
+					badRatio := float64(badCount) / float64(totalKnown)
+					if badRatio > 0.4 && dominantBehavior != quality.BehaviorLossy && dominantBehavior != quality.BehaviorSaturated {
+						// Override to worst observed bad behavior
+						if behaviorCounts[quality.BehaviorSaturated] > 0 {
+							dominantBehavior = quality.BehaviorSaturated
+						} else {
+							dominantBehavior = quality.BehaviorLossy
+						}
+					}
 				}
 			}
 			if dominantBehavior != quality.BehaviorUnknown {
