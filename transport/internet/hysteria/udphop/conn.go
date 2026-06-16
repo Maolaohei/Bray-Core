@@ -5,7 +5,6 @@ import (
 	"math/rand"
 	"net"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/xtls/xray-core/transport/internet/finalmask"
@@ -47,9 +46,9 @@ type udpPacket struct {
 	Err  error
 }
 
-func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopIntervalMax time.Duration, listenUDPFunc func(addr *net.UDPAddr) (net.PacketConn, error), currentConn net.PacketConn, addrIndex int) (net.PacketConn, error) {
+func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopIntervalMax time.Duration, listenUDPFunc func(addr *net.UDPAddr) (net.PacketConn, error), currentConn net.PacketConn, addrIndex int) net.PacketConn {
 	if len(addrs) == 0 {
-		return nil, errors.New("udphop: addrs must not be empty")
+		panic("len(addrs) == 0")
 	}
 	if hopIntervalMin == 0 {
 		hopIntervalMin = defaultHopInterval
@@ -58,16 +57,16 @@ func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopInte
 		hopIntervalMax = defaultHopInterval
 	}
 	if hopIntervalMin < 5*time.Second {
-		return nil, errors.New("udphop: hopIntervalMin must be >= 5s")
+		panic("hopIntervalMin < 5*time.Second")
 	}
 	if hopIntervalMax < 5*time.Second {
-		return nil, errors.New("udphop: hopIntervalMax must be >= 5s")
+		panic("hopIntervalMax < 5*time.Second")
 	}
 	if hopIntervalMax < hopIntervalMin {
-		return nil, errors.New("udphop: hopIntervalMax must be >= hopIntervalMin")
+		panic("hopIntervalMax < hopIntervalMin")
 	}
 	if listenUDPFunc == nil {
-		return nil, errors.New("udphop: listenUDPFunc must not be nil")
+		panic("listenUDPFunc is nil")
 	}
 	hConn := &UdpHopPacketConn{
 		Addrs:          addrs,
@@ -87,7 +86,7 @@ func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopInte
 	}
 	go hConn.recvLoop(hConn.currentConn)
 	go hConn.hopLoop()
-	return hConn, nil
+	return hConn
 }
 
 func (u *UdpHopPacketConn) recvLoop(conn net.PacketConn) {
@@ -138,8 +137,8 @@ func (u *UdpHopPacketConn) hop() {
 	if u.closed {
 		return
 	}
-	u.addrIndex = rand.Intn(len(u.Addrs))
-	newConn, err := u.ListenUDPFunc(u.Addrs[u.addrIndex].(*net.UDPAddr))
+	addrIndex := rand.Intn(len(u.Addrs))
+	newConn, err := u.ListenUDPFunc(u.Addrs[addrIndex].(*net.UDPAddr))
 	if err != nil {
 		return
 	}
@@ -147,6 +146,7 @@ func (u *UdpHopPacketConn) hop() {
 		_ = u.prevConn.Close()
 	}
 	u.prevConn = u.currentConn
+	u.addrIndex = addrIndex
 	u.currentConn = newConn
 	if !u.deadline.IsZero() {
 		_ = u.currentConn.SetDeadline(u.deadline)
@@ -239,16 +239,6 @@ func (u *UdpHopPacketConn) SetWriteDeadline(t time.Time) error {
 		_ = u.prevConn.SetWriteDeadline(t)
 	}
 	return u.currentConn.SetWriteDeadline(t)
-}
-
-func (u *UdpHopPacketConn) SyscallConn() (syscall.RawConn, error) {
-	u.connMutex.RLock()
-	defer u.connMutex.RUnlock()
-	sc, ok := u.currentConn.(syscall.Conn)
-	if !ok {
-		return nil, errors.New("not supported")
-	}
-	return sc.SyscallConn()
 }
 
 func ToAddrs(ip net.IP, ports []uint32) []net.Addr {

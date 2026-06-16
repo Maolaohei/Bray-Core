@@ -126,6 +126,8 @@ func (c *client) dial(ctx context.Context) error {
 		switch c := conn.(type) {
 		case *internet.PacketConnWrapper:
 			pktConn = c.PacketConn
+		case *cnc.Connection:
+			pktConn = &internet.FakePacketConn{Conn: c}
 		default:
 			return nil, errors.New("unexpected connection type: ", reflect.TypeOf(c))
 		}
@@ -135,39 +137,30 @@ func (c *client) dial(ctx context.Context) error {
 
 	var pktConn net.PacketConn
 	var udpAddr *net.UDPAddr
+	var index int
+
 	if len(quicParams.UdpHop.Ports) > 0 {
-		index := rand.Intn(len(quicParams.UdpHop.Ports))
+		index = rand.Intn(len(quicParams.UdpHop.Ports))
 		c.dest.Port = net.Port(quicParams.UdpHop.Ports[index])
-		conn, err := internet.DialSystem(ctx, c.dest, c.socketConfig)
-		if err != nil {
-			return errors.New("failed to dial to dest").Base(err)
-		}
-		switch c := conn.(type) {
-		case *internet.PacketConnWrapper:
-			pktConn = c.PacketConn
-			udpAddr = conn.RemoteAddr().(*net.UDPAddr)
-		default:
-			return errors.New("unexpected connection type: ", reflect.TypeOf(c))
-		}
-		pktConn, err = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
-		if err != nil {
-			return errors.New("failed to create udphop conn").Base(err)
-		}
-	} else {
-		conn, err := internet.DialSystem(ctx, c.dest, c.socketConfig)
-		if err != nil {
-			return errors.New("failed to dial to dest").Base(err)
-		}
-		switch c := conn.(type) {
-		case *internet.PacketConnWrapper:
-			pktConn = c.PacketConn
-			udpAddr = c.RemoteAddr().(*net.UDPAddr)
-		case *cnc.Connection:
-			pktConn = &internet.FakePacketConn{Conn: c}
-			udpAddr = &net.UDPAddr{IP: c.RemoteAddr().(*net.TCPAddr).IP, Port: c.RemoteAddr().(*net.TCPAddr).Port}
-		default:
-			return errors.New("unexpected connection type: ", reflect.TypeOf(c))
-		}
+	}
+
+	raw, err := internet.DialSystem(ctx, c.dest, c.socketConfig)
+	if err != nil {
+		return errors.New("failed to dial to dest").Base(err)
+	}
+	switch c := raw.(type) {
+	case *internet.PacketConnWrapper:
+		pktConn = c.PacketConn
+		udpAddr = raw.RemoteAddr().(*net.UDPAddr)
+	case *cnc.Connection:
+		pktConn = &internet.FakePacketConn{Conn: c}
+		udpAddr = &net.UDPAddr{IP: c.RemoteAddr().(*net.TCPAddr).IP, Port: c.RemoteAddr().(*net.TCPAddr).Port}
+	default:
+		return errors.New("unexpected connection type: ", reflect.TypeOf(c))
+	}
+
+	if len(quicParams.UdpHop.Ports) > 0 {
+		pktConn = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
 	}
 
 	if c.udpmaskManager != nil {
