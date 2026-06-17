@@ -46,5 +46,5 @@ func (c *splitConn) RemoteAddr() net.Addr {
 }
 
 func (c *splitConn) SetDeadline(t time.Time) error      { return nil }
-func (c *splitConn) SetReadDeadline(t time.Time) error   { return nil }
-func (c *splitConn) SetWriteDeadline(t time.Time) error  { return nil }
+func (c *splitConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *splitConn) SetWriteDeadline(t time.Time) error { return nil }
