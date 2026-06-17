@@ -2,6 +2,7 @@ package tcpinfo
 
 import (
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -38,8 +39,9 @@ type Profile struct {
 	onUpdate func(*quality.Snapshot)
 
 	// Lifecycle
-	stopCh  chan struct{}
-	stopped atomic.Bool
+	stopCh    chan struct{}
+	stopped   atomic.Bool
+	startOnce sync.Once
 }
 
 // NewProfile creates a new TransportProfile for the given connection.
@@ -96,10 +98,9 @@ func (p *Profile) History() *quality.History {
 
 // Start begins background sampling. Safe to call multiple times.
 func (p *Profile) Start() {
-	if p.stopped.Load() {
-		return
-	}
-	go p.loop()
+	p.startOnce.Do(func() {
+		go p.loop()
+	})
 }
 
 // Stop halts background sampling.

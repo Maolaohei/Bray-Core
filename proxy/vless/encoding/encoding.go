@@ -33,7 +33,11 @@ func EncodeRequestHeader(writer io.Writer, request *protocol.RequestHeader, requ
 	if err := buffer.WriteByte(request.Version); err != nil {
 		return errors.New("failed to write request version").Base(err)
 	}
-	if _, err := buffer.Write(request.User.Account.(*vless.MemoryAccount).ID.Bytes()); err != nil {
+	account, ok := request.User.Account.(*vless.MemoryAccount)
+	if !ok {
+		return errors.New("unsupported account type")
+	}
+	if _, err := buffer.Write(account.ID.Bytes()); err != nil {
 		return errors.New("failed to write request user id").Base(err)
 	}
 	if err := EncodeHeaderAddons(&buffer, requestAddons); err != nil {
@@ -100,8 +104,9 @@ func DecodeRequestHeader(ctx context.Context, isfb bool, first *buf.Buffer, read
 		}
 	}
 
-	requestAddons, err := DecodeHeaderAddons(&buffer, reader)
-	if err != nil {
+	requestAddons := GetAddons()
+	if err := DecodeHeaderAddons(&buffer, reader, requestAddons); err != nil {
+		PutAddons(requestAddons)
 		return nil, nil, nil, false, errors.New("failed to decode request header addons").Base(err)
 	}
 
@@ -161,8 +166,9 @@ func DecodeResponseHeader(reader io.Reader, request *protocol.RequestHeader) (*A
 		return nil, errors.New("unexpected response version. Expecting ", int(request.Version), " but actually ", int(buffer.Byte(0)))
 	}
 
-	responseAddons, err := DecodeHeaderAddons(&buffer, reader)
-	if err != nil {
+	responseAddons := GetAddons()
+	if err := DecodeHeaderAddons(&buffer, reader, responseAddons); err != nil {
+		PutAddons(responseAddons)
 		return nil, errors.New("failed to decode response header addons").Base(err)
 	}
 

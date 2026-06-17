@@ -14,6 +14,17 @@ import (
 	"github.com/xtls/xray-core/proxy/vless"
 )
 
+// Sentinel errors for zero-allocation error returns on hot paths.
+var (
+	errUnexpectedWireType    = errors.New("unexpected wire type in addons")
+	errAddonsDataTruncated   = errors.New("addons data truncated")
+	errAddonsProtobufLength  = errors.New("failed to read addons protobuf length")
+	errAddonsProtobufValue   = errors.New("failed to read addons protobuf value")
+	errUnmarshalAddonsFailed = errors.New("failed to unmarshal addons protobuf value")
+	errVarintTooLong         = errors.New("varint too long")
+	errUnexpectedEndOfVarint = errors.New("unexpected end of varint")
+)
+
 // AddonsPool reuses Addons structs to reduce GC pressure.
 var AddonsPool = sync.Pool{
 	New: func() any {
@@ -30,6 +41,9 @@ func GetAddons() *Addons {
 
 func PutAddons(a *Addons) {
 	if a != nil {
+		if a.Seed != nil {
+			PutSeed(a.Seed)
+		}
 		a.Flow = ""
 		a.Seed = nil
 		AddonsPool.Put(a)
@@ -140,6 +154,54 @@ func putVarint(buf []byte, x uint32) int {
 }
 
 // unmarshalAddons is a hand-optimized protobuf decoder for Addons.
+// knownFlows contains pre-allocated Flow string constants to avoid per-request allocation.
+var knownFlows = []struct {
+	flow string
+}{
+	{vless.XRV},
+}
+
+// flowString converts fieldData to a string, using pre-allocated constants for known flows.
+func flowString(fieldData []byte) string {
+	for _, kf := range knownFlows {
+		if len(fieldData) == len(kf.flow) && string(fieldData) == kf.flow {
+			return kf.flow
+		}
+	}
+	return string(fieldData)
+}
+
+// seedPool reuses Seed byte slices to reduce allocations.
+var seedPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 64)
+		return &b
+	},
+}
+
+// copySeed copies fieldData into a pooled buffer, growing if needed.
+func copySeed(fieldData []byte) []byte {
+	bp := seedPool.Get().(*[]byte)
+	b := *bp
+	if cap(b) < len(fieldData) {
+		b = make([]byte, len(fieldData))
+	} else {
+		b = b[:len(fieldData)]
+	}
+	copy(b, fieldData)
+	*bp = b
+	return b
+}
+
+// PutSeed returns a Seed buffer to the pool for reuse.
+func PutSeed(seed []byte) {
+	if seed == nil || cap(seed) < 32 {
+		return
+	}
+	bp := seed[:0]
+	seedPool.Put(&bp)
+}
+
 func unmarshalAddons(data []byte, addons *Addons) error {
 	pos := 0
 	for pos < len(data) {
@@ -153,7 +215,7 @@ func unmarshalAddons(data []byte, addons *Addons) error {
 		wireType := tag & 0x07
 
 		if wireType != 2 { // length-delimited
-			return errors.New("unexpected wire type in addons")
+			return errUnexpectedWireType
 		}
 
 		// Read length
@@ -164,19 +226,17 @@ func unmarshalAddons(data []byte, addons *Addons) error {
 		pos += n
 
 		if pos+int(length) > len(data) {
-			return errors.New("addons data truncated")
+			return errAddonsDataTruncated
 		}
 
 		fieldData := data[pos : pos+int(length)]
 		pos += int(length)
 
 		switch fieldNumber {
-		case 1: // Flow
-			addons.Flow = string(fieldData)
-		case 2: // Seed
-			seed := make([]byte, len(fieldData))
-			copy(seed, fieldData)
-			addons.Seed = seed
+		case 1: // Flow — use pre-allocated constants for known values
+			addons.Flow = flowString(fieldData)
+		case 2: // Seed — reuse pooled buffer
+			addons.Seed = copySeed(fieldData)
 		}
 	}
 	return nil
@@ -190,16 +250,19 @@ func decodeVarint(data []byte) (uint32, int, error) {
 			return x, i + 1, nil
 		}
 		if i >= 4 {
-			return 0, 0, errors.New("varint too long")
+			return 0, 0, errVarintTooLong
 		}
 	}
-	return 0, 0, errors.New("unexpected end of varint")
+	return 0, 0, errUnexpectedEndOfVarint
 }
 
 func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
 	switch addons.Flow {
 	case vless.XRV:
 		bytes := marshalAddons(addons)
+		if len(bytes) > 255 {
+			return errors.New("addons payload too large: ", len(bytes), " bytes (max 255)")
+		}
 		if err := buffer.WriteByte(byte(len(bytes))); err != nil {
 			return errors.New("failed to write addons protobuf length").Base(err)
 		}
@@ -212,6 +275,9 @@ func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
 		// Serialize non-empty addons for non-XRV flows.
 		if addons.Flow != "" {
 			bytes := marshalAddons(addons)
+			if len(bytes) > 255 {
+				return errors.New("addons payload too large: ", len(bytes), " bytes (max 255)")
+			}
 			if err := buffer.WriteByte(byte(len(bytes))); err != nil {
 				return errors.New("failed to write addons protobuf length").Base(err)
 			}
@@ -228,33 +294,24 @@ func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
 	return nil
 }
 
-func DecodeHeaderAddons(buffer *buf.Buffer, reader io.Reader) (*Addons, error) {
-	addons := GetAddons()
+func DecodeHeaderAddons(buffer *buf.Buffer, reader io.Reader, addons *Addons) error {
 	buffer.Clear()
 	if _, err := buffer.ReadFullFrom(reader, 1); err != nil {
-		PutAddons(addons)
-		return nil, errors.New("failed to read addons protobuf length").Base(err)
+		return errAddonsProtobufLength
 	}
 
 	if length := int32(buffer.Byte(0)); length != 0 {
 		buffer.Clear()
 		if _, err := buffer.ReadFullFrom(reader, length); err != nil {
-			PutAddons(addons)
-			return nil, errors.New("failed to read addons protobuf value").Base(err)
+			return errAddonsProtobufValue
 		}
 
 		if err := unmarshalAddons(buffer.Bytes(), addons); err != nil {
-			PutAddons(addons)
-			return nil, errors.New("failed to unmarshal addons protobuf value").Base(err)
-		}
-
-		// Verification.
-		switch addons.Flow {
-		default:
+			return errUnmarshalAddonsFailed
 		}
 	}
 
-	return addons, nil
+	return nil
 }
 
 // EncodeBodyAddons returns a Writer that auto-encrypt content written by caller.
@@ -263,7 +320,11 @@ func EncodeBodyAddons(writer buf.Writer, request *protocol.RequestHeader, reques
 		return NewMultiLengthPacketWriter(writer)
 	}
 	if requestAddons.Flow == vless.XRV {
-		return proxy.NewVisionWriter(writer, state, isUplink, context, conn, ob, request.User.Account.(*vless.MemoryAccount).Testseed)
+		account, ok := request.User.Account.(*vless.MemoryAccount)
+		if !ok {
+			return writer
+		}
+		return proxy.NewVisionWriter(writer, state, isUplink, context, conn, ob, account.Testseed)
 	}
 	return writer
 }

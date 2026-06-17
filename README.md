@@ -2,6 +2,23 @@
 
 > 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能增强分支，专注于 TCP 优化、连接调度与智能网络决策，在保持 100% 协议兼容性的前提下提升复杂网络环境下的稳定性与连接成功率。
 
+### V2.2 — 代码质量与性能优化 ✅
+
+| 模块 | 优化 | 状态 |
+|------|------|------|
+| XMUX mux.go | defer Unlock 防死锁、nil 检查、CAS 替代竞态 | ✅ |
+| XMUX mux.go | leftUsage atomic 化、Close 清理连接池 | ✅ |
+| VLESS encoding | Sentinel Errors 消除热路径分配 | ✅ |
+| VLESS encoding | In-place Modification 零拷贝解码 | ✅ |
+| VLESS encoding | flowString 预分配常量、copySeed pool 复用 | ✅ |
+| tcpinfo | computeQuality 跨平台去重 | ✅ |
+| xpadding.go | parsedURLCache 有界 LRU 替代 sync.Map | ✅ |
+| connection.go | onClose 顺序修复、Deadline 返回 error | ✅ |
+| collector_fallback.go | FeedRTT 零值保护 | ✅ |
+| mux.go | healthCheckLoop 提取 helper + defer Unlock | ✅ |
+| mux.go | getNetworkHash strings.Builder 优化 | ✅ |
+| mux.go | behaviorCounts 固定数组替代 map | ✅ |
+
 ---
 
 ## 快速开始
@@ -148,14 +165,23 @@ Connection Migration → proactive pool refill
 
 | Benchmark | ns/op | allocs |
 |-----------|-------|--------|
-| RTTEWMA | 8.5 | 0 |
-| WarmupEnqueue | 10.8 | 0 |
-| Metrics | 11.0 | 0 |
-| PoolScheduling (pool_1) | 24 | 0 |
-| PoolScheduling (pool_4) | 32 | 0 |
-| PoolScheduling (pool_8) | 44 | 0 |
-| PoolScheduling (pool_16) | 78 | 0 |
-| PoolScheduling (pool_32) | 148 | 0 |
+| RTTEWMA | 8 | 0 |
+| WarmupEnqueue | 11 | 0 |
+| Metrics | 11 | 0 |
+| PoolScheduling (pool_1) | 109 | 0 |
+| PoolScheduling (pool_4) | 153 | 0 |
+| PoolScheduling (pool_8) | 207 | 0 |
+| PoolScheduling (pool_16) | 307 | 0 |
+| PoolScheduling (pool_32) | 494 | 0 |
+| ConcurrentR/W (workers_16) | 35 us | 0 |
+
+### VLESS Decode (优化后)
+
+| Benchmark | ns/op | B/op | allocs |
+|-----------|-------|------|--------|
+| DecodeHeaderAddons | 28 | 32 | 1 |
+| DecodeHeaderAddonsParallel | 23 | 104 | 3 |
+| MarshalAddons Vision | 14.4 | 24 | 1 |
 
 ### Happy Eyeballs v3
 

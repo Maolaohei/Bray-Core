@@ -69,7 +69,45 @@ var paddingResultPool = sync.Pool{
 
 // parsedURLCache caches url.Parse results for PlacementQueryInHeader
 // to avoid repeated parsing of the same RawURL across requests.
-var parsedURLCache = sync.Map{}
+// Bounded to 256 entries to prevent unbounded memory growth.
+var parsedURLCache struct {
+	sync.RWMutex
+	entries map[string]*url.URL
+	order   []string
+	maxSize int
+}
+
+func init() {
+	parsedURLCache.entries = make(map[string]*url.URL)
+	parsedURLCache.maxSize = 256
+}
+
+func cachedParseURL(rawURL string) (*url.URL, bool) {
+	parsedURLCache.RLock()
+	if u, ok := parsedURLCache.entries[rawURL]; ok {
+		parsedURLCache.RUnlock()
+		return u, true
+	}
+	parsedURLCache.RUnlock()
+
+	u, err := url.Parse(rawURL)
+	if err != nil || u == nil {
+		return nil, false
+	}
+
+	parsedURLCache.Lock()
+	// Evict oldest if at capacity
+	if len(parsedURLCache.entries) >= parsedURLCache.maxSize {
+		oldest := parsedURLCache.order[0]
+		parsedURLCache.order = parsedURLCache.order[1:]
+		delete(parsedURLCache.entries, oldest)
+	}
+	parsedURLCache.entries[rawURL] = u
+	parsedURLCache.order = append(parsedURLCache.order, rawURL)
+	parsedURLCache.Unlock()
+
+	return u, true
+}
 
 // huffmanLenCache caches HuffmanEncodeLength results by string length.
 // For base62 charset, encoding length depends only on string length, not content.
@@ -129,15 +167,19 @@ func absInt(x int) int {
 	return x
 }
 
-// tokenishPools per-length sync.Pool for pre-generated Tokenish padding.
-// Covers 32~1024 every 32 bytes. Init fills once; GC reclaims naturally.
-var tokenishPools [32]sync.Pool
+// tokenishCache caches pre-generated Tokenish padding strings.
+// Covers 32~1024 every 32 bytes. Init fills once; safe for concurrent reads.
+var tokenishCache struct {
+	sync.RWMutex
+	items map[int]string
+}
 
 func init() {
-	for i := range tokenishPools {
+	tokenishCache.items = make(map[int]string)
+	for i := 0; i < 32; i++ {
 		huffmanLen := 32 + i*32
 		s := generateTokenishPaddingBase62Raw(huffmanLen)
-		tokenishPools[i].Put(&s)
+		tokenishCache.items[huffmanLen] = s
 	}
 }
 
@@ -146,10 +188,12 @@ func tokenishPoolIndex(huffmanLen int) int {
 }
 
 func getOrGenTokenish(huffmanLen int) string {
-	idx := tokenishPoolIndex(huffmanLen)
-	if item := tokenishPools[idx].Get(); item != nil {
-		return *item.(*string)
+	tokenishCache.RLock()
+	if s, ok := tokenishCache.items[huffmanLen]; ok {
+		tokenishCache.RUnlock()
+		return s
 	}
+	tokenishCache.RUnlock()
 	return generateTokenishPaddingBase62Raw(huffmanLen)
 }
 
@@ -293,15 +337,10 @@ func (c *Config) ApplyXPaddingToHeader(h http.Header, config XPaddingConfig) {
 		h.Set(p.Header, paddingValue)
 	case PlacementQueryInHeader:
 		var baseURL *url.URL
-		if cached, ok := parsedURLCache.Load(p.RawURL); ok {
-			baseURL = cached.(*url.URL)
+		if cached, ok := cachedParseURL(p.RawURL); ok {
+			baseURL = cached
 		} else {
-			u, err := url.Parse(p.RawURL)
-			if err != nil || u == nil {
-				return
-			}
-			baseURL = u
-			parsedURLCache.Store(p.RawURL, baseURL)
+			return
 		}
 		clone := *baseURL
 		clone.RawQuery = p.Key + "=" + paddingValue
