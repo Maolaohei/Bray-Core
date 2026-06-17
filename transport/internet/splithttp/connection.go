@@ -1,7 +1,6 @@
 package splithttp
 
 import (
-	"errors"
 	"io"
 	"net"
 	"time"
@@ -24,7 +23,6 @@ func (c *splitConn) Read(b []byte) (int, error) {
 }
 
 func (c *splitConn) Close() error {
-	// Close resources first, then call onClose (resource cleanup is more important)
 	err := c.writer.Close()
 	err2 := c.reader.Close()
 	if c.onClose != nil {
@@ -47,15 +45,6 @@ func (c *splitConn) RemoteAddr() net.Addr {
 	return c.remoteAddr
 }
 
-func (c *splitConn) SetDeadline(t time.Time) error {
-	// splitConn bridges a pipe reader/writer — deadlines are not applicable.
-	return errors.New("splitConn: deadline not supported")
-}
-
-func (c *splitConn) SetReadDeadline(t time.Time) error {
-	return errors.New("splitConn: deadline not supported")
-}
-
-func (c *splitConn) SetWriteDeadline(t time.Time) error {
-	return errors.New("splitConn: deadline not supported")
-}
+func (c *splitConn) SetDeadline(t time.Time) error      { return nil }
+func (c *splitConn) SetReadDeadline(t time.Time) error   { return nil }
+func (c *splitConn) SetWriteDeadline(t time.Time) error  { return nil }
