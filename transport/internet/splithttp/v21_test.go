@@ -311,7 +311,7 @@ func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
 	// Fill pool to 3
 	for i := 0; i < 5; i++ {
 		c := m.GetXmuxClient(context.Background())
-		c.OpenUsage.Add(1)
+		c.Running.Add(1)
 	}
 	poolSize := len(m.xmuxClients)
 	t.Logf("Pool size after filling: %d", poolSize)
@@ -346,9 +346,9 @@ func TestV21_ConnectionMigration_QualityDrain(t *testing.T) {
 
 	// Create 2 connections
 	c1 := m.GetXmuxClient(context.Background())
-	c1.OpenUsage.Add(1)
+	c1.Running.Add(1)
 	c2 := m.GetXmuxClient(context.Background())
-	c2.OpenUsage.Add(1)
+	c2.Running.Add(1)
 
 	// Simulate quality drain on c1 (set initial, then 5 consecutive drops)
 	c1.UpdateQuality(100, 50, 0, 0) // set baseline
@@ -361,7 +361,7 @@ func TestV21_ConnectionMigration_QualityDrain(t *testing.T) {
 	}
 
 	// Release c1 so health check can remove it
-	c1.OpenUsage.Add(-1)
+	c1.Running.Add(-1)
 
 	// Wait for health check to run (5s ticker)
 	// Instead of waiting, directly trigger the migration logic

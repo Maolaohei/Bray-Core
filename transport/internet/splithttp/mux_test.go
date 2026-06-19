@@ -132,9 +132,9 @@ func TestConcurrentPoolAccess(t *testing.T) {
 					errCount.Add(1)
 					return
 				}
-				client.OpenUsage.Add(1)
+				client.Running.Add(1)
 				time.Sleep(time.Microsecond) // brief hold
-				client.OpenUsage.Add(-1)
+				client.Running.Add(-1)
 			}
 		}()
 	}

@@ -41,9 +41,9 @@ func BenchmarkXMUXGetXmuxClientParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			c := m.GetXmuxClient(context.Background())
-			c.OpenUsage.Add(1)
+			c.Running.Add(1)
 			time.Sleep(time.Microsecond)
-			c.OpenUsage.Add(-1)
+			c.Running.Add(-1)
 		}
 	})
 }
@@ -71,8 +71,8 @@ func BenchmarkXMUXPoolScheduling(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				c := m.GetXmuxClient(context.Background())
-				c.OpenUsage.Add(1)
-				c.OpenUsage.Add(-1)
+				c.Running.Add(1)
+				c.Running.Add(-1)
 			}
 		})
 	}
@@ -122,10 +122,10 @@ func BenchmarkXMUXConcurrentReadWrite(b *testing.B) {
 					defer wg.Done()
 					for i := 0; i < b.N/workers+1; i++ {
 						c := m.GetXmuxClient(context.Background())
-						c.OpenUsage.Add(1)
+						c.Running.Add(1)
 						c.UpdateRTT(time.Duration(i%100) * time.Millisecond)
 						time.Sleep(time.Microsecond)
-						c.OpenUsage.Add(-1)
+						c.Running.Add(-1)
 					}
 				}()
 			}
