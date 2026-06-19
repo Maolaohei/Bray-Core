@@ -51,7 +51,7 @@ jobs:
             ./common/buf/ > bench_results/new_buf.txt
 
       - name: Download baseline
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bench_results
           key: benchmark-baseline-${{ github.base_ref || 'main' }}
@@ -128,7 +128,7 @@ jobs:
 
       - name: Cache baseline
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: bench_results/base_*.txt
           key: benchmark-baseline-main-${{ github.sha }}
