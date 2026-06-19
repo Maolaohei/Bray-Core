@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/transport/internet/quality"
 )
@@ -20,10 +21,11 @@ type XmuxConn interface {
 
 type XmuxClient struct {
 	XmuxConn     XmuxConn
-	OpenUsage    atomic.Int32
+	Running      atomic.Int32
 	leftUsage    atomic.Int32
 	LeftRequests atomic.Int32
 	UnreusableAt time.Time
+	NotUsed      atomic.Bool
 	createdAt    time.Time
 	lastRTT      atomic.Int64 // nanoseconds, for RTT-aware scheduling
 
@@ -39,6 +41,22 @@ type XmuxClient struct {
 
 	// TransportProfile for this connection. Created when TCP connection is established.
 	profile interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
+}
+
+func (c *XmuxClient) AddRunning() {
+	c.Running.Add(1)
+}
+
+func (c *XmuxClient) DoneRunning() {
+	c.Running.Add(-1)
+	c.maybeClose()
+}
+
+// close the XmuxConn if it is not used and has no running requests
+func (c *XmuxClient) maybeClose() {
+	if c.NotUsed.Load() && c.Running.Load() <= 0 {
+		common.Close(c.XmuxConn)
+	}
 }
 
 // UpdateRTT updates the smoothed RTT for this connection using EWMA.
@@ -422,7 +440,7 @@ const (
 // Improvements over original:
 // - Cold start protection: new connections (<10s) are not removed
 // - RTT-based: only remove if RTT > 5000ms (not just IsClosed)
-// - Does not remove active connections with low OpenUsage
+// - Does not remove active connections with low Running
 func (m *XmuxManager) healthCheckLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -455,7 +473,7 @@ func (m *XmuxManager) healthCheckTick() {
 		}
 
 		// Skip if connection is actively being used
-		if xmuxClient.OpenUsage.Load() > 0 {
+		if xmuxClient.Running.Load() > 0 {
 			i++
 			continue
 		}
@@ -776,10 +794,12 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 			xmuxClient.LeftRequests.Load() <= 0 ||
 			(xmuxClient.UnreusableAt != time.Time{} && time.Now().After(xmuxClient.UnreusableAt)) {
 			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
-				", OpenUsage = ", xmuxClient.OpenUsage.Load(),
+				", Running = ", xmuxClient.Running.Load(),
 				", leftUsage = ", xmuxClient.leftUsage.Load(),
 				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
 				", UnreusableAt = ", xmuxClient.UnreusableAt)
+			xmuxClient.NotUsed.Store(true)
+			xmuxClient.maybeClose()
 			m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
 		} else {
 			i++
@@ -802,7 +822,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 	effectiveConc := m.effectiveConcurrency()
 	if effectiveConc > 0 {
 		for _, xmuxClient := range m.xmuxClients {
-			if xmuxClient.OpenUsage.Load() < effectiveConc {
+			if xmuxClient.Running.Load() < effectiveConc {
 				xmuxClients = append(xmuxClients, xmuxClient)
 			}
 		}
@@ -852,7 +872,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 //   - Lossy/Saturated: 1.5 (penalties increased — problematic link)
 //   - Aggressive: 1.2 (slightly higher — avoid over-stacking)
 func scoreClient(c *XmuxClient) int64 {
-	inflight := int64(c.OpenUsage.Load())
+	inflight := int64(c.Running.Load())
 	rttMs := c.GetRTT().Milliseconds()
 	if rttMs == 0 {
 		rttMs = 100 // default 100ms for unsampled connections
