@@ -149,7 +149,10 @@ func (c *XmuxClient) StartProfiling(conn interface{ Stop() }) {
 // StopProfiling stops the TransportProfile background goroutine.
 func (c *XmuxClient) StopProfiling() {
 	if c.profile != nil {
-		c.profile.Stop()
+		func() {
+			defer func() { recover() }()
+			c.profile.Stop()
+		}()
 		c.profile = nil
 	}
 }
