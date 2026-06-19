@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apernet/quic-go/http3"
@@ -212,11 +213,11 @@ func (c *DefaultDialerClient) Close() error {
 
 type WaitReadCloser struct {
 	Wait chan struct{}
-	io.ReadCloser
+	rc   atomic.Value // stores io.ReadCloser
 }
 
 func (w *WaitReadCloser) Set(rc io.ReadCloser) {
-	w.ReadCloser = rc
+	w.rc.Store(rc)
 	defer func() {
 		if recover() != nil {
 			rc.Close()
@@ -226,21 +227,25 @@ func (w *WaitReadCloser) Set(rc io.ReadCloser) {
 }
 
 func (w *WaitReadCloser) Read(b []byte) (int, error) {
-	if w.ReadCloser == nil {
-		if <-w.Wait; w.ReadCloser == nil {
-			return 0, io.ErrClosedPipe
-		}
+	if v := w.rc.Load(); v != nil {
+		return v.(io.ReadCloser).Read(b)
 	}
-	return w.ReadCloser.Read(b)
+	<-w.Wait
+	if v := w.rc.Load(); v != nil {
+		return v.(io.ReadCloser).Read(b)
+	}
+	return 0, io.ErrClosedPipe
 }
 
 func (w *WaitReadCloser) Close() error {
-	if w.ReadCloser != nil {
-		return w.ReadCloser.Close()
+	if v := w.rc.Load(); v != nil {
+		return v.(io.ReadCloser).Close()
 	}
 	defer func() {
-		if recover() != nil && w.ReadCloser != nil {
-			w.ReadCloser.Close()
+		if recover() != nil {
+			if v := w.rc.Load(); v != nil {
+				v.(io.ReadCloser).Close()
+			}
 		}
 	}()
 	close(w.Wait)

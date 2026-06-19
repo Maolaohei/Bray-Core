@@ -8,6 +8,7 @@ import (
 	"io"
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/common/errors"
 )
@@ -47,7 +48,7 @@ type uploadQueue struct {
 	writeCloseMutex sync.Mutex
 	heap            uploadHeap
 	nextSeq         uint64
-	closed          bool
+	closed          atomic.Bool
 	maxPackets      int
 }
 
@@ -56,7 +57,6 @@ func NewUploadQueue(maxPackets int) *uploadQueue {
 		pushedPackets: make(chan Packet, maxPackets),
 		heap:          uploadHeap{},
 		nextSeq:       0,
-		closed:        false,
 		maxPackets:    maxPackets,
 	}
 }
@@ -65,7 +65,7 @@ func (h *uploadQueue) Push(p Packet) error {
 	h.writeCloseMutex.Lock()
 	defer h.writeCloseMutex.Unlock()
 
-	if h.closed {
+	if h.closed.Load() {
 		return errors.New("packet queue closed")
 	}
 	if h.nomore {
@@ -82,8 +82,7 @@ func (h *uploadQueue) Close() error {
 	h.writeCloseMutex.Lock()
 	defer h.writeCloseMutex.Unlock()
 
-	if !h.closed {
-		h.closed = true
+	if !h.closed.Swap(true) {
 		runtime.Gosched() // hope Read() gets the packet
 	f:
 		for {
@@ -109,7 +108,7 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 		return h.reader.Read(b)
 	}
 
-	if h.closed {
+	if h.closed.Load() {
 		return 0, io.EOF
 	}
 
