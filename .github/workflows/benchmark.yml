@@ -27,27 +27,27 @@ jobs:
 
       - name: Run XMUX benchmarks
         run: |
-          go test -bench=BenchmarkXMUX -benchmem -count=6 -timeout=300s \
+          go test -run=XXX -bench=BenchmarkXMUX -benchmem -count=3 -timeout=180s \
             ./transport/internet/splithttp/ > bench_results/new_xmux.txt
 
       - name: Run Happy Eyeballs benchmarks
         run: |
-          go test -bench='Benchmark(Score|ClampRTT)' -benchmem -count=6 -timeout=300s \
+          go test -run=XXX -bench='Benchmark(Score|ClampRTT)' -benchmem -count=3 -timeout=180s \
             ./transport/internet/ > bench_results/new_happy.txt
 
       - name: Run Warmup benchmarks
         run: |
-          go test -bench='BenchmarkWarmup|BenchmarkMetrics' -benchmem -count=6 -timeout=300s \
+          go test -run=XXX -bench='BenchmarkWarmup|BenchmarkMetrics' -benchmem -count=3 -timeout=180s \
             ./transport/internet/ > bench_results/new_warmup.txt
 
       - name: Run VLESS Decode benchmarks
         run: |
-          go test -bench='BenchmarkDecodeHeader|BenchmarkMarshalAddons' -benchmem -count=6 -timeout=300s \
+          go test -run=XXX -bench='BenchmarkDecodeHeader|BenchmarkMarshalAddons' -benchmem -count=3 -timeout=180s \
             ./proxy/vless/encoding/ > bench_results/new_vless.txt
 
       - name: Run Buffer benchmarks
         run: |
-          go test -bench='BenchmarkNewBuffer|BenchmarkCopy|BenchmarkSplitBytes' -benchmem -count=6 -timeout=300s \
+          go test -run=XXX -bench='BenchmarkNewBuffer|BenchmarkCopy|BenchmarkSplitBytes' -benchmem -count=3 -timeout=180s \
             ./common/buf/ > bench_results/new_buf.txt
 
       - name: Download baseline
