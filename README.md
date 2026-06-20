@@ -27,8 +27,11 @@
 
 | 平台 | 下载 |
 |------|------|
-| **Windows** | [V2rayN (原版内核)](https://github.com/2dust/v2rayn/releases) |
+| **Windows** | [V2rayN (个人修改版本)](https://github.com/Maolaohei/v2rayN) | 
 | **Android** | [V2rayNG (Bray-Core 内核)](https://github.com/Maolaohei/v2rayNG/releases) |
+
+Windows版本需要自己在bin/xray下替换内核
+
 
 ### 编译
 
