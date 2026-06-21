@@ -75,6 +75,12 @@ func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error)
 	h2Ch := make(chan raceResult, 1)
 	ctx := req.Context()
 
+	// Ensure response bodies are closed if we return early (e.g., context cancel)
+	defer func() {
+		go t.drainLateResponse(h3Ch)
+		go t.drainLateResponse(h2Ch)
+	}()
+
 	// H3 is the preferred path — start it immediately.
 	go func() {
 		h3Req := req.Clone(ctx)
@@ -102,8 +108,6 @@ func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error)
 	case r := <-h3Ch:
 		if r.err == nil {
 			t.settle(t.h3)
-			// Drain any late H2 response body so the connection can be reused.
-			go t.drainLateResponse(h2Ch)
 			return r.resp, nil
 		}
 		// H3 failed — record the failure and wait for H2.
@@ -124,8 +128,6 @@ func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error)
 		// H2 finished before H3 (H3 is slow / UDP-throttled).
 		if r.err == nil {
 			t.settle(t.h2)
-			// Drain the late H3 response.
-			go t.drainLateResponse(h3Ch)
 			return r.resp, nil
 		}
 		// H2 also failed — wait for H3.

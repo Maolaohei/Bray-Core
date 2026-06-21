@@ -87,33 +87,43 @@ func (p *IncrementalWorkerPicker) findAvailable() int {
 
 func (p *IncrementalWorkerPicker) pickInternal() (*ClientWorker, bool, error) {
 	p.access.Lock()
-	defer p.access.Unlock()
-
 	idx := p.findAvailable()
 	if idx >= 0 {
 		n := len(p.workers)
 		if n > 1 && idx != n-1 {
 			p.workers[n-1], p.workers[idx] = p.workers[idx], p.workers[n-1]
 		}
-		return p.workers[idx], false, nil
+		worker := p.workers[idx]
+		p.access.Unlock()
+		return worker, false, nil
 	}
 
 	p.cleanup()
+	needCreate := true
+	p.access.Unlock()
 
-	worker, err := p.Factory.Create()
-	if err != nil {
-		return nil, false, err
-	}
-	p.workers = append(p.workers, worker)
-
-	if p.cleanupTask == nil {
-		p.cleanupTask = &task.Periodic{
-			Interval: time.Second * 30,
-			Execute:  p.cleanupFunc,
+	// Create worker outside the lock to avoid blocking other goroutines
+	// during potentially slow network operations.
+	if needCreate {
+		worker, err := p.Factory.Create()
+		if err != nil {
+			return nil, false, err
 		}
+
+		p.access.Lock()
+		p.workers = append(p.workers, worker)
+		if p.cleanupTask == nil {
+			p.cleanupTask = &task.Periodic{
+				Interval: time.Second * 30,
+				Execute:  p.cleanupFunc,
+			}
+		}
+		p.access.Unlock()
+
+		return worker, true, nil
 	}
 
-	return worker, true, nil
+	return nil, false, nil
 }
 
 func (p *IncrementalWorkerPicker) PickAvailable() (*ClientWorker, error) {
@@ -263,7 +273,7 @@ func (m *ClientWorker) monitor() {
 					if err := sendKeepAliveFrame(m.link.Writer); err != nil {
 						errors.LogInfoInner(context.Background(), err, "mux keepalive write failed, closing worker")
 						m.sessionManager.Close()
-						common.Must(m.done.Close())
+						m.done.Close()
 						return
 					}
 				} else {
@@ -271,11 +281,11 @@ func (m *ClientWorker) monitor() {
 				}
 				// Only close after 3 consecutive idle intervals with keepalive
 				if idleStrikes >= 3 && m.sessionManager.CloseIfNoSessionAndIdle(checkSize, checkCount) {
-					common.Must(m.done.Close())
+					m.done.Close()
 				}
 			} else if stillIdle {
 				if m.sessionManager.CloseIfNoSessionAndIdle(checkSize, checkCount) {
-					common.Must(m.done.Close())
+					m.done.Close()
 				}
 			}
 		}
@@ -313,6 +323,11 @@ func writeFirstPayload(reader buf.Reader, writer *Writer) error {
 
 func fetchInput(ctx context.Context, s *Session, output buf.Writer) {
 	outbounds := session.OutboundsFromContext(ctx)
+	if len(outbounds) == 0 {
+		errors.LogInfo(ctx, "mux: no outbound metadata in context")
+		s.Close(false)
+		return
+	}
 	ob := outbounds[len(outbounds)-1]
 	transferType := protocol.TransferTypeStream
 	if ob.Target.Network == net.Network_UDP {

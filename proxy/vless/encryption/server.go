@@ -140,7 +140,11 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 			index = 1088
 		}
 		if i.XorMode > 0 {
-			NewCTR(i.NfsPKeysBytes[j], iv).XORKeyStream(relays, relays[:index]) // we don't use buggy elligator2, because we have PSK :)
+			ctr, err := NewCTR(i.NfsPKeysBytes[j], iv)
+			if err != nil {
+				return nil, err
+			}
+			ctr.XORKeyStream(relays, relays[:index]) // we don't use buggy elligator2, because we have PSK :)
 		}
 		if k, ok := k.(*ecdh.PrivateKey); ok {
 			publicKey, err := ecdh.X25519().NewPublicKey(relays[:index])
@@ -166,14 +170,21 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 			break
 		}
 		relays = relays[index:]
-		lastCTR = NewCTR(nfsKey, iv)
+		var err error
+		lastCTR, err = NewCTR(nfsKey, iv)
+		if err != nil {
+			return nil, err
+		}
 		lastCTR.XORKeyStream(relays, relays[:32])
 		if !bytes.Equal(relays[:32], i.Hash32s[j+1][:]) {
 			return nil, errors.New("unexpected hash32: ", fmt.Sprintf("%v", relays[:32]))
 		}
 		relays = relays[32:]
 	}
-	nfsAEAD := NewAEAD(iv, nfsKey, c.UseAES)
+	nfsAEAD, err := NewAEAD(iv, nfsKey, c.UseAES)
+	if err != nil {
+		return nil, err
+	}
 
 	encryptedLength := make([]byte, 18)
 	if _, err := io.ReadFull(conn, encryptedLength); err != nil {
@@ -185,7 +196,10 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 	decryptedLength := make([]byte, 2)
 	if _, err := nfsAEAD.Open(decryptedLength[:0], nil, encryptedLength, nil); err != nil {
 		c.UseAES = !c.UseAES
-		nfsAEAD = NewAEAD(iv, nfsKey, c.UseAES)
+		nfsAEAD, err = NewAEAD(iv, nfsKey, c.UseAES)
+		if err != nil {
+			return nil, err
+		}
 		if _, err := nfsAEAD.Open(decryptedLength[:0], nil, encryptedLength, nil); err != nil {
 			return nil, err
 		}
@@ -226,10 +240,24 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 		c.UnitedKey = append(s.PfsKey, nfsKey...) // the same nfsKey links the upload & download (prevents server -> client's another request)
 		c.PreWrite = make([]byte, 16)
 		rand.Read(c.PreWrite) // always trust yourself, not the client (also prevents being parsed as TLS thus causing false interruption for "native" and "xorpub")
-		c.AEAD = NewAEAD(c.PreWrite, c.UnitedKey, c.UseAES)
-		c.PeerAEAD = NewAEAD(encryptedTicket, c.UnitedKey, c.UseAES) // unchangeable ctx (prevents server -> server), and different ctx length for upload / download (prevents client -> client)
+		c.AEAD, err = NewAEAD(c.PreWrite, c.UnitedKey, c.UseAES)
+		if err != nil {
+			return nil, err
+		}
+		c.PeerAEAD, err = NewAEAD(encryptedTicket, c.UnitedKey, c.UseAES) // unchangeable ctx (prevents server -> server), and different ctx length for upload / download (prevents client -> client)
+		if err != nil {
+			return nil, err
+		}
 		if i.XorMode == 2 {
-			c.Conn = NewXorConn(conn, NewCTR(c.UnitedKey, c.PreWrite), NewCTR(c.UnitedKey, iv), 16, 0) // it doesn't matter if the attacker sends client's iv back to the client
+			outCTR, err := NewCTR(c.UnitedKey, c.PreWrite)
+			if err != nil {
+				return nil, err
+			}
+			inCTR, err := NewCTR(c.UnitedKey, iv)
+			if err != nil {
+				return nil, err
+			}
+			c.Conn = NewXorConn(conn, outCTR, inCTR, 16, 0) // it doesn't matter if the attacker sends client's iv back to the client
 		}
 		return c, nil
 	}
@@ -263,8 +291,14 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 	copy(pfsKey[32:], x25519Key)
 	pfsPublicKey := append(encapsulatedPfsKey, x25519SKey.PublicKey().Bytes()...)
 	c.UnitedKey = append(pfsKey, nfsKey...)
-	c.AEAD = NewAEAD(pfsPublicKey, c.UnitedKey, c.UseAES)
-	c.PeerAEAD = NewAEAD(encryptedPfsPublicKey[:1184+32], c.UnitedKey, c.UseAES)
+	c.AEAD, err = NewAEAD(pfsPublicKey, c.UnitedKey, c.UseAES)
+	if err != nil {
+		return nil, err
+	}
+	c.PeerAEAD, err = NewAEAD(encryptedPfsPublicKey[:1184+32], c.UnitedKey, c.UseAES)
+	if err != nil {
+		return nil, err
+	}
 
 	ticket := [16]byte{}
 	rand.Read(ticket[:])
@@ -322,7 +356,15 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 	}
 
 	if i.XorMode == 2 {
-		c.Conn = NewXorConn(conn, NewCTR(c.UnitedKey, ticket[:]), NewCTR(c.UnitedKey, iv), 0, 0)
+		outCTR, err := NewCTR(c.UnitedKey, ticket[:])
+		if err != nil {
+			return nil, err
+		}
+		inCTR, err := NewCTR(c.UnitedKey, iv)
+		if err != nil {
+			return nil, err
+		}
+		c.Conn = NewXorConn(conn, outCTR, inCTR, 0, 0)
 	}
 	return c, nil
 }

@@ -6,8 +6,8 @@ import (
 )
 
 type H1Conn struct {
-	UnreadedResponsesCount int
-	RespBufReader          *bufio.Reader
+	UnreadResponsesCount int
+	RespBufReader        *bufio.Reader
 	net.Conn
 }
 

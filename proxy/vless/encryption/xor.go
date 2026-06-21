@@ -5,14 +5,18 @@ import (
 	"crypto/cipher"
 	"net"
 
+	"github.com/xtls/xray-core/common/errors"
 	"lukechampine.com/blake3"
 )
 
-func NewCTR(key, iv []byte) cipher.Stream {
+func NewCTR(key, iv []byte) (cipher.Stream, error) {
 	k := make([]byte, 32)
 	blake3.DeriveKey(k, "VLESS", key) // avoids using key directly
-	block, _ := aes.NewCipher(k)
-	return cipher.NewCTR(block, iv)
+	block, err := aes.NewCipher(k)
+	if err != nil {
+		return nil, errors.New("failed to create AES cipher for CTR").Base(err)
+	}
+	return cipher.NewCTR(block, iv), nil
 	//chacha20.NewUnauthenticatedCipher()
 }
 

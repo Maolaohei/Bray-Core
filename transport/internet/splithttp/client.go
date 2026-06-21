@@ -34,7 +34,7 @@ type DialerClient interface {
 type DefaultDialerClient struct {
 	transportConfig *Config
 	client          *http.Client
-	closed          bool
+	closed          atomic.Bool
 	httpVersion     string
 	// pool of net.Conn, created using dialUploadConn
 	uploadRawPool  *sync.Pool
@@ -49,7 +49,7 @@ type DefaultDialerClient struct {
 }
 
 func (c *DefaultDialerClient) IsClosed() bool {
-	return c.closed
+	return c.closed.Load()
 }
 
 // SetOnRTT sets the callback for RTT measurement.
@@ -91,7 +91,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		resp, err := c.client.Do(req)
 		if err != nil {
 			if !uploadOnly { // stream-down is enough
-				c.closed = true
+				c.closed.Store(true)
 				errors.LogInfoInner(ctx, err, "failed to "+method+" "+url)
 			}
 			gotConn.Close()
@@ -128,7 +128,7 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 		start := time.Now()
 		resp, err := c.client.Do(req)
 		if err != nil {
-			c.closed = true
+			c.closed.Store(true)
 			return err
 		}
 
@@ -138,7 +138,7 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 		}
 
 		io.Copy(io.Discard, resp.Body)
-		defer resp.Body.Close()
+		resp.Body.Close()
 
 		if resp.StatusCode != 200 {
 			return errors.New("bad status code:", resp.Status)
@@ -170,10 +170,10 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 
 				// TODO: Replace 0 here with a config value later
 				// Or add some other condition for optimization purposes
-				if h1UploadConn.UnreadedResponsesCount > 0 {
+				if h1UploadConn.UnreadResponsesCount > 0 {
 					resp, err := http.ReadResponse(h1UploadConn.RespBufReader, req)
 					if err != nil {
-						c.closed = true
+						c.closed.Store(true)
 						return fmt.Errorf("error while reading response: %s", err.Error())
 					}
 					io.Copy(io.Discard, resp.Body)

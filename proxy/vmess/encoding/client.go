@@ -199,6 +199,12 @@ func (c *ClientSession) DecodeResponseHeader(reader io.Reader) (*protocol.Respon
 		decryptedResponseHeaderLength = int(decryptedResponseHeaderLengthBinaryDeserializeBuffer)
 	}
 
+	// Sanity check: response header length must be reasonable (max 64KB).
+	// A malicious server could send an inflated length to cause OOM.
+	if decryptedResponseHeaderLength < 0 || decryptedResponseHeaderLength > 65535 {
+		return nil, errors.New("invalid response header length: ", decryptedResponseHeaderLength)
+	}
+
 	aeadResponseHeaderPayloadEncryptionKey := vmessaead.KDF16(c.responseBodyKey[:], vmessaead.KDFSaltConstAEADRespHeaderPayloadKey)
 	aeadResponseHeaderPayloadEncryptionIV := vmessaead.KDF(c.responseBodyIV[:], vmessaead.KDFSaltConstAEADRespHeaderPayloadIV)[:12]
 
@@ -304,7 +310,10 @@ func (c *ClientSession) DecodeResponseBody(request *protocol.RequestHeader, read
 		}
 		return crypto.NewAuthenticationReader(auth, sizeParser, reader, request.Command.TransferType(), padding), nil
 	case protocol.SecurityType_CHACHA20_POLY1305:
-		aead, _ := chacha20poly1305.New(GenerateChacha20Poly1305Key(c.responseBodyKey[:]))
+		aead, err := chacha20poly1305.New(GenerateChacha20Poly1305Key(c.responseBodyKey[:]))
+		if err != nil {
+			return nil, errors.New("failed to create ChaCha20-Poly1305 AEAD").Base(err)
+		}
 
 		auth := &crypto.AEADAuthenticator{
 			AEAD:                    aead,

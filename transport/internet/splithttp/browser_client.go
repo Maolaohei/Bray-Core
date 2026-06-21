@@ -18,7 +18,7 @@ type BrowserDialerClient struct {
 }
 
 func (c *BrowserDialerClient) IsClosed() bool {
-	panic("not implemented yet")
+	return false
 }
 
 func (c *BrowserDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (io.ReadCloser, net.Addr, net.Addr, error) {

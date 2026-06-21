@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/errors"
@@ -22,6 +24,14 @@ var OutBytesPool = sync.Pool{
 	New: func() any {
 		return make([]byte, 5+8192+16)
 	},
+}
+
+// BufferAccessor is implemented by connections that expose their internal
+// read buffers for Vision splice-copy optimization. Connections that don't
+// implement this interface will fall back to reflect+unsafe.Pointer access.
+type BufferAccessor interface {
+	Input() *bytes.Reader
+	RawInput() *bytes.Buffer
 }
 
 type CommonConn struct {
@@ -36,6 +46,12 @@ type CommonConn struct {
 	rawInput    bytes.Buffer
 	input       bytes.Reader
 }
+
+// Input returns a pointer to the internal bytes.Reader buffer.
+func (c *CommonConn) Input() *bytes.Reader { return &c.input }
+
+// RawInput returns a pointer to the internal bytes.Buffer.
+func (c *CommonConn) RawInput() *bytes.Buffer { return &c.rawInput }
 
 func NewCommonConn(conn net.Conn, useAES bool) *CommonConn {
 	return &CommonConn{
@@ -60,7 +76,11 @@ func (c *CommonConn) Write(b []byte) (int, error) {
 		EncodeHeader(headerAndData, len(b)+16)
 		c.AEAD.Seal(headerAndData[:5], nil, b, headerAndData[:5])
 		if c.AEAD.IsMax {
-			c.AEAD = NewAEAD(headerAndData, c.UnitedKey, c.UseAES)
+			newAEAD, err := NewAEAD(headerAndData, c.UnitedKey, c.UseAES)
+			if err != nil {
+				return 0, err
+			}
+			c.AEAD = newAEAD
 		}
 		if c.PreWrite != nil {
 			headerAndData = append(c.PreWrite, headerAndData...)
@@ -82,9 +102,17 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 		if _, err := io.ReadFull(c.Conn, serverRandom); err != nil {
 			return 0, err
 		}
-		c.PeerAEAD = NewAEAD(serverRandom, c.UnitedKey, c.UseAES)
+		var err error
+		c.PeerAEAD, err = NewAEAD(serverRandom, c.UnitedKey, c.UseAES)
+		if err != nil {
+			return 0, err
+		}
 		if xorConn, ok := c.Conn.(*XorConn); ok {
-			xorConn.PeerCTR = NewCTR(c.UnitedKey, serverRandom)
+			ctr, err := NewCTR(c.UnitedKey, serverRandom)
+			if err != nil {
+				return 0, err
+			}
+			xorConn.PeerCTR = ctr
 		}
 	}
 	if c.PeerPadding != nil { // client's 1-RTT
@@ -129,7 +157,11 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 	}
 	var newAEAD *AEAD
 	if c.PeerAEAD.IsMax {
-		newAEAD = NewAEAD(append(peerHeader[:], peerData...), c.UnitedKey, c.UseAES)
+		var err error
+		newAEAD, err = NewAEAD(append(peerHeader[:], peerData...), c.UnitedKey, c.UseAES)
+		if err != nil {
+			return 0, err
+		}
 	}
 	_, err = c.PeerAEAD.Open(dst[:0], nil, peerData, peerHeader[:])
 	if newAEAD != nil {
@@ -151,17 +183,27 @@ type AEAD struct {
 	IsMax bool // true when Nonce == MaxNonce
 }
 
-func NewAEAD(ctx, key []byte, useAES bool) *AEAD {
+func NewAEAD(ctx, key []byte, useAES bool) (*AEAD, error) {
 	k := make([]byte, 32)
 	blake3.DeriveKey(k, string(ctx), key)
 	var aead cipher.AEAD
 	if useAES {
-		block, _ := aes.NewCipher(k)
-		aead, _ = cipher.NewGCM(block)
+		block, err := aes.NewCipher(k)
+		if err != nil {
+			return nil, errors.New("failed to create AES cipher").Base(err)
+		}
+		aead, err = cipher.NewGCM(block)
+		if err != nil {
+			return nil, errors.New("failed to create AES-GCM AEAD").Base(err)
+		}
 	} else {
-		aead, _ = chacha20poly1305.New(k)
+		var err error
+		aead, err = chacha20poly1305.New(k)
+		if err != nil {
+			return nil, errors.New("failed to create ChaCha20-Poly1305 AEAD").Base(err)
+		}
 	}
-	return &AEAD{AEAD: aead}
+	return &AEAD{AEAD: aead}, nil
 }
 
 func (a *AEAD) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
@@ -274,6 +316,33 @@ func CreatPadding(paddingLens, paddingGaps [][3]int) (length int, lens []int, ga
 			g = int(crypto.RandBetween(int64(y[1]), int64(y[2])))
 		}
 		gaps = append(gaps, time.Duration(g)*time.Millisecond)
+	}
+	return
+}
+
+// ExtractBuffers safely extracts input and rawInput from a connection.
+// It first checks if the connection implements BufferAccessor (safe path).
+// Falls back to reflect+unsafe.Pointer for backward compatibility with
+// connection types that don't implement the interface yet.
+func ExtractBuffers(conn interface{}) (input *bytes.Reader, rawInput *bytes.Buffer) {
+	// Fast path: connection implements BufferAccessor
+	if ba, ok := conn.(BufferAccessor); ok {
+		return ba.Input(), ba.RawInput()
+	}
+
+	// Slow path: reflect+unsafe.Pointer (backward compatibility)
+	val := reflect.ValueOf(conn)
+	if val.Kind() == reflect.Ptr {
+		t := val.Type().Elem()
+		p := val.Pointer()
+
+		fi, _ := t.FieldByName("input")
+		fr, _ := t.FieldByName("rawInput")
+
+		if fi.Name != "" && fr.Name != "" {
+			input = (*bytes.Reader)(unsafe.Pointer(p + fi.Offset))
+			rawInput = (*bytes.Buffer)(unsafe.Pointer(p + fr.Offset))
+		}
 	}
 	return
 }

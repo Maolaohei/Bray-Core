@@ -51,6 +51,8 @@ type httpSession struct {
 	isFullyConnected *done.Instance
 }
 
+const maxSessionsPerHandler = 65536
+
 func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 	// fast path
 	currentSessionAny, ok := h.sessions.Load(sessionId)
@@ -74,17 +76,12 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 
 	h.sessions.Store(sessionId, s)
 
-	shouldReap := done.New()
+	// Single goroutine per session for TTL + cleanup (P1 #8)
 	go func() {
+		timer := time.NewTimer(30 * time.Second)
+		defer timer.Stop()
 		select {
-		case <-time.After(30 * time.Second):
-			shouldReap.Close()
-		case <-h.stopCh:
-		}
-	}()
-	go func() {
-		select {
-		case <-shouldReap.Wait():
+		case <-timer.C:
 			h.sessions.Delete(sessionId)
 			s.uploadQueue.Close()
 		case <-s.isFullyConnected.Wait():
@@ -154,8 +151,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	sessionId, seqStr := h.config.ExtractMetaFromRequest(request, h.path)
 
+	if len(sessionId) > 256 {
+		errors.LogInfo(context.Background(), "sessionId too long: ", len(sessionId))
+		writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	if sessionId == "" && h.config.Mode != "" && h.config.Mode != "auto" && h.config.Mode != "stream-one" && h.config.Mode != "stream-up" {
-		errors.LogInfo(context.Background(), "stream-one mode is not allowed")
+		errors.LogInfo(context.Background(), "request without sessionId is not allowed in mode: ", h.config.Mode)
 		writer.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -170,9 +173,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 	}
 	if request.ProtoMajor == 3 {
-		remoteAddr = &net.UDPAddr{
-			IP:   remoteAddr.(*net.TCPAddr).IP,
-			Port: remoteAddr.(*net.TCPAddr).Port,
+		if tcpAddr, ok := remoteAddr.(*net.TCPAddr); ok {
+			remoteAddr = &net.UDPAddr{
+				IP:   tcpAddr.IP,
+				Port: tcpAddr.Port,
+			}
 		}
 	}
 	var trustedXFF []string
@@ -422,11 +427,12 @@ type httpServerConn struct {
 
 func (c *httpServerConn) Write(b []byte) (int, error) {
 	c.Lock()
-	defer c.Unlock()
 	if c.Done() {
+		c.Unlock()
 		return 0, io.ErrClosedPipe
 	}
 	n, err := c.ResponseWriter.Write(b)
+	c.Unlock()
 	if err == nil {
 		c.ResponseWriter.(http.Flusher).Flush()
 	}
@@ -608,6 +614,10 @@ func (ln *Listener) Close() error {
 		if err := ln.h3server.Close(); err != nil {
 			return err
 		}
+		if ln.h3listener != nil {
+			return ln.h3listener.Close()
+		}
+		return nil
 	} else if ln.listener != nil {
 		return ln.listener.Close()
 	}

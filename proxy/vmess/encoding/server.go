@@ -298,7 +298,10 @@ func (s *ServerSession) DecodeRequestBody(request *protocol.RequestHeader, reade
 		return crypto.NewAuthenticationReader(auth, sizeParser, reader, request.Command.TransferType(), padding), nil
 
 	case protocol.SecurityType_CHACHA20_POLY1305:
-		aead, _ := chacha20poly1305.New(GenerateChacha20Poly1305Key(s.requestBodyKey[:]))
+		aead, err := chacha20poly1305.New(GenerateChacha20Poly1305Key(s.requestBodyKey[:]))
+		if err != nil {
+			return nil, errors.New("failed to create ChaCha20-Poly1305 AEAD for request body").Base(err)
+		}
 
 		auth := &crypto.AEADAuthenticator{
 			AEAD:                    aead,
@@ -420,7 +423,10 @@ func (s *ServerSession) EncodeResponseBody(request *protocol.RequestHeader, writ
 		return crypto.NewAuthenticationWriter(auth, sizeParser, writer, request.Command.TransferType(), padding), nil
 
 	case protocol.SecurityType_CHACHA20_POLY1305:
-		aead, _ := chacha20poly1305.New(GenerateChacha20Poly1305Key(s.responseBodyKey[:]))
+		aead, err := chacha20poly1305.New(GenerateChacha20Poly1305Key(s.responseBodyKey[:]))
+		if err != nil {
+			return nil, errors.New("failed to create ChaCha20-Poly1305 AEAD for response body").Base(err)
+		}
 
 		auth := &crypto.AEADAuthenticator{
 			AEAD:                    aead,

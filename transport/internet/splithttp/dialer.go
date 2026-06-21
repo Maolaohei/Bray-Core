@@ -48,6 +48,11 @@ var (
 	globalDialerAccess sync.Mutex
 )
 
+const (
+	// globalMapIdleTimeout is how long a manager can be idle before being removed.
+	globalMapIdleTimeout = 10 * time.Minute
+)
+
 func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
 
@@ -60,6 +65,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	if globalDialerMap == nil {
 		globalDialerMap = make(map[dialerConf]*XmuxManager)
+		go globalDialerCleanup()
 	}
 
 	key := dialerConf{dest, streamSettings}
@@ -84,14 +90,14 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	// Set RTT callback on DefaultDialerClient for RTT-aware scheduling
 	if dc, ok := client.(*DefaultDialerClient); ok {
-		// Shared profile reference — set by onNewConn, read by onRTT
-		var activeProfile interface{ FeedRTT(time.Duration) }
+		// Atomic profile reference — set by onNewConn, read by onRTT
+		var activeProfile atomic.Value // stores interface{ FeedRTT(time.Duration) }
 
 		dc.SetOnRTT(func(rtt time.Duration) {
 			xmuxClient.UpdateRTT(rtt)
 			// Feed RTT to Profile collector (no-op on Linux, estimated on Windows)
-			if activeProfile != nil {
-				activeProfile.FeedRTT(rtt)
+			if p := activeProfile.Load(); p != nil {
+				p.(interface{ FeedRTT(time.Duration) }).FeedRTT(rtt)
 			}
 		})
 
@@ -113,7 +119,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 			})
 			profile.Start()
 			xmuxClient.StartProfiling(profile)
-			activeProfile = profile
+			activeProfile.Store(profile)
 		})
 	}
 
@@ -334,7 +340,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 				case "force-brutal":
 					congestion.UseBrutal(conn, quicParams.BrutalUp)
 				default:
-					panic(quicParams.Congestion)
+					return nil, errors.New("unknown congestion algorithm: ", quicParams.Congestion)
 				}
 
 				return conn, nil
@@ -376,6 +382,23 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 	dc.dialUploadConn = dialContext
 
 	return dc
+}
+
+// globalDialerCleanup periodically removes idle XmuxManagers from the global map.
+// Prevents memory and goroutine leaks when destinations change over time.
+func globalDialerCleanup() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		globalDialerAccess.Lock()
+		for key, manager := range globalDialerMap {
+			if manager.IdleFor() > globalMapIdleTimeout {
+				delete(globalDialerMap, key)
+				go manager.Close()
+			}
+		}
+		globalDialerAccess.Unlock()
+	}
 }
 
 func init() {
@@ -452,7 +475,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		globalDialerAccess.Unlock()
 		memory2 := streamSettings.DownloadSettings
-		dest2 := *memory2.Destination // just panic
+		if memory2.Destination == nil {
+			return nil, errors.New("downloadSettings has nil Destination")
+		}
+		dest2 := *memory2.Destination
 		tlsConfig2 := tls.ConfigFromStreamSettings(memory2)
 		realityConfig2 := reality.ConfigFromStreamSettings(memory2)
 		httpVersion2 := decideHTTPVersion(tlsConfig2, realityConfig2)

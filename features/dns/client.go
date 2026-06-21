@@ -43,15 +43,15 @@ func (e RCodeError) Error() string {
 }
 
 func (RCodeError) IP() net.IP {
-	panic("Calling IP() on a RCodeError.")
+	return nil
 }
 
 func (RCodeError) Domain() string {
-	panic("Calling Domain() on a RCodeError.")
+	return ""
 }
 
 func (RCodeError) Family() net.AddressFamily {
-	panic("Calling Family() on a RCodeError.")
+	return 0
 }
 
 func (e RCodeError) String() string {

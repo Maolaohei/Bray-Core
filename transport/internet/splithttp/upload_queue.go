@@ -6,7 +6,6 @@ package splithttp
 import (
 	"container/heap"
 	"io"
-	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -83,18 +82,6 @@ func (h *uploadQueue) Close() error {
 	defer h.writeCloseMutex.Unlock()
 
 	if !h.closed.Swap(true) {
-		runtime.Gosched() // hope Read() gets the packet
-	f:
-		for {
-			select {
-			case p := <-h.pushedPackets:
-				if p.Reader != nil {
-					h.reader = p.Reader
-				}
-			default:
-				break f
-			}
-		}
 		close(h.pushedPackets)
 	}
 	if h.reader != nil {
@@ -108,59 +95,61 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 		return h.reader.Read(b)
 	}
 
-	if h.closed.Load() {
-		return 0, io.EOF
-	}
-
-	if len(h.heap) == 0 {
-		packet, more := <-h.pushedPackets
-		if !more {
+	for {
+		if h.closed.Load() {
 			return 0, io.EOF
 		}
-		if packet.Reader != nil {
-			h.reader = packet.Reader
-			return h.reader.Read(b)
-		}
-		heap.Push(&h.heap, packet)
-	}
 
-	for len(h.heap) > 0 {
-		packet := heap.Pop(&h.heap).(Packet)
-		n := 0
-
-		if packet.Seq == h.nextSeq {
-			copy(b, packet.Payload)
-			n = min(len(b), len(packet.Payload))
-
-			if n < len(packet.Payload) {
-				// partial read
-				packet.Payload = packet.Payload[n:]
-				heap.Push(&h.heap, packet)
-			} else {
-				h.nextSeq = packet.Seq + 1
-			}
-
-			return n, nil
-		}
-
-		// misordered packet
-		if packet.Seq > h.nextSeq {
-			if len(h.heap) > h.maxPackets {
-				// the "reassembly buffer" is too large, and we want to
-				// constrain memory usage somehow. let's tear down the
-				// connection, and hope the application retries.
-				return 0, errors.New("packet queue is too large")
-			}
-			heap.Push(&h.heap, packet)
-			packet2, more := <-h.pushedPackets
+		if len(h.heap) == 0 {
+			packet, more := <-h.pushedPackets
 			if !more {
 				return 0, io.EOF
 			}
-			heap.Push(&h.heap, packet2)
+			if packet.Reader != nil {
+				h.reader = packet.Reader
+				return h.reader.Read(b)
+			}
+			heap.Push(&h.heap, packet)
 		}
-	}
 
-	return 0, nil
+		for len(h.heap) > 0 {
+			packet := heap.Pop(&h.heap).(Packet)
+			n := 0
+
+			if packet.Seq == h.nextSeq {
+				copy(b, packet.Payload)
+				n = min(len(b), len(packet.Payload))
+
+				if n < len(packet.Payload) {
+					// partial read
+					packet.Payload = packet.Payload[n:]
+					heap.Push(&h.heap, packet)
+				} else {
+					h.nextSeq = packet.Seq + 1
+				}
+
+				return n, nil
+			}
+
+			// misordered packet
+			if packet.Seq > h.nextSeq {
+				if len(h.heap) > h.maxPackets {
+					// the "reassembly buffer" is too large, and we want to
+					// constrain memory usage somehow. let's tear down the
+					// connection, and hope the application retries.
+					return 0, errors.New("packet queue is too large")
+				}
+				heap.Push(&h.heap, packet)
+				packet2, more := <-h.pushedPackets
+				if !more {
+					return 0, io.EOF
+				}
+				heap.Push(&h.heap, packet2)
+			}
+			// packet.Seq < h.nextSeq: duplicate, skip and continue
+		}
+		// all packets in heap were duplicates; loop back to wait for more
+	}
 }
 
 // heap code directly taken from https://pkg.go.dev/container/heap
