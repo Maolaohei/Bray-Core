@@ -169,16 +169,16 @@ type WarmupTarget struct {
 }
 
 type XmuxManager struct {
-	xmuxConfig  XmuxConfig
-	concurrency int32 // base concurrency (from config)
-	connections int32 // base connections (from config)
-	newConnFunc func() XmuxConn
-	xmuxClients []*XmuxClient
-	clientsMu   sync.Mutex // protects xmuxClients slice
+	xmuxConfig   XmuxConfig
+	concurrency  int32 // base concurrency (from config)
+	connections  int32 // base connections (from config)
+	newConnFunc  func() XmuxConn
+	xmuxClients  []*XmuxClient
+	clientsMu    sync.Mutex // protects xmuxClients slice
 	stopCh       chan struct{}
 	doneCh       chan struct{} // closed when all goroutines exit
-	lastActivity time.Time    // last time a client was obtained; used for idle cleanup
-	closeOnce    sync.Once    // ensures Close() is idempotent
+	lastActivity time.Time     // last time a client was obtained; used for idle cleanup
+	closeOnce    sync.Once     // ensures Close() is idempotent
 
 	// V2.1: Dynamic Connection Scaling
 	poolBehavior   quality.Behavior // dominant behavior across all clients
@@ -231,7 +231,7 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		doneCh:       make(chan struct{}),
 		lastActivity: time.Now(),
 		warmupQueue:  make([]WarmupTarget, 0),
-		warmupSem:   make(chan struct{}, 2), // max 2 concurrent warmups
+		warmupSem:    make(chan struct{}, 2), // max 2 concurrent warmups
 	}
 
 	// Start background goroutines for connection management.
@@ -448,7 +448,7 @@ func (m *XmuxManager) clearStaleConnections() {
 	// They will be removed on next health check if truly broken
 	for _, client := range m.xmuxClients {
 		client.lastRTT.Store(int64(maxRTTBeforeRemove+1) * int64(time.Millisecond)) // Set above threshold to trigger removal
-		client.consecDrops.Store(0) // Reset quality drops — failure was network, not link quality
+		client.consecDrops.Store(0)                                                 // Reset quality drops — failure was network, not link quality
 	}
 }
 
