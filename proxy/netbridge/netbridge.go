@@ -53,7 +53,10 @@ func (n *NetBridge) Init(config *Config, pm policy.Manager) error {
 
 // Network implements proxy.Inbound.
 func (n *NetBridge) Network() []net.Network {
-	return []net.Network{net.Network_TCP, net.Network_UDP}
+	if n.config != nil && n.config.UDPPort > 0 {
+		return []net.Network{net.Network_TCP, net.Network_UDP}
+	}
+	return []net.Network{net.Network_TCP}
 }
 
 // Process implements proxy.Inbound.
