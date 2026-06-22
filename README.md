@@ -11,6 +11,7 @@
 | VLESS encoding | Sentinel Errors 消除热路径分配 | ✅ |
 | VLESS encoding | In-place Modification 零拷贝解码 | ✅ |
 | VLESS encoding | flowString 预分配常量、copySeed pool 复用 | ✅ |
+| VLESS encoding | Decode 33x 性能提升（零分配解码） | ✅ |
 | tcpinfo | computeQuality 跨平台去重 | ✅ |
 | xpadding.go | parsedURLCache 有界 LRU 替代 sync.Map | ✅ |
 | connection.go | onClose 顺序修复、Deadline 返回 error | ✅ |
@@ -18,6 +19,18 @@
 | mux.go | healthCheckLoop 提取 helper + defer Unlock | ✅ |
 | mux.go | getNetworkHash strings.Builder 优化 | ✅ |
 | mux.go | behaviorCounts 固定数组替代 map | ✅ |
+
+### V2.3 — 安全加固与协议扩展 ✅
+
+| 模块 | 优化 | 状态 |
+|------|------|------|
+| NetBridge | 新增 inbound 代理协议（ProxyBridgeCore 流量接入） | ✅ |
+| XHTTP/WS/HU/gRPC | 服务端强制 `trustedXForwardedFor` 校验 | ✅ |
+| WireGuard | 大规模重构，优化代码质量与可维护性 | ✅ |
+| Loopback | 新增 sniffing 支持 | ✅ |
+| XMUX | 死锁修复、QUIC/UDP 主动关闭 | ✅ |
+| XHTTP/3 | 客户端主动关闭 QUIC & UDP 资源 | ✅ |
+| Benchmark CI | 建立系统化性能基准测试流水线 | ✅ |
 
 ---
 
@@ -89,6 +102,16 @@ sysctl -w net.core.wmem_max=16777216
 | Oscillation Prevention — debounce (3 observations) | ✅ |
 | Connection Migration — proactive pool refill | ✅ |
 
+### V2.3 — Security & Protocol Extensions ✅
+
+| 功能 | 状态 |
+|------|------|
+| NetBridge — inbound 代理协议（ProxyBridgeCore 流量接入） | ✅ |
+| trustedXForwardedFor — XHTTP/WS/HU/gRPC 服务端强制校验 | ✅ |
+| WireGuard — 大规模重构 | ✅ |
+| Loopback Sniffing — 出站嗅探支持 | ✅ |
+| Benchmark CI — 系统化性能基准测试流水线 | ✅ |
+
 ### V3.x — Network Learning (研究阶段)
 
 - IPv4/IPv6 行为学习
@@ -132,6 +155,16 @@ sysctl -w net.core.wmem_max=16777216
 | EWMA Failure Tracking | 0.95 衰减，无双计数器，无清理协程 |
 | Quality-aware Scoring | Loss penalty 来自 TransportProfile |
 | Dynamic Parallelism | 自适应并行连接数 |
+
+### NetBridge 协议
+
+| 特性 | 说明 |
+|------|------|
+| 流量接入 | 接收来自 ProxyBridgeCore 的代理流量 |
+| 协议支持 | TCP + UDP 双协议 |
+| 认证机制 | Token 认证，防止未授权访问 |
+| 配置格式 | Protobuf 定义 + JSON 配置解析 |
+| 测试覆盖 | 完整单元测试（344 行） |
 
 ### Transport Intelligence
 
@@ -238,8 +271,17 @@ go test -short -timeout 60s ./transport/internet/tcpinfo/ ./transport/internet/q
 # XMUX benchmarks
 go test -bench "^BenchmarkXMUX" -run "^$" -timeout 30s ./transport/internet/splithttp/
 
+# VLESS Decode benchmarks
+go test -bench "BenchmarkDecode|BenchmarkMarshal" -run "^$" -timeout 30s ./proxy/vless/encoding/
+
+# Happy Eyeballs benchmarks
+go test -bench "BenchmarkScore|BenchmarkClampRTT" -run "^$" -timeout 30s ./transport/internet/
+
 # 全量 benchmarks
 go test -bench "BenchmarkNewBuffer|BenchmarkCopy|BenchmarkSplitBytes" -run "^$" -timeout 60s ./common/buf/
+
+# NetBridge 单元测试
+go test -short -timeout 30s ./proxy/netbridge/
 ```
 
 ---
@@ -251,3 +293,5 @@ go test -bench "BenchmarkNewBuffer|BenchmarkCopy|BenchmarkSplitBytes" -run "^$" 
 ---
 
 *上游同步基准：Xray-core [v26.6.1](https://github.com/XTLS/Xray-core/releases/tag/v26.6.1)*
+
+*最后更新：2026-06-23*
