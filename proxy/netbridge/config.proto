@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package xray.proxy.netbridge;
+option csharp_namespace = "Xray.Proxy.NetBridge";
+option go_package = "github.com/xtls/xray-core/proxy/netbridge";
+
+// NetBridge inbound configuration.
+// Receives traffic from ProxyBridgeCore via NetBridge protocol
+// (custom binary header + raw data stream).
+//
+// SECURITY: listen_address MUST be 127.0.0.1 or ::1.
+// The inbound will refuse to bind to any non-loopback address.
+message Config {
+  // Loopback address to listen on. MUST be 127.0.0.1 or ::1.
+  // Default: "127.0.0.1"
+  string listen_address = 1;
+
+  // TCP port to listen on. Default: 35000
+  uint32 listen_port = 2;
+
+  // UDP port to listen on. Default: 35001
+  uint32 udp_port = 3;
+
+  // 32-bit authentication token.
+  // ProxyBridgeCore reads this from Named Shared Memory.
+  // Connections with wrong token are rejected.
+  uint32 token = 4;
+
+  // User level for policy management.
+  uint32 user_level = 5;
+}
