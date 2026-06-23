@@ -166,15 +166,6 @@ func (h *NbTcpHeader) DstNetAddress() xnet.Address {
 	return xnet.IPAddress(h.DstAddr[:])
 }
 
-// Config is the internal configuration for netbridge inbound.
-type Config struct {
-	ListenAddress string
-	ListenPort    uint32
-	UDPPort       uint32
-	Token         uint32
-	UserLevel     uint32
-}
-
 // validateListenAddress ensures the listen address is loopback-only.
 func (c *Config) validateListenAddress() error {
 	ip := net.ParseIP(c.ListenAddress)

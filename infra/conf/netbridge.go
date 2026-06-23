@@ -6,6 +6,7 @@ import (
 
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/proxy/netbridge"
+	"google.golang.org/protobuf/proto"
 )
 
 // NetBridgeConfig is the JSON configuration for netbridge inbound.
@@ -17,12 +18,12 @@ type NetBridgeConfig struct {
 	UserLevel     uint32 `json:"userLevel"`
 }
 
-// Build converts JSON config to the internal Config struct.
-func (c *NetBridgeConfig) Build() (interface{}, error) {
+// Build implements Buildable.
+func (c *NetBridgeConfig) Build() (proto.Message, error) {
 	cfg := &netbridge.Config{
 		ListenAddress: c.ListenAddress,
 		ListenPort:    c.ListenPort,
-		UDPPort:       c.UDPPort,
+		UdpPort:       c.UDPPort,
 		Token:         c.Token,
 		UserLevel:     c.UserLevel,
 	}
@@ -32,8 +33,8 @@ func (c *NetBridgeConfig) Build() (interface{}, error) {
 	if cfg.ListenPort == 0 {
 		cfg.ListenPort = 35000
 	}
-	if cfg.UDPPort == 0 {
-		cfg.UDPPort = 35001
+	if cfg.UdpPort == 0 {
+		cfg.UdpPort = 35001
 	}
 
 	// SECURITY: Enforce loopback-only binding
