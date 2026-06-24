@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	goreality "github.com/xtls/reality"
+	goreality "github.com/Maolaohei/REALITY"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
