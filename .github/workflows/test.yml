@@ -65,19 +65,8 @@ jobs:
     steps:
       - name: Checkout codebase
         uses: actions/checkout@v7
-      - name: Clone REALITY for workspace
-        uses: actions/checkout@v7
         with:
-          repository: Maolaohei/REALITY
-          path: REALITY
-      - name: Setup Go workspace
-        run: |
-          echo 'go 1.26.4' > go.work
-          echo 'use (' >> go.work
-          echo '  .' >> go.work
-          echo '  REALITY' >> go.work
-          echo ')' >> go.work
-
+          submodules: recursive
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -98,18 +87,8 @@ jobs:
     steps:
       - name: Checkout codebase
         uses: actions/checkout@v7
-      - name: Clone REALITY for workspace
-        uses: actions/checkout@v7
         with:
-          repository: Maolaohei/REALITY
-          path: REALITY
-      - name: Setup Go workspace
-        run: |
-          echo 'go 1.26.4' > go.work
-          echo 'use (' >> go.work
-          echo '  .' >> go.work
-          echo '  REALITY' >> go.work
-          echo ')' >> go.work
+          submodules: recursive
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
