@@ -122,6 +122,9 @@ jobs:
           key: xray-geodat-${{ github.sha }}
       - name: Test codebase
         run: go test -short -timeout 120s ./...
+        env:
+          GONOSUMDB: '*'
+          GONOSUMCHECK: '*'
 
       - name: Test with race detector (core packages)
         if: matrix.os == 'ubuntu-latest'
@@ -136,3 +139,6 @@ jobs:
             ./transport/internet/ \
             ./common/protocol/http/ \
             ./transport/internet/grpc/encoding/
+        env:
+          GONOSUMDB: '*'
+          GONOSUMCHECK: '*'

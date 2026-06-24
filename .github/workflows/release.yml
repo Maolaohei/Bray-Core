@@ -216,6 +216,9 @@ jobs:
         run: go version
       - name: Get project dependencies
         run: go mod download
+        env:
+          GONOSUMDB: '*'
+          GONOSUMCHECK: '*'
 
       - name: Build Xray
         run: |
