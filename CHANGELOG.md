@@ -1,8 +1,8 @@
 # Bray-Core 版本介绍
 
-> **基于 Xray-core v26.6.1 的高性能魔改分支**
+> **基于 Xray-core v26.6.22 的高性能魔改分支**
 > 
-> 最后更新：2026-06-13
+> 最后更新：2026-06-24
 
 ---
 
@@ -10,7 +10,7 @@
 
 | 指标 | 数值 |
 |------|------|
-| 基线版本 | Xray-core v26.6.1 |
+| 基线版本 | Xray-core v26.6.22 |
 | 修改文件数 | 95 个 |
 | 新增代码 | +6,845 行 |
 | 删除代码 | -1,004 行 |
@@ -213,10 +213,29 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v3 go build -o xray.exe -trimpat
 
 ---
 
+## 上游同步记录 (2026-06-24)
+
+同步至 Xray-core v26.6.22，合入以下上游修复：
+
+| Commit | 说明 | 状态 |
+|--------|------|------|
+| `ac04c445` | DNS: Fix unexpected TTL clamp (#6363) | 已合入 |
+| `e7e92546` | TUN: Avoid panic on nil RemoteAddr (#6365) | 已合入 |
+| `fab4bcc1` | Bump cloudflare/circl 1.6.3→1.6.4 (#6362) | 已合入 |
+| `5aefcb41` | Bump pion/stun/v3 3.1.5→3.1.6 (#6357) | 已合入 |
+| `b99c3e56` | 版本号对齐 v26.6.22 | 已合入 |
+
+跳过的上游 commit（与自定义特性冲突）：
+- `583bb4a6` XHTTP scStreamUpServerSecs — 与我们的 padding 优化冲突
+- `9cd9382e` TUN XRAY_TUN_FD — 已通过 tun_android.go 独立实现
+- `567500c4` Fragment lengths/delays — proto 重编号与 HappyEyeballs v3 配置冲突
+
+---
+
 ## 许可证
 
 [Mozilla Public License Version 2.0](https://github.com/XTLS/Xray-core/blob/main/LICENSE)
 
 ---
 
-*上游同步基准：Xray-core [v26.6.1](https://github.com/XTLS/Xray-core/releases/tag/v26.6.1)*
+*上游同步基准：Xray-core [v26.6.22](https://github.com/XTLS/Xray-core/releases/tag/v26.6.22)*

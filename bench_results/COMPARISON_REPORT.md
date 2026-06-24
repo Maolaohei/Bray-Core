@@ -1,7 +1,7 @@
-# Bray-Core Benchmark Comparison Report (2026-06-14)
+# Bray-Core Benchmark Comparison Report (2026-06-24)
 
 **Test Environment**: i5-13600KF, Windows, amd64, Go 1.26  
-**Run 1**: Pre-V2.0 (baseline) | **Run 2**: Post-V2.0 + goroutine fixes (current)
+**Baseline**: Xray-core v26.6.22 | **Bray-Core**: v26.6.22 (upstream synced)
 
 ---
 
@@ -83,7 +83,22 @@
 
 ---
 
-## 4. XHTTP Throughput
+## 4. Reality Handshake Benchmarks (2026-06-24, v26.6.22)
+
+| Benchmark | ns/op | B/op | allocs/op |
+|-----------|-------|------|-----------|
+| RealityHandshakeKeyExchange | 24,820 | 32 | 1 |
+| RealityAEADSeal | 64.08 | 32 | 1 |
+| RealityAEADOpen | 53.11 | 16 | 1 |
+| RealityHKDF | 26,651 | 17,064 | 217 |
+| RealityECDSA | 22,308 | 6,064 | 59 |
+| RealityMLDSA65Verify | 24,065 | 450 | 3 |
+
+**Verdict**: All crypto hot paths stable. X25519MLKEM768 key exchange at 24.8μs.
+
+---
+
+## 5. XHTTP Throughput
 
 | Benchmark | Run 1 | Run 2 | Delta |
 |-----------|-------|-------|-------|
@@ -96,7 +111,21 @@ Note: Run 2 uses `BenchmarkXHTTP_H2C_Throughput` (different from Run 1's `Benchm
 
 ---
 
-## 5. Summary
+## 6. Upstream Sync Notes (v26.6.22)
+
+合入上游 4 个 commit，跳过 4 个（与自定义特性冲突）：
+- DNS TTL clamp fix ✅
+- TUN nil RemoteAddr panic fix ✅
+- circl 1.6.4 ✅
+- pion/stun 3.1.6 ✅
+- XHTTP scStreamUpServerSecs ❌ (与 padding 优化冲突)
+- TUN XRAY_TUN_FD ❌ (已独立实现)
+- Fragment lengths/delays ❌ (proto 重编号冲突)
+- 版本号 v26.6.22 ✅
+
+---
+
+## 7. Summary
 
 | Category | Status | Notes |
 |----------|--------|-------|
