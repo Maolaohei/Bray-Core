@@ -103,7 +103,7 @@ jobs:
         run: go test -short -timeout 120s ./...
         env:
           GONOSUMDB: '*'
-          GONOSUMCHECK: '*'
+          GOFLAGS: -insecure
 
       - name: Test with race detector (core packages)
         if: matrix.os == 'ubuntu-latest'
@@ -120,4 +120,4 @@ jobs:
             ./transport/internet/grpc/encoding/
         env:
           GONOSUMDB: '*'
-          GONOSUMCHECK: '*'
+          GOFLAGS: -insecure

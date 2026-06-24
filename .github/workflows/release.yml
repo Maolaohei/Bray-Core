@@ -208,7 +208,7 @@ jobs:
         run: go mod download
         env:
           GONOSUMDB: '*'
-          GONOSUMCHECK: '*'
+          GOFLAGS: -insecure
 
       - name: Build Xray
         run: |
