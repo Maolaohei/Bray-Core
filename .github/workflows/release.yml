@@ -205,10 +205,11 @@ jobs:
       - name: Print Go version   
         run: go version
       - name: Get project dependencies
-        run: go mod download
+        run: |
+          go env -w GONOSUMDB=*
+          go mod download
         env:
           GONOSUMDB: '*'
-          GOFLAGS: -insecure
 
       - name: Build Xray
         run: |

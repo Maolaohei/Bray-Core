@@ -100,14 +100,16 @@ jobs:
           path: resources
           key: xray-geodat-${{ github.sha }}
       - name: Test codebase
-        run: go test -short -timeout 120s ./...
+        run: |
+          go env -w GONOSUMDB=*
+          go test -short -timeout 120s ./...
         env:
           GONOSUMDB: '*'
-          GOFLAGS: -insecure
 
       - name: Test with race detector (core packages)
         if: matrix.os == 'ubuntu-latest'
         run: |
+          go env -w GONOSUMDB=*
           go test -race -short -timeout 120s \
             ./transport/internet/splithttp/ \
             ./transport/internet/quality/ \
@@ -120,4 +122,3 @@ jobs:
             ./transport/internet/grpc/encoding/
         env:
           GONOSUMDB: '*'
-          GOFLAGS: -insecure
