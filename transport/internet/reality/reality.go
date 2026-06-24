@@ -24,9 +24,9 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/Maolaohei/REALITY"
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	utls "github.com/refraction-networking/utls"
-	"github.com/Maolaohei/REALITY"
 	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"

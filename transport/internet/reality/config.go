@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"github.com/Maolaohei/REALITY"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/transport/internet"
 )
