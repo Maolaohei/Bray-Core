@@ -175,13 +175,13 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: Maolaohei/REALITY
-          path: ../REALITY
+          path: REALITY
       - name: Setup Go workspace
         run: |
           echo 'go 1.26.4' > go.work
           echo 'use (' >> go.work
           echo '  .' >> go.work
-          echo '  ../REALITY' >> go.work
+          echo '  REALITY' >> go.work
           echo ')' >> go.work
 
       - name: Set up NDK
