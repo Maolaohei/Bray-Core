@@ -670,7 +670,7 @@ func TestREALITYPostHandshakeRecords(t *testing.T) {
 						Port:    uint32(serverPort),
 						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vless.Account{
-								Id:   userID.String(),
+								Id: userID.String(),
 							}),
 						},
 					},
