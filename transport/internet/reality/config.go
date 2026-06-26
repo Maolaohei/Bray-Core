@@ -14,7 +14,9 @@ import (
 )
 
 func (c *Config) GetREALITYConfig() *reality.Config {
-	var dialer net.Dialer
+	dialer := &net.Dialer{
+		Timeout: 5 * time.Second,
+	}
 	config := &reality.Config{
 		DialContext: dialer.DialContext,
 

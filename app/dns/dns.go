@@ -361,7 +361,9 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 		!go_errors.Is(err, dns.ErrEmptyResponse) &&
 		!s.checkSystem { // avoid recursion (checkSystem already uses system DNS)
 		errors.LogInfo(s.ctx, "DNS query failed for ", domain, ", falling back to system resolver: ", err)
-		sysIps, sysErr := go_net.DefaultResolver.LookupIPAddr(s.ctx, domain)
+		fallbackCtx, fallbackCancel := context.WithTimeout(s.ctx, 2*time.Second)
+		sysIps, sysErr := go_net.DefaultResolver.LookupIPAddr(fallbackCtx, domain)
+		fallbackCancel()
 		if sysErr == nil && len(sysIps) > 0 {
 			for _, addr := range sysIps {
 				isV4 := addr.IP.To4() != nil
