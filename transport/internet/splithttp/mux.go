@@ -28,6 +28,7 @@ type XmuxClient struct {
 	NotUsed      atomic.Bool
 	createdAt    time.Time
 	lastRTT      atomic.Int64 // nanoseconds, for RTT-aware scheduling
+	cachedScore  atomic.Int64 // pre-computed scheduling score, updated on state change
 
 	// V2.0: link-quality metrics for smarter scheduling
 	lastRetrans  atomic.Int32 // cumulative retransmit count from TCP_INFO
@@ -72,6 +73,7 @@ func (c *XmuxClient) UpdateRTT(rtt time.Duration) {
 			smoothed = (old*8 + newRTT*2) / 10
 		}
 		if c.lastRTT.CompareAndSwap(old, smoothed) {
+			c.recomputeScore()
 			return
 		}
 	}
@@ -119,6 +121,13 @@ func (c *XmuxClient) UpdateQuality(qualityScore, confidence, retrans int32, loss
 		}
 		c.learner.Record(snap)
 	}
+
+	c.recomputeScore()
+}
+
+// recomputeScore recalculates the cached scheduling score from current metrics.
+func (c *XmuxClient) recomputeScore() {
+	c.cachedScore.Store(scoreClient(c))
 }
 
 // GetBehavior returns the current dominant behavior learned from observations.
@@ -833,6 +842,7 @@ func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
 	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs().rand(); x > 0 {
 		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
 	}
+	xmuxClient.recomputeScore()
 	m.xmuxClients = append(m.xmuxClients, xmuxClient)
 	return xmuxClient
 }
@@ -866,6 +876,7 @@ func (m *XmuxManager) addToPoolLocked(conn XmuxConn) {
 	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs().rand(); x > 0 {
 		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
 	}
+	xmuxClient.recomputeScore()
 	m.xmuxClients = append(m.xmuxClients, xmuxClient)
 }
 
@@ -900,33 +911,24 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 	}
 
 	if !needNew {
-		xmuxClients := make([]*XmuxClient, 0)
 		effectiveConc := m.effectiveConcurrency()
-		if effectiveConc > 0 {
-			for _, xmuxClient := range m.xmuxClients {
-				if xmuxClient.Running.Load() < effectiveConc {
-					xmuxClients = append(xmuxClients, xmuxClient)
-				}
+
+		// Single-pass: filter by concurrency limit and find best score
+		var best *XmuxClient
+		bestScore := int64(math.MaxInt64)
+		for _, xmuxClient := range m.xmuxClients {
+			if effectiveConc > 0 && xmuxClient.Running.Load() >= effectiveConc {
+				continue
 			}
-		} else {
-			xmuxClients = m.xmuxClients
+			if s := xmuxClient.cachedScore.Load(); s < bestScore {
+				best = xmuxClient
+				bestScore = s
+			}
 		}
 
-		if len(xmuxClients) == 0 {
+		if best == nil {
 			needNew = true
 		} else {
-			// RTT-aware min-inflight scheduling:
-			// Score = inflight * 1000 + rtt_ms
-			// This favors low-inflight connections, but breaks ties using RTT.
-			// A connection with lower RTT gets slightly higher priority.
-			best := xmuxClients[0]
-			bestScore := scoreClient(best)
-			for _, c := range xmuxClients[1:] {
-				if s := scoreClient(c); s < bestScore {
-					best = c
-					bestScore = s
-				}
-			}
 
 			// CAS loop to avoid race between check and decrement
 			for {
@@ -970,18 +972,16 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 // scoreClient computes a scheduling score for a connection.
 // Lower score = better candidate.
 //
-// V2.1 formula (behavior-aware, confidence-weighted):
+// V2.1 formula (behavior-aware, confidence-weighted, fixed-point integer):
 //
 //	base = inflight * 10000 + rttMs * 10
-//	retransPenalty = retransCount * 50 * behaviorScale
-//	lossPenalty = lossRate * 10000 * behaviorScale
-//	confidence = connection.confidence (0-100)
+//	retransPenalty = retransCount * 50 * combinedFixed / 10000
+//	lossPenalty = lossRate * combinedFixed / (20 * 10000)
+//	combinedFixed = confidenceFixed * behaviorFixed / 100
 //
-// behaviorScale varies by detected behavior:
-//   - LowLatency: 0.5 (penalties reduced — fast link)
-//   - Normal: 1.0 (standard penalties)
-//   - Lossy/Saturated: 1.5 (penalties increased — problematic link)
-//   - Aggressive: 1.2 (slightly higher — avoid over-stacking)
+// Fixed-point scales: confidence ×100, behavior ×100, combined ×10000.
+// Max combinedFixed = 100 * 150 = 15000. Max retrans = 100.
+// Max intermediate = 100 * 50 * 15000 = 75,000,000 — fits in int64.
 func scoreClient(c *XmuxClient) int64 {
 	inflight := int64(c.Running.Load())
 	rttMs := c.GetRTT().Milliseconds()
@@ -993,49 +993,50 @@ func scoreClient(c *XmuxClient) int64 {
 
 	score := inflight*10000 + rttMs*10
 
-	// V2.0: confidence-weighted penalties
+	// V2.0: confidence-weighted penalties (fixed-point ×100)
 	conf := int64(c.confidence.Load())
-	var confidenceScale float64
+	var confidenceFixed int64
 	switch {
 	case conf >= 80:
-		confidenceScale = 1.0
+		confidenceFixed = 100
 	case conf >= 30:
-		confidenceScale = 0.2 + float64(conf-30)*0.02
+		confidenceFixed = 20 + (conf-30)*2
 	default:
-		confidenceScale = 0.2
+		confidenceFixed = 20
 	}
 
-	// V2.1: behavior-aware penalty scaling
-	behaviorScale := behaviorPenaltyScale(c.GetBehavior())
+	// V2.1: behavior-aware penalty scaling (fixed-point ×100)
+	behaviorFixed := behaviorPenaltyScaleFixed(c.GetBehavior())
 
-	// Combined scale = confidence × behavior
-	combinedScale := confidenceScale * behaviorScale
+	// Combined scale = confidence × behavior (fixed-point ×10000)
+	combinedFixed := confidenceFixed * behaviorFixed
 
 	// Retrans penalty: each retrans costs 50 points
 	retrans := int64(c.lastRetrans.Load())
 	if retrans > 100 {
 		retrans = 100 // cap
 	}
-	score += int64(float64(retrans*50) * combinedScale)
+	score += retrans * 50 * combinedFixed / 10000
 
 	// Loss penalty: lossRate is fixed-point × 10000 (0-10000)
 	lossRate := c.lastLoss.Load()
-	score += int64(float64(lossRate/20) * combinedScale)
+	score += lossRate * combinedFixed / (20 * 10000)
 
 	return score
 }
 
-// behaviorPenaltyScale returns a multiplier for penalties based on detected behavior.
-func behaviorPenaltyScale(b quality.Behavior) float64 {
+// behaviorPenaltyScaleFixed returns a fixed-point multiplier (×100) for penalties
+// based on detected behavior.
+func behaviorPenaltyScaleFixed(b quality.Behavior) int64 {
 	switch b {
 	case quality.BehaviorLowLatency:
-		return 0.5 // fast link, reduce penalties
+		return 50 // 0.5 × 100
 	case quality.BehaviorAggressive:
-		return 1.2 // brute-force sender, slightly higher
+		return 120 // 1.2 × 100
 	case quality.BehaviorLossy, quality.BehaviorSaturated:
-		return 1.5 // problematic link, increase penalties
+		return 150 // 1.5 × 100
 	default:
-		return 1.0 // Normal or Unknown
+		return 100 // 1.0 × 100
 	}
 }
 

@@ -55,24 +55,24 @@ func TestV21_Learner_ClassifiesLossy(t *testing.T) {
 	t.Logf("Lossy behavior: score=%d, behavior=%v", score, behavior)
 }
 
-// TestV21_BehaviorPenaltyScale verifies penalty scaling per behavior.
-func TestV21_BehaviorPenaltyScale(t *testing.T) {
+// TestV21_BehaviorPenaltyScaleFixed verifies fixed-point penalty scaling per behavior.
+func TestV21_BehaviorPenaltyScaleFixed(t *testing.T) {
 	tests := []struct {
 		behavior quality.Behavior
-		expected float64
+		expected int64
 	}{
-		{quality.BehaviorLowLatency, 0.5},
-		{quality.BehaviorNormal, 1.0},
-		{quality.BehaviorAggressive, 1.2},
-		{quality.BehaviorLossy, 1.5},
-		{quality.BehaviorSaturated, 1.5},
-		{quality.BehaviorUnknown, 1.0},
+		{quality.BehaviorLowLatency, 50},    // 0.5 × 100
+		{quality.BehaviorNormal, 100},       // 1.0 × 100
+		{quality.BehaviorAggressive, 120},   // 1.2 × 100
+		{quality.BehaviorLossy, 150},        // 1.5 × 100
+		{quality.BehaviorSaturated, 150},    // 1.5 × 100
+		{quality.BehaviorUnknown, 100},      // 1.0 × 100
 	}
 
 	for _, tt := range tests {
-		scale := behaviorPenaltyScale(tt.behavior)
+		scale := behaviorPenaltyScaleFixed(tt.behavior)
 		if scale != tt.expected {
-			t.Errorf("behavior %v: expected scale %.1f, got %.1f", tt.behavior, tt.expected, scale)
+			t.Errorf("behavior %v: expected scale %d, got %d", tt.behavior, tt.expected, scale)
 		}
 	}
 }
@@ -97,22 +97,22 @@ func TestV21_ScoreClient_BehaviorAware(t *testing.T) {
 	// Manually set behavior by overriding learner dominant
 	// LowLatency should have lower score (less penalty)
 	lowLatBehavior := quality.BehaviorLowLatency
-	lowLatScale := behaviorPenaltyScale(lowLatBehavior)
+	lowLatScale := behaviorPenaltyScaleFixed(lowLatBehavior)
 	lossyBehavior := quality.BehaviorLossy
-	lossyScale := behaviorPenaltyScale(lossyBehavior)
+	lossyScale := behaviorPenaltyScaleFixed(lossyBehavior)
 
 	if lowLatScale >= lossyScale {
-		t.Errorf("LowLatency scale (%.1f) should be < Lossy scale (%.1f)", lowLatScale, lossyScale)
+		t.Errorf("LowLatency scale (%d) should be < Lossy scale (%d)", lowLatScale, lossyScale)
 	}
 
-	// Verify scales are correct
-	if lowLatScale != 0.5 {
-		t.Errorf("LowLatency scale: expected 0.5, got %.1f", lowLatScale)
+	// Verify scales are correct (fixed-point ×100)
+	if lowLatScale != 50 {
+		t.Errorf("LowLatency scale: expected 50, got %d", lowLatScale)
 	}
-	if lossyScale != 1.5 {
-		t.Errorf("Lossy scale: expected 1.5, got %.1f", lossyScale)
+	if lossyScale != 150 {
+		t.Errorf("Lossy scale: expected 150, got %d", lossyScale)
 	}
-	t.Logf("Behavior scales: LowLatency=%.1f Normal=1.0 Aggressive=1.2 Lossy=%.1f Saturated=1.5",
+	t.Logf("Behavior scales (fixed-point ×100): LowLatency=%d Normal=100 Aggressive=120 Lossy=%d Saturated=150",
 		lowLatScale, lossyScale)
 }
 

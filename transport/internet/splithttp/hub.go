@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	goreality "github.com/Maolaohei/REALITY"
@@ -40,24 +41,35 @@ type requestHandler struct {
 	localAddr      net.Addr
 	socketSettings *internet.SocketConfig
 	stopCh         chan struct{}
+	cfDetected     atomic.Bool
 }
 
 type httpSession struct {
-	uploadQueue *uploadQueue
-	// for as long as the GET request is not opened by the client, this will be
-	// open ("undone"), and the session may be expired within a certain TTL.
-	// after the client connects, this becomes "done" and the session lives as
-	// long as the GET request.
+	uploadQueue      *uploadQueue
 	isFullyConnected *done.Instance
+	timer            *time.Timer
 }
 
 const maxSessionsPerHandler = 65536
 
+func (h *requestHandler) getSessionTtl() int32 {
+	if h.cfDetected.Load() {
+		return 75
+	}
+	return h.config.GetNormalizedScSessionTtlSecs()
+}
+
 func (h *requestHandler) upsertSession(sessionId string) *httpSession {
+	ttl := h.getSessionTtl()
+
 	// fast path
 	currentSessionAny, ok := h.sessions.Load(sessionId)
 	if ok {
-		return currentSessionAny.(*httpSession)
+		s := currentSessionAny.(*httpSession)
+		if s.timer != nil {
+			s.timer.Reset(time.Duration(ttl) * time.Second)
+		}
+		return s
 	}
 
 	// slow path
@@ -66,22 +78,25 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 
 	currentSessionAny, ok = h.sessions.Load(sessionId)
 	if ok {
-		return currentSessionAny.(*httpSession)
+		s := currentSessionAny.(*httpSession)
+		if s.timer != nil {
+			s.timer.Reset(time.Duration(ttl) * time.Second)
+		}
+		return s
 	}
 
 	s := &httpSession{
 		uploadQueue:      NewUploadQueue(h.ln.config.GetNormalizedScMaxBufferedPosts()),
 		isFullyConnected: done.New(),
+		timer:            time.NewTimer(time.Duration(ttl) * time.Second),
 	}
 
 	h.sessions.Store(sessionId, s)
 
-	// Single goroutine per session for TTL + cleanup (P1 #8)
 	go func() {
-		timer := time.NewTimer(30 * time.Second)
-		defer timer.Stop()
+		defer s.timer.Stop()
 		select {
-		case <-timer.C:
+		case <-s.timer.C:
 			h.sessions.Delete(sessionId)
 			s.uploadQueue.Close()
 		case <-s.isFullyConnected.Wait():
@@ -105,6 +120,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		errors.LogInfo(context.Background(), "failed to validate path, request:", request.URL.Path, ", config:", h.path)
 		writer.WriteHeader(http.StatusNotFound)
 		return
+	}
+
+	// Detect Cloudflare CDN once per listener
+	if !h.cfDetected.Load() {
+		if request.Header.Get("Cf-Ray") != "" || request.Header.Get("Server") == "cloudflare" {
+			h.cfDetected.Store(true)
+			errors.LogInfo(context.Background(), "Cloudflare CDN detected, session TTL set to 75s")
+		}
 	}
 
 	h.config.WriteResponseHeader(writer, request.Method, request.Header)
@@ -427,11 +450,10 @@ type httpServerConn struct {
 }
 
 func (c *httpServerConn) Write(b []byte) (int, error) {
-	c.Lock()
-	if c.Done() {
-		c.Unlock()
+	if c.Instance.Done() {
 		return 0, io.ErrClosedPipe
 	}
+	c.Lock()
 	n, err := c.ResponseWriter.Write(b)
 	c.Unlock()
 	if err == nil {

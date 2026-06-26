@@ -161,10 +161,17 @@ func (c *Config) GetNormalizedScMinPostsIntervalMs() *RangeConfig {
 
 func (c *Config) GetNormalizedScMaxBufferedPosts() int {
 	if c.ScMaxBufferedPosts == 0 {
-		return 30
+		return 64
 	}
 
 	return int(c.ScMaxBufferedPosts)
+}
+
+func (c *Config) GetNormalizedScSessionTtlSecs() int32 {
+	if c.ScSessionTtlSecs <= 0 {
+		return 45
+	}
+	return c.ScSessionTtlSecs
 }
 
 func (c *Config) GetNormalizedScStreamUpServerSecs() *RangeConfig {

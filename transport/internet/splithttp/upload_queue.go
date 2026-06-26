@@ -1,10 +1,10 @@
 package splithttp
 
-// upload_queue is a specialized priorityqueue + channel to reorder generic
-// packets by a sequence number
+// upload_queue is a specialized typed priority queue + channel to reorder
+// packets by a sequence number. Uses a concrete-typed heap to avoid
+// interface{} boxing/unboxing overhead from container/heap.
 
 import (
-	"container/heap"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -45,7 +45,7 @@ type uploadQueue struct {
 	nomore          bool
 	pushedPackets   chan Packet
 	writeCloseMutex sync.Mutex
-	heap            uploadHeap
+	heap            packetHeap
 	nextSeq         uint64
 	closed          atomic.Bool
 	maxPackets      int
@@ -54,13 +54,25 @@ type uploadQueue struct {
 func NewUploadQueue(maxPackets int) *uploadQueue {
 	return &uploadQueue{
 		pushedPackets: make(chan Packet, maxPackets),
-		heap:          uploadHeap{},
+		heap:          make(packetHeap, 0, min(maxPackets, 64)),
 		nextSeq:       0,
 		maxPackets:    maxPackets,
 	}
 }
 
 func (h *uploadQueue) Push(p Packet) error {
+	// Fast path: try non-blocking send for packets without Reader.
+	// This avoids lock contention when channel has capacity.
+	if p.Reader == nil && !h.closed.Load() {
+		select {
+		case h.pushedPackets <- p:
+			return nil
+		default:
+			// Channel full, fall through to locked path
+		}
+	}
+
+	// Slow path: locked send with full validation
 	h.writeCloseMutex.Lock()
 	defer h.writeCloseMutex.Unlock()
 
@@ -100,7 +112,7 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 			return 0, io.EOF
 		}
 
-		if len(h.heap) == 0 {
+		if h.heap.Len() == 0 {
 			packet, more := <-h.pushedPackets
 			if !more {
 				return 0, io.EOF
@@ -109,11 +121,11 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 				h.reader = packet.Reader
 				return h.reader.Read(b)
 			}
-			heap.Push(&h.heap, packet)
+			h.heap.push(packet)
 		}
 
-		for len(h.heap) > 0 {
-			packet := heap.Pop(&h.heap).(Packet)
+		for h.heap.Len() > 0 {
+			packet := h.heap.pop()
 			n := 0
 
 			if packet.Seq == h.nextSeq {
@@ -123,7 +135,7 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 				if n < len(packet.Payload) {
 					// partial read
 					packet.Payload = packet.Payload[n:]
-					heap.Push(&h.heap, packet)
+					h.heap.push(packet)
 				} else {
 					h.nextSeq = packet.Seq + 1
 				}
@@ -133,18 +145,15 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 
 			// misordered packet
 			if packet.Seq > h.nextSeq {
-				if len(h.heap) > h.maxPackets {
-					// the "reassembly buffer" is too large, and we want to
-					// constrain memory usage somehow. let's tear down the
-					// connection, and hope the application retries.
+				if h.heap.Len() > h.maxPackets {
 					return 0, errors.New("packet queue is too large")
 				}
-				heap.Push(&h.heap, packet)
+				h.heap.push(packet)
 				packet2, more := <-h.pushedPackets
 				if !more {
 					return 0, io.EOF
 				}
-				heap.Push(&h.heap, packet2)
+				h.heap.push(packet2)
 			}
 			// packet.Seq < h.nextSeq: duplicate, skip and continue
 		}
@@ -152,23 +161,55 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 	}
 }
 
-// heap code directly taken from https://pkg.go.dev/container/heap
-type uploadHeap []Packet
+// packetHeap is a min-heap of Packets ordered by Seq.
+// Unlike container/heap, this uses concrete types to avoid interface{} boxing.
+type packetHeap []Packet
 
-func (h uploadHeap) Len() int           { return len(h) }
-func (h uploadHeap) Less(i, j int) bool { return h[i].Seq < h[j].Seq }
-func (h uploadHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h packetHeap) Len() int { return len(h) }
 
-func (h *uploadHeap) Push(x any) {
-	// Push and Pop use pointer receivers because they modify the slice's length,
-	// not just its contents.
-	*h = append(*h, x.(Packet))
+func (h *packetHeap) push(p Packet) {
+	*h = append(*h, p)
+	i := len(*h) - 1
+	// sift up
+	for i > 0 {
+		parent := (i - 1) / 2
+		if (*h)[i].Seq >= (*h)[parent].Seq {
+			break
+		}
+		(*h)[i], (*h)[parent] = (*h)[parent], (*h)[i]
+		i = parent
+	}
 }
 
-func (h *uploadHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
+func (h *packetHeap) pop() Packet {
+	top := (*h)[0]
+	n := len(*h) - 1
+	(*h)[0] = (*h)[n]
+	*h = (*h)[:n]
+	// sift down
+	if len(*h) > 0 {
+		h.siftDown(0)
+	}
+	return top
+}
+
+func (h *packetHeap) siftDown(i int) {
+	n := len(*h)
+	for {
+		smallest := i
+		left := 2*i + 1
+		right := 2*i + 2
+
+		if left < n && (*h)[left].Seq < (*h)[smallest].Seq {
+			smallest = left
+		}
+		if right < n && (*h)[right].Seq < (*h)[smallest].Seq {
+			smallest = right
+		}
+		if smallest == i {
+			break
+		}
+		(*h)[i], (*h)[smallest] = (*h)[smallest], (*h)[i]
+		i = smallest
+	}
 }
