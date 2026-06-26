@@ -2,9 +2,15 @@
 
 > 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能增强分支，专注于 TCP 优化、连接调度与智能网络决策，在保持 100% 协议兼容性的前提下提升复杂网络环境下的稳定性与连接成功率。
 
----
-
-> **Bray-Core 由 [github.com/Maolaohei/REALITY](https://github.com/Maolaohei/REALITY) 强力驱动**
+<p align="center">
+  <a href="https://github.com/Maolaohei/Bray-Core">
+    <img src="https://img.shields.io/badge/Bray--Core-v26.6.1-FF6B35?style=for-the-badge&logo=go&logoColor=white" alt="Bray-Core">
+  </a>
+  <br>
+  <a href="https://github.com/Maolaohei/REALITY">
+    <img src="https://img.shields.io/badge/Powered%20by-Bray--REALITY%20v3-4A90D9?style=for-the-badge&logo=shield&logoColor=white" alt="Powered by REALITY">
+  </a>
+</p>
 
 ### 魔改 REALITY 特有特性
 
