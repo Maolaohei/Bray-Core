@@ -61,12 +61,12 @@ func TestV21_BehaviorPenaltyScaleFixed(t *testing.T) {
 		behavior quality.Behavior
 		expected int64
 	}{
-		{quality.BehaviorLowLatency, 50},    // 0.5 × 100
-		{quality.BehaviorNormal, 100},       // 1.0 × 100
-		{quality.BehaviorAggressive, 120},   // 1.2 × 100
-		{quality.BehaviorLossy, 150},        // 1.5 × 100
-		{quality.BehaviorSaturated, 150},    // 1.5 × 100
-		{quality.BehaviorUnknown, 100},      // 1.0 × 100
+		{quality.BehaviorLowLatency, 50},  // 0.5 × 100
+		{quality.BehaviorNormal, 100},     // 1.0 × 100
+		{quality.BehaviorAggressive, 120}, // 1.2 × 100
+		{quality.BehaviorLossy, 150},      // 1.5 × 100
+		{quality.BehaviorSaturated, 150},  // 1.5 × 100
+		{quality.BehaviorUnknown, 100},    // 1.0 × 100
 	}
 
 	for _, tt := range tests {
