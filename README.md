@@ -2,6 +2,47 @@
 
 > 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能增强分支，专注于 TCP 优化、连接调度与智能网络决策，在保持 100% 协议兼容性的前提下提升复杂网络环境下的稳定性与连接成功率。
 
+---
+
+> **Bray-Core 由 [github.com/Maolaohei/REALITY](https://github.com/Maolaohei/REALITY) 强力驱动**
+
+### 魔改 REALITY 特有特性
+
+| 特性 | 说明 | 上游 REALITY |
+|------|------|:------------:|
+| TLS 1.3 握手伪造 | 从目标服务器实时捕获 ServerHello + record 长度，构建与目标一致的握手指纹 | ✅ |
+| 持久化缓存 | profiles.json 原子写入，服务重启后秒级恢复，无需等待首次握手 | ❌ |
+| HotSwap 热替换 | 目标 CipherSuite 变更时新旧 profile 无缝切换，已有连接不受影响 | ❌ |
+| Stale-While-Revalidate | 过期 profile 仍可用于握手，后台异步刷新，不阻塞新连接 | ❌ |
+| 负缓存退避 | 探测失败后指数退避（1/2/4/8min），避免对目标产生无效请求 | ❌ |
+| Pin/Unpin 引用计数 | 连接级引用计数保护，正在使用的 profile 不会被误删 | ❌ |
+| EventBus 事件总线 | Observer 模式解耦缓存、持久化、刷新三大模块 | ❌ |
+| 证书链扩容 | 支持 64KB 证书链（原 8KB），兼容更多目标站点 | ❌ |
+| RefreshManager | 单调度器统一管理所有目标探测，替代 per-target goroutine | ❌ |
+
+### 缓存实测数据（i5-13600KF, Go 1.24）
+
+| 指标 | 结果 |
+|------|------|
+| 缓存命中查询 | 13 ns/op，0 B/op，单核吞吐 77M ops/s |
+| 缓存未命中 | 6 ns/op，0 B/op，单核吞吐 167M ops/s |
+| Fingerprint 计算 | 3.8 ns/op，0 B/op |
+| Soak 2000 次握手 | 内存增长 0.14 MB（15.78%），GC 仅 1 次 |
+| 单元测试 | 37/37 全通过，0 data races |
+
+### 魔改解决的问题
+
+| 原版问题 | 魔改方案 | 实际效果 |
+|----------|----------|----------|
+| 重启后需重新握手，首次连接慢 | 持久化缓存 | 重启后秒级恢复，用户无感知 |
+| 目标换证书后所有连接断开 | HotSwap + Stale-While-Revalidate | 已有连接不受影响，新连接自动切换 |
+| 探测失败后反复重试 | 负缓存退避 | 指数冷却，减少无效请求 |
+| 正在用的 profile 可能被清理 | Pin/Unpin 引用计数 | 连接级保护，杜绝误删 |
+| 证书链超 8KB 的站点无法使用 | 证书链扩容至 64KB | 兼容更多目标站点 |
+| 多目标探测各自为战 | RefreshManager 单调度器 | 资源统一管理，降低开销 |
+
+---
+
 ### REALITY v3 — TLS 指纹伪装与缓存体系 ✅
 
 | 特性 | 说明 | 状态 |
