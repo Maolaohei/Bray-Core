@@ -93,6 +93,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 		if timeoutReader, isTimeoutReader := link.Reader.(buf.TimeoutReader); isTimeoutReader {
 			mb, err := timeoutReader.ReadMultiBufferTimeout(time.Millisecond * 100)
 			if err != nil && err != buf.ErrNotTimeoutReader && err != buf.ErrReadTimeout {
+				serverConn.Close()
 				return errors.New("read payload").Base(err)
 			}
 			payload := B.New()
@@ -104,6 +105,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 					_, err = serverConn.Write(payload.Bytes())
 					if err != nil {
 						payload.Release()
+						serverConn.Close()
 						return errors.New("write payload").Base(err)
 					}
 					handshake = true
@@ -118,6 +120,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 		if !handshake {
 			_, err = serverConn.Write(nil)
 			if err != nil {
+				serverConn.Close()
 				return errors.New("client handshake").Base(err)
 			}
 		}

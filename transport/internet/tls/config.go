@@ -31,6 +31,28 @@ var getCipherSuiteIDs = sync.OnceValue(func() map[string]uint16 {
 	return id
 })
 
+// keyLogCache caches key log file handles to avoid leaking file descriptors.
+var keyLogCache = struct {
+	sync.Mutex
+	handles map[string]*os.File
+}{
+	handles: make(map[string]*os.File),
+}
+
+func getKeyLogWriter(path string) *os.File {
+	keyLogCache.Lock()
+	defer keyLogCache.Unlock()
+	if f, ok := keyLogCache.handles[path]; ok {
+		return f
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil
+	}
+	keyLogCache.handles[path] = f
+	return f
+}
+
 // ParseCertificate converts a cert.Certificate to Certificate.
 func ParseCertificate(c *cert.Certificate) *Certificate {
 	if c != nil {
@@ -468,11 +490,10 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 	}
 
 	if len(c.MasterKeyLog) > 0 && c.MasterKeyLog != "none" {
-		writer, err := os.OpenFile(c.MasterKeyLog, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
-		if err != nil {
-			errors.LogErrorInner(context.Background(), err, "failed to open ", c.MasterKeyLog, " as master key log")
-		} else {
+		if writer := getKeyLogWriter(c.MasterKeyLog); writer != nil {
 			config.KeyLogWriter = writer
+		} else {
+			errors.LogErrorInner(context.Background(), errors.New("failed to open ", c.MasterKeyLog, " as master key log"), "")
 		}
 	}
 	if len(c.EchConfigList) > 0 || len(c.EchServerKeys) > 0 {

@@ -19,6 +19,7 @@ type InterfaceUpdater struct {
 
 	// debounceTimer merges rapid-fire netlink events into a single Update() call.
 	debounceTimer *time.Timer
+	quit          chan struct{}
 }
 
 var updater *InterfaceUpdater
@@ -97,8 +98,13 @@ func score(iface *net.Interface, addrs []net.Addr) int {
 func (updater *InterfaceUpdater) pollLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		updater.Update()
+	for {
+		select {
+		case <-ticker.C:
+			updater.Update()
+		case <-updater.quit:
+			return
+		}
 	}
 }
 

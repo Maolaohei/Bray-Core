@@ -47,7 +47,11 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if config.AuthType == AuthType_PASSWORD {
 		httpConfig.Accounts = config.Accounts
 	}
-	s.httpServer, _ = http.NewServer(ctx, httpConfig)
+	var err error
+	s.httpServer, err = http.NewServer(ctx, httpConfig)
+	if err != nil {
+		return nil, errors.New("failed to create HTTP server").Base(err)
+	}
 	return s, nil
 }
 

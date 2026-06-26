@@ -60,10 +60,16 @@ func NewUploadQueue(maxPackets int) *uploadQueue {
 	}
 }
 
-func (h *uploadQueue) Push(p Packet) error {
+func (h *uploadQueue) Push(p Packet) (retErr error) {
 	// Fast path: try non-blocking send for packets without Reader.
 	// This avoids lock contention when channel has capacity.
 	if p.Reader == nil && !h.closed.Load() {
+		// Recover from send-on-closed-channel panic if Close() runs concurrently.
+		defer func() {
+			if r := recover(); r != nil {
+				retErr = errors.New("packet queue closed")
+			}
+		}()
 		select {
 		case h.pushedPackets <- p:
 			return nil

@@ -581,7 +581,12 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 	}
 
 	if !l.isH3 && streamSettings.TcpmaskManager != nil {
-		l.listener, _ = streamSettings.TcpmaskManager.WrapListener(l.listener)
+		wrapped, err := streamSettings.TcpmaskManager.WrapListener(l.listener)
+		if err != nil {
+			l.listener.Close()
+			return nil, errors.New("failed to wrap listener for TCP mask").Base(err)
+		}
+		l.listener = wrapped
 	}
 
 	// tcp/unix (h1/h2)

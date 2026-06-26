@@ -118,7 +118,12 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 	}
 
 	if streamSettings.TcpmaskManager != nil {
-		listener, _ = streamSettings.TcpmaskManager.WrapListener(listener)
+		wrapped, err := streamSettings.TcpmaskManager.WrapListener(listener)
+		if err != nil {
+			listener.Close()
+			return nil, errors.New("failed to wrap listener for WebSocket").Base(err)
+		}
+		listener = wrapped
 	}
 
 	if streamSettings.SocketSettings != nil && streamSettings.SocketSettings.AcceptProxyProtocol {

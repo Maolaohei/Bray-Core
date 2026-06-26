@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/Maolaohei/REALITY"
@@ -12,6 +13,28 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/transport/internet"
 )
+
+// keyLogCache caches key log file handles to avoid leaking file descriptors.
+var keyLogCache = struct {
+	sync.Mutex
+	handles map[string]*os.File
+}{
+	handles: make(map[string]*os.File),
+}
+
+func getKeyLogWriter(path string) *os.File {
+	keyLogCache.Lock()
+	defer keyLogCache.Unlock()
+	if f, ok := keyLogCache.handles[path]; ok {
+		return f
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil
+	}
+	keyLogCache.handles[path] = f
+	return f
+}
 
 func (c *Config) GetREALITYConfig() *reality.Config {
 	dialer := &net.Dialer{
@@ -66,13 +89,12 @@ func KeyLogWriterFromConfig(c *Config) io.Writer {
 		return nil
 	}
 
-	writer, err := os.OpenFile(c.MasterKeyLog, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
-	if err != nil {
-		errors.LogErrorInner(context.Background(), err, "failed to open ", c.MasterKeyLog, " as master key log")
-		return nil
+	if writer := getKeyLogWriter(c.MasterKeyLog); writer != nil {
+		return writer
 	}
 
-	return writer
+	errors.LogErrorInner(context.Background(), errors.New("failed to open ", c.MasterKeyLog, " as master key log"), "")
+	return nil
 }
 
 func ConfigFromStreamSettings(settings *internet.MemoryStreamConfig) *Config {

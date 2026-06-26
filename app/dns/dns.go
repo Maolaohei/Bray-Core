@@ -198,6 +198,7 @@ func (*DNS) Type() interface{} {
 
 // Start implements common.Runnable.
 func (s *DNS) Start() error {
+	s.Lock()
 	// Start with domains extracted from outbound configuration
 	var domains []string
 	if s.extractWarmupDomains != nil {
@@ -216,6 +217,7 @@ func (s *DNS) Start() error {
 			}
 		}
 	}
+	s.Unlock()
 
 	if len(domains) > 0 {
 		go s.warmup(domains)
@@ -226,7 +228,9 @@ func (s *DNS) Start() error {
 // SetWarmupDomains configures domains to be pre-resolved at startup
 // or on network change. Call before Start() or after a network event.
 func (s *DNS) SetWarmupDomains(domains []string) {
+	s.Lock()
 	s.warmupDomains = domains
+	s.Unlock()
 }
 
 // SetWarmupDomainExtractor sets a function that extracts warmup domains from
@@ -234,12 +238,15 @@ func (s *DNS) SetWarmupDomains(domains []string) {
 // are registered. If no explicit warmupDomains are configured, this function
 // is used to automatically discover domains from node configs, REALITY, etc.
 func (s *DNS) SetWarmupDomainExtractor(fn func() []string) {
+	s.Lock()
 	s.extractWarmupDomains = fn
+	s.Unlock()
 }
 
 // WarmupNow triggers an immediate warmup using the configured extractor.
 // Called from core/xray.go after outbound handlers are registered.
 func (s *DNS) WarmupNow() {
+	s.Lock()
 	var domains []string
 	if s.extractWarmupDomains != nil {
 		domains = s.extractWarmupDomains()
@@ -257,6 +264,7 @@ func (s *DNS) WarmupNow() {
 			}
 		}
 	}
+	s.Unlock()
 
 	if len(domains) > 0 {
 		errors.LogInfo(s.ctx, "DNS warmup now: pre-resolving ", len(domains), " domains")

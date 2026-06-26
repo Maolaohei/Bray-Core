@@ -226,7 +226,9 @@ func (d *downloader) fetch(rawURL string, writer io.Writer) error {
 func clean(assets []stage) {
 	for _, asset := range assets {
 		if asset.temp != "" {
-			os.Remove(asset.temp)
+			if err := os.Remove(asset.temp); err != nil {
+				errors.LogWarningInner(context.Background(), err, "failed to remove temp file ", asset.temp)
+			}
 		}
 	}
 }

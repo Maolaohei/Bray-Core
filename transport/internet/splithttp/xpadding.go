@@ -133,10 +133,12 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 	limit := byte(256 - (256 % m))
 
 	rp := paddingResultPool.Get().(*[]byte)
+	defer paddingResultPool.Put(rp)
 	result := (*rp)[:n]
 	i := 0
 
 	sp := randBufPool.Get().(*[]byte)
+	defer randBufPool.Put(sp)
 	buf := *sp
 	for i < n {
 		for j := range buf {
@@ -153,10 +155,8 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 			}
 		}
 	}
-	randBufPool.Put(sp)
 
 	s := string(result)
-	paddingResultPool.Put(rp)
 	return s, true
 }
 

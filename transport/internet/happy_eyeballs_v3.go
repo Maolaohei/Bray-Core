@@ -160,6 +160,7 @@ func (r *HappyIPRecord) recordFail() {
 type HappyIPDB struct {
 	mu      sync.RWMutex
 	records map[string]*HappyIPRecord
+	quit    chan struct{}
 }
 
 const (
@@ -171,6 +172,7 @@ const (
 
 var globalHappyIPDB = &HappyIPDB{
 	records: make(map[string]*HappyIPRecord),
+	quit:    make(chan struct{}),
 }
 
 func init() {
@@ -201,8 +203,13 @@ func (db *HappyIPDB) cleanupLoop() {
 	ticker := time.NewTicker(ipRecordCleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		db.cleanup()
+	for {
+		select {
+		case <-ticker.C:
+			db.cleanup()
+		case <-db.quit:
+			return
+		}
 	}
 }
 

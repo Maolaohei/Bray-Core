@@ -493,7 +493,9 @@ func (r *Reverse) monitor() error {
 			ctx := session.ContextWithOutbounds(r.ctx, []*session.Outbound{{
 				Target: net.Destination{Address: net.DomainAddress("v1.rvs.cool")},
 			}})
-			r.handler.Process(ctx, link2, session.FullHandlerFromContext(ctx).(*proxyman.Handler))
+			if err := r.handler.Process(ctx, link2, session.FullHandlerFromContext(ctx).(*proxyman.Handler)); err != nil {
+				errors.LogWarningInner(r.ctx, err, "reverse proxy process failed")
+			}
 			common.Interrupt(reader1)
 			common.Interrupt(reader2)
 		}()

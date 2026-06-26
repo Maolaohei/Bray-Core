@@ -46,6 +46,7 @@ type dialerConf struct {
 var (
 	globalDialerMap    map[dialerConf]*XmuxManager
 	globalDialerAccess sync.Mutex
+	globalDialerQuit   chan struct{}
 )
 
 const (
@@ -65,6 +66,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	if globalDialerMap == nil {
 		globalDialerMap = make(map[dialerConf]*XmuxManager)
+		globalDialerQuit = make(chan struct{})
 		go globalDialerCleanup()
 	}
 
@@ -195,12 +197,14 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 
 		if realityConfig != nil {
 			t1 := time.Now()
-			conn, err = reality.UClient(conn, realityConfig, ctxInner, dest)
+			newConn, err := reality.UClient(conn, realityConfig, ctxInner, dest)
 			realityDur := time.Since(t1)
 			if err != nil {
+				conn.Close()
 				errors.LogDebug(ctxInner, "XHTTP dial: REALITY failed in ", realityDur.Round(time.Millisecond), ": ", err)
 				return nil, err
 			}
+			conn = newConn
 			errors.LogDebug(ctxInner, "XHTTP dial: REALITY handshake in ", realityDur.Round(time.Millisecond))
 			return conn, nil
 		}
@@ -208,11 +212,15 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		if gotlsConfig != nil {
 			t1 := time.Now()
 			if fingerprint := tls.GetFingerprint(tlsConfig.Fingerprint); fingerprint != nil {
-				conn = tls.UClient(conn, gotlsConfig, fingerprint)
-				if err := conn.(*tls.UConn).HandshakeContext(ctxInner); err != nil {
-					errors.LogDebug(ctxInner, "XHTTP dial: uTLS failed in ", time.Since(t1).Round(time.Millisecond), ": ", err)
-					return nil, err
+				tlsConn := tls.UClient(conn, gotlsConfig, fingerprint)
+				if uconn, ok := tlsConn.(*tls.UConn); ok {
+					if err := uconn.HandshakeContext(ctxInner); err != nil {
+						conn.Close()
+						errors.LogDebug(ctxInner, "XHTTP dial: uTLS failed in ", time.Since(t1).Round(time.Millisecond), ": ", err)
+						return nil, err
+					}
 				}
+				conn = tlsConn
 			} else {
 				conn = tls.Client(conn, gotlsConfig)
 			}
@@ -389,15 +397,20 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 func globalDialerCleanup() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		globalDialerAccess.Lock()
-		for key, manager := range globalDialerMap {
-			if manager.IdleFor() > globalMapIdleTimeout {
-				delete(globalDialerMap, key)
-				go manager.Close()
+	for {
+		select {
+		case <-ticker.C:
+			globalDialerAccess.Lock()
+			for key, manager := range globalDialerMap {
+				if manager.IdleFor() > globalMapIdleTimeout {
+					delete(globalDialerMap, key)
+					go manager.Close()
+				}
 			}
+			globalDialerAccess.Unlock()
+		case <-globalDialerQuit:
+			return
 		}
-		globalDialerAccess.Unlock()
 	}
 }
 
@@ -545,6 +558,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
 		if err != nil { // browser dialer only
+			reader.Close()
 			return nil, err
 		}
 		return stat.Connection(&conn), nil
@@ -554,6 +568,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
 		if err != nil { // browser dialer only
+			reader.Close()
 			return nil, err
 		}
 	}
@@ -563,6 +578,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
 		if err != nil { // browser dialer only
+			reader.Close()
+			conn.Close()
 			return nil, err
 		}
 		return stat.Connection(&conn), nil

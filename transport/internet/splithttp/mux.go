@@ -41,7 +41,8 @@ type XmuxClient struct {
 	learner *quality.NetworkLearner // tracks link behavior patterns
 
 	// TransportProfile for this connection. Created when TCP connection is established.
-	profile interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
+	profileMu sync.Mutex         // protects profile field
+	profile   interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
 }
 
 func (c *XmuxClient) AddRunning() {
@@ -151,12 +152,21 @@ func (c *XmuxClient) StartProfiling(conn interface{ Stop() }) {
 	if conn == nil {
 		return
 	}
-	c.StopProfiling() // stop any existing profile
+	c.profileMu.Lock()
+	defer c.profileMu.Unlock()
+	c.StopProfilingLocked() // stop any existing profile
 	c.profile = conn
 }
 
 // StopProfiling stops the TransportProfile background goroutine.
 func (c *XmuxClient) StopProfiling() {
+	c.profileMu.Lock()
+	defer c.profileMu.Unlock()
+	c.StopProfilingLocked()
+}
+
+// StopProfilingLocked stops the profile. Caller must hold profileMu.
+func (c *XmuxClient) StopProfilingLocked() {
 	if c.profile != nil {
 		func() {
 			defer func() {

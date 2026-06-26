@@ -93,6 +93,8 @@ type Instance struct {
 
 // Instance state
 func (server *Instance) IsRunning() bool {
+	server.statusLock.Lock()
+	defer server.statusLock.Unlock()
 	return server.running
 }
 
@@ -414,6 +416,8 @@ func (s *Instance) AddFeature(feature features.Feature) error {
 
 // GetFeature returns a feature of the given type, or nil if such feature is not registered.
 func (s *Instance) GetFeature(featureType interface{}) features.Feature {
+	s.resolveLock.Lock()
+	defer s.resolveLock.Unlock()
 	return getFeature(s.features, reflect.TypeOf(featureType))
 }
 

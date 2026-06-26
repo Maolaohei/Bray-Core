@@ -147,7 +147,12 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
 					}
 				}
 				if realityConfig != nil {
-					return reality.UClient(c, realityConfig, gctx, dest)
+					newConn, err := reality.UClient(c, realityConfig, gctx, dest)
+					if err != nil {
+						c.Close()
+						return nil, err
+					}
+					return newConn, nil
 				}
 			}
 			return c, err

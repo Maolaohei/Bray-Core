@@ -299,17 +299,32 @@ type dialerConf struct {
 
 type clientManager struct {
 	sync.RWMutex
-	m map[dialerConf]*client
+	m    map[dialerConf]*client
+	quit chan struct{}
 }
 
 func (m *clientManager) clean() {
 	ticker := time.NewTicker(idleCleanupInterval)
-	for range ticker.C {
-		m.RLock()
-		for _, c := range m.m {
-			c.clean()
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.RLock()
+			for _, c := range m.m {
+				c.clean()
+			}
+			m.RUnlock()
+		case <-m.quit:
+			return
 		}
-		m.RUnlock()
+	}
+}
+
+func (m *clientManager) stop() {
+	select {
+	case <-m.quit:
+	default:
+		close(m.quit)
 	}
 }
 
@@ -329,7 +344,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 	initmanager.Do(func() {
 		manager = &clientManager{
-			m: make(map[dialerConf]*client),
+			m:    make(map[dialerConf]*client),
+			quit: make(chan struct{}),
 		}
 		go manager.clean()
 	})
