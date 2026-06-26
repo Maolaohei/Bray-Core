@@ -2,6 +2,22 @@
 
 > 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能增强分支，专注于 TCP 优化、连接调度与智能网络决策，在保持 100% 协议兼容性的前提下提升复杂网络环境下的稳定性与连接成功率。
 
+### REALITY v3 — TLS 指纹伪装与缓存体系 ✅
+
+| 特性 | 说明 | 状态 |
+|------|------|------|
+| 持久化缓存 | 重启后秒级恢复，profiles.json 原子写入 | ✅ |
+| 后台刷新 | RefreshManager 定期探测目标，CipherSuite 变更自动热替换 | ✅ |
+| HotSwap | 新旧 profile 无缝切换，正在使用的连接不受影响 | ✅ |
+| Stale-While-Revalidate | 过期 profile 仍可使用，后台异步刷新 | ✅ |
+| 负缓存 | 探测失败指数退避，避免无效重试 | ✅ |
+| Pin/Unpin | 连接级引用计数，防止正在使用的 profile 被误删 | ✅ |
+| EventBus | Observer 模式解耦缓存/持久化/刷新逻辑 | ✅ |
+| 证书限制解除 | 支持 64KB 证书链（原 8KB 限制） | ✅ |
+| TLS 1.3 握手伪造 | 从目标服务器捕获记录长度，构建假握手 | ✅ |
+| Soak 测试 | 2000 次连接，GC 仅 1 次，内存增长 15.79% | ✅ |
+| Race-free | 0 data races，37/37 测试全通过 | ✅ |
+
 ### V2.2 — 代码质量与性能优化 ✅
 
 | 模块 | 优化 | 状态 |
@@ -182,6 +198,21 @@ Dynamic Connection Scaling (AIMD) → pool sizing
 Connection Migration → proactive pool refill
 ```
 
+### REALITY v3 缓存架构
+
+```
+ClientHello → Handshake Engine → MirrorConn (client↔target)
+                    ↓
+            EventBus (Observer 模式)
+            ├─ CacheHandler → CacheManager (sync.Map)
+            ├─ PersistHandler → profiles.json (原子写入)
+            └─ RefreshHandler → RefreshManager (20-30min 探测)
+                    ↓
+            HotSwap: 新 profile Store → 旧 profile PendingDelete
+                    ↓
+            Pin/Unpin: 连接级引用计数 → refCount=0 自动清理
+```
+
 ---
 
 ## 性能数据
@@ -294,4 +325,4 @@ go test -short -timeout 30s ./proxy/netbridge/
 
 *上游同步基准：Xray-core [v26.6.1](https://github.com/XTLS/Xray-core/releases/tag/v26.6.1)*
 
-*最后更新：2026-06-23*
+*最后更新：2026-06-26*
