@@ -4,11 +4,11 @@
 
 <p align="center">
   <a href="https://github.com/Maolaohei/Bray-Core">
-    <img src="https://img.shields.io/badge/Bray--Core-v26.6.1-FF6B35?style=for-the-badge&logo=go&logoColor=white" alt="Bray-Core">
+    <img src="https://img.shields.io/badge/BRAY--CORE-FF6B35?style=for-the-badge&logo=go&logoColor=white" alt="BRAY-CORE">
   </a>
-  <br>
+  &nbsp;
   <a href="https://github.com/Maolaohei/REALITY">
-    <img src="https://img.shields.io/badge/Powered%20by-Bray--REALITY%20v3-4A90D9?style=for-the-badge&logo=shield&logoColor=white" alt="Powered by REALITY">
+    <img src="https://img.shields.io/badge/BRAY--REALITY%20v3-4A90D9?style=for-the-badge&logo=shield&logoColor=white" alt="BRAY-REALITY">
   </a>
 </p>
 
