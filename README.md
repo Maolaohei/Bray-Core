@@ -1,16 +1,16 @@
 # Bray-Core
 
-> 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能增强分支，专注于 TCP 优化、连接调度与智能网络决策，在保持 100% 协议兼容性的前提下提升复杂网络环境下的稳定性与连接成功率。
-
-<p align="center">
+<p align="left">由
   <a href="https://github.com/Maolaohei/Bray-Core">
     <img src="https://img.shields.io/badge/BRAY--CORE-FF6B35?style=for-the-badge&logo=go&logoColor=white" alt="BRAY-CORE">
   </a>
   &nbsp;
   <a href="https://github.com/Maolaohei/REALITY">
     <img src="https://img.shields.io/badge/BRAY--REALITY%20v3-4A90D9?style=for-the-badge&logo=shield&logoColor=white" alt="BRAY-REALITY">
-  </a>
+  </a>强力驱动
 </p>
+
+> 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能增强分支，专注于 TCP 优化、连接调度与智能网络决策，在保持 100% 协议兼容性的前提下提升复杂网络环境下的稳定性与连接成功率。
 
 ### 魔改 REALITY 特有特性
 
@@ -21,8 +21,6 @@
 | HotSwap 热替换 | 目标 CipherSuite 变更时新旧 profile 无缝切换，已有连接不受影响 | ❌ |
 | Stale-While-Revalidate | 过期 profile 仍可用于握手，后台异步刷新，不阻塞新连接 | ❌ |
 | 负缓存退避 | 探测失败后指数退避（1/2/4/8min），避免对目标产生无效请求 | ❌ |
-| Pin/Unpin 引用计数 | 连接级引用计数保护，正在使用的 profile 不会被误删 | ❌ |
-| EventBus 事件总线 | Observer 模式解耦缓存、持久化、刷新三大模块 | ❌ |
 | 证书链扩容 | 支持 64KB 证书链（原 8KB），兼容更多目标站点 | ❌ |
 | RefreshManager | 单调度器统一管理所有目标探测，替代 per-target goroutine | ❌ |
 
@@ -220,6 +218,7 @@ sysctl -w net.core.wmem_max=16777216
 | Dynamic Parallelism | 自适应并行连接数 |
 
 ### NetBridge 协议
+用于替代Socks5，需要使用魔改的[V2rayN (个人修改版本)](https://github.com/Maolaohei/v2rayN)搭配，才能使用内核直连功能
 
 | 特性 | 说明 |
 |------|------|
@@ -306,35 +305,13 @@ ClientHello → Handshake Engine → MirrorConn (client↔target)
 
 ---
 
-## 多租户说明
-
-### 连接池隔离
-
-| 部署方式 | 池隔离 | V2.0/V2.1 效果 |
-|----------|--------|---------------|
-| **客户端** (每用户独立实例) | ✅ 天然隔离 | 每个用户独立池，互不影响 |
-| **服务端** (多用户共享出站) | ⚠️ 按目标共享池 | 池质量反映网络质量，非用户质量 |
-
-### 服务端多用户行为
-
-- 连接池按 `destination + streamSettings` 隔离，不同目标的池互不影响
-- 同一目标的多用户共享池 — 这是正确行为：如果到某目标的网络丢包，所有连接都应被视为 lossy
-- NetworkLearner 跟踪每个连接的行为，池行为取活跃连接的主导行为
-- 单个差连接不会污染整个池（debounce + 取主导行为）
-
-### 建议
-
-- 客户端部署：每个用户独立 Xray 实例 → 完全隔离
-- 服务端部署：共享池是预期行为，网络级别的调度决策对所有用户公平
-
----
 
 ## 兼容性
 
 | 场景 | 兼容性 |
 |------|--------|
-| 上游客户端 → Bray 服务器 | ✅ 100% |
-| Bray 客户端 → 上游服务器 | ✅ 100% |
+| Xray上游客户端 → Bray 服务器 | ✅ 理论上100% |
+| Bray 客户端 → Xray上游服务器 | ✅ 理论上100% |
 | 配置格式 | ✅ 向后兼容 |
 | 跨平台编译 | ✅ Linux/Windows/macOS/Android/FreeBSD/OpenBSD |
 
@@ -367,6 +344,10 @@ go test -short -timeout 30s ./proxy/netbridge/
 ## 许可证
 
 [Mozilla Public License Version 2.0](https://github.com/XTLS/Xray-core/blob/main/LICENSE)
+
+## 友情链接
+
+[Linux DO](https://linux.do/)
 
 ---
 
