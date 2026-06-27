@@ -229,7 +229,7 @@ func (x *XUDP) Interrupt() {
 
 var XUDPManager struct {
 	sync.Mutex
-	Map map[[8]byte]*XUDP
+	Map  map[[8]byte]*XUDP
 	quit chan struct{}
 }
 

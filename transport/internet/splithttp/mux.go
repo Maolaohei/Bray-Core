@@ -41,7 +41,7 @@ type XmuxClient struct {
 	learner *quality.NetworkLearner // tracks link behavior patterns
 
 	// TransportProfile for this connection. Created when TCP connection is established.
-	profileMu sync.Mutex         // protects profile field
+	profileMu sync.Mutex          // protects profile field
 	profile   interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
 }
 

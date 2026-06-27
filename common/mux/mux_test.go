@@ -112,8 +112,8 @@ func TestReaderWriter_MultiSession(t *testing.T) {
 	bytesReader := &buf.BufferedReader{Buffer: rawMB}
 
 	type parsedFrame struct {
-		meta   FrameMetadata
-		data   string
+		meta    FrameMetadata
+		data    string
 		hasData bool
 	}
 
