@@ -460,7 +460,8 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 	emptyResponseFallback := go_errors.Is(err, dns.ErrEmptyResponse) && option.IPv4Enable && option.IPv6Enable
 	if len(ips) == 0 && err != nil &&
 		(emptyResponseFallback || !go_errors.Is(err, dns.ErrEmptyResponse)) &&
-		!s.checkSystem { // avoid recursion (checkSystem already uses system DNS)
+		!s.checkSystem && // avoid recursion (checkSystem already uses system DNS)
+		!s.disableFallback { // disableFallback also blocks system fallback for China safety
 		errors.LogInfo(s.ctx, "DNS query failed for ", domain, ", falling back to system resolver: ", err)
 		fallbackCtx, fallbackCancel := context.WithTimeout(s.ctx, 2*time.Second)
 		sysIps, sysErr := go_net.DefaultResolver.LookupIPAddr(fallbackCtx, domain)
