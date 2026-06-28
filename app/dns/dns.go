@@ -246,21 +246,22 @@ func (s *DNS) Start() error {
 	return nil
 }
 
-// warmupDoHConnections sends lightweight queries through DoH servers
+// warmupDoHConnections sends a lightweight HEAD request to each DoH server
 // to pre-establish HTTP/2 connections, avoiding first-query TLS latency.
 func (s *DNS) warmupDoHConnections() {
 	for _, client := range s.clients {
 		if client.server.IsDisableCache() {
 			continue
 		}
-		if _, ok := client.server.(*DoHNameServer); !ok {
+		dohServer, ok := client.server.(*DoHNameServer)
+		if !ok {
 			continue
 		}
-		// Send a root-domain query to trigger connection establishment
-		// Use context with short timeout to avoid blocking startup
-		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
-		client.QueryIP(ctx, ".", dns.IPOption{IPv4Enable: true, IPv6Enable: false})
-		cancel()
+		go func(server *DoHNameServer) {
+			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+			defer cancel()
+			server.warmupConnection(ctx)
+		}(dohServer)
 	}
 }
 

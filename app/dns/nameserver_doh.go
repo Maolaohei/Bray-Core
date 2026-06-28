@@ -256,3 +256,20 @@ func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, 
 func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option dns_feature.IPOption) ([]net.IP, uint32, error) {
 	return queryIP(ctx, s, domain, option)
 }
+
+// warmupConnection sends a lightweight HEAD request to trigger HTTP/2
+// connection establishment without DNS message overhead.
+func (s *DoHNameServer) warmupConnection(ctx context.Context) {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", s.dohURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("User-Agent", "Xray-DNS-Warmup")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		errors.LogDebug(ctx, s.Name(), " warmup connection failed: ", err)
+		return
+	}
+	resp.Body.Close()
+	errors.LogDebug(ctx, s.Name(), " warmup connection established")
+}
