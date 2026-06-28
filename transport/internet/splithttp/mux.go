@@ -1,6 +1,7 @@
 package splithttp
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"math"
@@ -245,6 +246,21 @@ type WarmupTarget struct {
 	CreatedAt time.Time
 }
 
+// warmupHeap is a min-heap of WarmupTargets ordered by Priority (lower = higher priority).
+type warmupHeap []WarmupTarget
+
+func (h warmupHeap) Len() int            { return len(h) }
+func (h warmupHeap) Less(i, j int) bool  { return h[i].Priority < h[j].Priority }
+func (h warmupHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *warmupHeap) Push(x interface{}) { *h = append(*h, x.(WarmupTarget)) }
+func (h *warmupHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
 type XmuxManager struct {
 	xmuxConfig   XmuxConfig
 	concurrency  int32 // base concurrency (from config)
@@ -266,7 +282,8 @@ type XmuxManager struct {
 	scaledOnce     bool             // whether dynamic scaling has been applied at least once
 
 	// Dynamic warmup queue
-	warmupQueue  []WarmupTarget
+	warmupQueue  warmupHeap   // min-heap by priority
+	warmupSet    map[string]struct{} // O(1) dedup
 	warmupMu     sync.Mutex
 	warmupSem    chan struct{} // semaphore for concurrent warmups
 	netHash      string        // current network hash for change detection
@@ -305,7 +322,8 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
 		lastActivity: atomic.Int64{},
-		warmupQueue:  make([]WarmupTarget, 0),
+		warmupQueue:  make(warmupHeap, 0),
+		warmupSet:    make(map[string]struct{}),
 		warmupSem:    make(chan struct{}, 2), // max 2 concurrent warmups
 	}
 
@@ -381,29 +399,19 @@ func (m *XmuxManager) EnqueueWarmup(domain string, priority int) {
 	m.warmupMu.Lock()
 	defer m.warmupMu.Unlock()
 
-	// Check if already in queue
-	for _, t := range m.warmupQueue {
-		if t.Domain == domain {
-			return // already queued
-		}
+	// O(1) dedup via set
+	if _, exists := m.warmupSet[domain]; exists {
+		return
 	}
 
-	m.warmupQueue = append(m.warmupQueue, WarmupTarget{
+	heap.Push(&m.warmupQueue, WarmupTarget{
 		Domain:    domain,
 		Priority:  priority,
 		CreatedAt: time.Now(),
 	})
+	m.warmupSet[domain] = struct{}{}
 
-	m.RecordWarmupEnqueue() // Track enqueue
-
-	// Sort by priority (lower = higher priority)
-	for i := len(m.warmupQueue) - 1; i > 0; i-- {
-		if m.warmupQueue[i].Priority < m.warmupQueue[i-1].Priority {
-			m.warmupQueue[i], m.warmupQueue[i-1] = m.warmupQueue[i-1], m.warmupQueue[i]
-		} else {
-			break
-		}
-	}
+	m.RecordWarmupEnqueue()
 }
 
 // processWarmupQueue processes pending warmup targets.
@@ -414,9 +422,9 @@ func (m *XmuxManager) processWarmupQueue() {
 		return
 	}
 
-	// Take one target from queue
-	target := m.warmupQueue[0]
-	m.warmupQueue = m.warmupQueue[1:]
+	// Pop highest-priority target from heap
+	target := heap.Pop(&m.warmupQueue).(WarmupTarget)
+	delete(m.warmupSet, target.Domain)
 	m.warmupMu.Unlock()
 
 	// Check if we can warm up (semaphore)
@@ -434,7 +442,8 @@ func (m *XmuxManager) processWarmupQueue() {
 	default:
 		// Already at max concurrent warmups, re-queue
 		m.warmupMu.Lock()
-		m.warmupQueue = append([]WarmupTarget{target}, m.warmupQueue...)
+		heap.Push(&m.warmupQueue, target)
+		m.warmupSet[target.Domain] = struct{}{}
 		m.warmupMu.Unlock()
 	}
 }
@@ -671,7 +680,13 @@ func (m *XmuxManager) healthCheckTick() {
 func (m *XmuxManager) Close() {
 	m.closeOnce.Do(func() {
 		close(m.stopCh)
-		<-m.doneCh
+
+		// Wait for background goroutines with timeout
+		select {
+		case <-m.doneCh:
+		case <-time.After(3 * time.Second):
+			errors.LogDebug(context.Background(), "XMUX: Close timeout, forcing shutdown")
+		}
 
 		// Drain pool: stop profilers and close connections
 		m.pool.mu.Lock()
