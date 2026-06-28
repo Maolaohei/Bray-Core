@@ -48,7 +48,7 @@ type DNS struct {
 	// clientCache caches sortClients results to avoid repeated allocation
 	// and domain matching on the same domain.
 	clientCache     sync.Map // map[string]*clientCacheEntry
-	clientCacheSize int64   // atomic counter for clientCache entries
+	clientCacheSize int64    // atomic counter for clientCache entries
 }
 
 type clientCacheEntry struct {

@@ -5,16 +5,16 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/geodata"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/serial"
-	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/app/dispatcher"
 	appdns "github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/policy"
 	"github.com/xtls/xray-core/app/proxyman"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
+	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/geodata"
+	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/serial"
+	"github.com/xtls/xray-core/core"
 	featuredns "github.com/xtls/xray-core/features/dns"
 	"github.com/xtls/xray-core/proxy/freedom"
 	"github.com/xtls/xray-core/testing/servers/udp"
@@ -261,9 +261,9 @@ func TestTCPLocalNameServerWithConnectionPool(t *testing.T) {
 					{
 						Address: &net.Endpoint{
 							Network: net.Network_TCP,
-						Address: &net.IPOrDomain{
-							Address: &net.IPOrDomain_Domain{Domain: "tcp+local://127.0.0.1:" + port.String()},
-						},
+							Address: &net.IPOrDomain{
+								Address: &net.IPOrDomain_Domain{Domain: "tcp+local://127.0.0.1:" + port.String()},
+							},
 						},
 					},
 				},
