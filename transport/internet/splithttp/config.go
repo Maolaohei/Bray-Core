@@ -10,6 +10,7 @@ import (
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/bytespool"
 	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/common/uuid"
@@ -334,7 +335,9 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		request.Body = io.NopCloser(&buf.MultiBufferContainer{MultiBuffer: payload})
 		request.ContentLength = int64(payload.Len())
 	} else {
-		data := make([]byte, payload.Len())
+		dataLen := payload.Len()
+		data := bytespool.Alloc(int32(dataLen))
+		data = data[:dataLen]
 		payload.Copy(data)
 		buf.ReleaseMulti(payload)
 		switch dataPlacement {
@@ -346,6 +349,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 				request.AddCookie(cookie)
 			}
 		}
+		bytespool.Free(data)
 	}
 
 	length := int(c.GetNormalizedXPaddingBytes().rand())

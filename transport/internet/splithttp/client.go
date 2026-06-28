@@ -19,6 +19,16 @@ import (
 	"github.com/xtls/xray-core/common/signal/done"
 )
 
+const maxBufferPoolCap = 64 * 1024
+
+var requestBuffPool = sync.Pool{
+	New: func() any {
+		b := new(bytes.Buffer)
+		b.Grow(1024)
+		return b
+	},
+}
+
 // interface to abstract between use of browser dialer, vs net/http
 type DialerClient interface {
 	IsClosed() bool
@@ -148,9 +158,15 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 		// safely retried. if instead req.Write is called multiple
 		// times, the body is already drained after the first
 		// request
-		requestBuff := new(bytes.Buffer)
-		requestBuff.Grow(512 + int(req.ContentLength))
+		requestBuff := requestBuffPool.Get().(*bytes.Buffer)
+		requestBuff.Reset()
 		common.Must(req.Write(requestBuff))
+		defer func() {
+			if requestBuff.Cap() <= maxBufferPoolCap {
+				requestBuff.Reset()
+				requestBuffPool.Put(requestBuff)
+			}
+		}()
 
 		var uploadConn any
 		var h1UploadConn *H1Conn

@@ -11,6 +11,7 @@
 #   ./benchmark.sh -bench=XMUX       - Run only XMUX benchmarks
 #   ./benchmark.sh -bench=Reality    - Run only Reality benchmarks
 #   ./benchmark.sh -bench=HappyEyeballs - Run only Happy Eyeballs benchmarks
+#   ./benchmark.sh -bench=PProf      - Run only PProf profiling (CPU 20s + Memory + Goroutine)
 #   ./benchmark.sh -race             - Run with race detector
 # =============================================================================
 
@@ -52,44 +53,82 @@ if [ -z "$BENCH_FILTER" ]; then
     BENCH_FILTER="."
 fi
 
+run_reality() {
 echo
 echo "============================================================================"
-echo " [1/5] Reality Handshake Benchmarks"
+echo " [1/6] Reality Handshake Benchmarks"
 echo "============================================================================"
 go test -bench=BenchmarkReality -benchmem -count=3 -timeout=300s \
     $RACE_FLAG $SHORT_FLAG ./transport/internet/... 2>&1 | tee "$OUTPUT_DIR/reality_$TIMESTAMP.log"
-echo
+}
 
+run_xmux() {
+echo
 echo "============================================================================"
-echo " [2/5] XMUX Connection Pool Benchmarks"
+echo " [2/6] XMUX Connection Pool Benchmarks"
 echo "============================================================================"
 go test -bench=BenchmarkXMUX -benchmem -count=3 -timeout=300s \
     $RACE_FLAG $SHORT_FLAG ./transport/internet/splithttp/... 2>&1 | tee "$OUTPUT_DIR/xmux_$TIMESTAMP.log"
-echo
+}
 
+run_xhttp() {
+echo
 echo "============================================================================"
-echo " [3/5] XHTTP Throughput Benchmarks"
+echo " [3/6] XHTTP Throughput Benchmarks"
 echo "============================================================================"
 go test -bench=BenchmarkXHTTP -benchmem -count=3 -timeout=600s \
     $RACE_FLAG $SHORT_FLAG ./transport/internet/splithttp/... 2>&1 | tee "$OUTPUT_DIR/xhttp_$TIMESTAMP.log"
-echo
+}
 
+run_he() {
+echo
 echo "============================================================================"
-echo " [4/5] Happy Eyeballs v3 Benchmarks"
+echo " [4/6] Happy Eyeballs v3 Benchmarks"
 echo "============================================================================"
 go test -bench='Benchmark(ScoreIPs|SortIPScores|HappyIPRecord|HappyIPDB|TryController|SortIPs|ClampRTT|HappyIPScore)' \
     -benchmem -count=3 -timeout=300s \
     $RACE_FLAG $SHORT_FLAG ./transport/internet/... 2>&1 | tee "$OUTPUT_DIR/happy_eyeballs_$TIMESTAMP.log"
-echo
+}
 
+run_warmup() {
+echo
 echo "============================================================================"
-echo " [5/5] Warmup Pipeline Benchmarks"
+echo " [5/6] Warmup Pipeline Benchmarks"
 echo "============================================================================"
 go test -bench='BenchmarkWarmup|BenchmarkIsIP|BenchmarkNetworkHash' \
     -benchmem -count=3 -timeout=300s \
     $RACE_FLAG $SHORT_FLAG ./transport/internet/... 2>&1 | tee "$OUTPUT_DIR/warmup_$TIMESTAMP.log"
-echo
+}
 
+run_pprof() {
+echo
+echo "============================================================================"
+echo " [6/6] PProf Profiling (CPU 20s + Memory + Goroutine)"
+echo "============================================================================"
+go test -v -tags pprof -run TestPProf_Profiling -timeout=60s ./testing/ 2>&1 | tee "$OUTPUT_DIR/pprof_$TIMESTAMP.log"
+echo "  Analyze: go tool pprof -top pprof_cpu_*.prof"
+}
+
+echo
+case "$BENCH_FILTER" in
+    .)
+        run_reality
+        run_xmux
+        run_xhttp
+        run_he
+        run_warmup
+        run_pprof
+        ;;
+    Reality) run_reality ;;
+    XMUX) run_xmux ;;
+    XHTTP) run_xhttp ;;
+    HappyEyeballs) run_he ;;
+    Warmup) run_warmup ;;
+    PProf) run_pprof ;;
+    *) echo "Unknown filter: $BENCH_FILTER" ;;
+esac
+
+echo
 echo "============================================================================"
 echo " Benchmark Results saved to: $OUTPUT_DIR"
 echo "============================================================================"

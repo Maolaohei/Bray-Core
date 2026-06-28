@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +29,15 @@ import (
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
 )
+
+const maxPooledBodySize = 64 * 1024
+
+var bodyPayloadPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, maxPooledBodySize)
+		return &b
+	},
+}
 
 type requestHandler struct {
 	config         *Config
@@ -336,7 +344,16 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				return
 			}
 			if request.ContentLength > 0 {
-				bodyPayload = make([]byte, request.ContentLength)
+				bodyLen := int(request.ContentLength)
+				var bodyBuf []byte
+				if bodyLen <= maxPooledBodySize {
+					bp := bodyPayloadPool.Get().(*[]byte)
+					bodyBuf = (*bp)[:bodyLen]
+					defer bodyPayloadPool.Put(bp)
+				} else {
+					bodyBuf = make([]byte, bodyLen)
+				}
+				bodyPayload = bodyBuf
 				_, readErr = io.ReadFull(request.Body, bodyPayload)
 			} else {
 				bodyPayload, readErr = buf.ReadAllToBytes(io.LimitReader(request.Body, int64(scMaxEachPostBytes)+1))
@@ -357,7 +374,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		case PlacementBody:
 			payload = bodyPayload
 		case PlacementAuto:
-			payload = slices.Concat(headerPayload, cookiePayload, bodyPayload)
+			totalLen := len(headerPayload) + len(cookiePayload) + len(bodyPayload)
+			payload = make([]byte, 0, totalLen)
+			payload = append(payload, headerPayload...)
+			payload = append(payload, cookiePayload...)
+			payload = append(payload, bodyPayload...)
 		}
 
 		if len(payload) > scMaxEachPostBytes {

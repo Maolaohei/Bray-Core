@@ -3,7 +3,6 @@ package splithttp
 import (
 	"context"
 	gotls "crypto/tls"
-	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
@@ -473,7 +472,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		sessionId = transportConfiguration.GenerateSessionID()
 	}
 
-	errors.LogInfo(ctx, fmt.Sprintf("XHTTP is dialing to %s, mode %s, HTTP version %s, host %s", dest, mode, httpVersion, requestURL.Host))
+	errors.LogInfo(ctx, "XHTTP is dialing to ", dest, ", mode ", mode, ", HTTP version ", httpVersion, ", host ", requestURL.Host)
 
 	requestURL2 := requestURL
 	httpClient2 := httpClient
@@ -523,7 +522,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		requestURL2.Path = config2.GetNormalizedPath()
 		requestURL2.RawQuery = config2.GetNormalizedQuery()
 		httpClient2, xmuxClient2 = getHTTPClient(ctx, dest2, memory2)
-		errors.LogInfo(ctx, fmt.Sprintf("XHTTP is downloading from %s, mode %s, HTTP version %s, host %s", dest2, "stream-down", httpVersion2, requestURL2.Host))
+		errors.LogInfo(ctx, "XHTTP is downloading from ", dest2, ", mode stream-down, HTTP version ", httpVersion2, ", host ", requestURL2.Host)
 	}
 
 	if xmuxClient != nil {
