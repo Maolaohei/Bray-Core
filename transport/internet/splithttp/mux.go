@@ -529,13 +529,28 @@ func (m *XmuxManager) clearStaleConnections() {
 }
 
 // getNetworkHash returns a hash of current network interfaces including IPs.
+// Uses a two-stage check: interface count first (cheap), then full comparison.
 func getNetworkHash() string {
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return ""
 	}
 
+	// Stage 1: count active non-loopback interfaces (cheap O(n) scan)
+	activeCount := 0
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback == 0 {
+			activeCount++
+		}
+	}
+
+	// Stage 2: build hash only if count is non-zero
+	if activeCount == 0 {
+		return ""
+	}
+
 	var builder strings.Builder
+	builder.Grow(activeCount * 32) // rough estimate: 20 bytes name + 12 bytes addr
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback == 0 {
 			builder.WriteString(iface.Name)
