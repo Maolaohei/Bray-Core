@@ -55,6 +55,7 @@ func TestCMaxReuseTimes(t *testing.T) {
 
 	// Let preConnectLoop finish creating the initial connection, then close.
 	xmuxManager.Close()
+	defer ResetGlobalDialer()
 
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {
@@ -78,6 +79,7 @@ func TestMaxConcurrency(t *testing.T) {
 	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
 		return &fakeRoundTripper{}
 	})
+	defer xmuxManager.Close()
 
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {

@@ -29,6 +29,7 @@ func checkGoroutineLeak(t *testing.T) func() {
 	t.Helper()
 	start := runtime.NumGoroutine()
 	return func() {
+		ResetGlobalDialer()
 		time.Sleep(100 * time.Millisecond)
 		delta := runtime.NumGoroutine() - start
 		if delta > 10 {

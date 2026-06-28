@@ -69,7 +69,7 @@ func (b Behavior) String() string {
 //   - Healthy BBR: RTT 20-100ms, loss <0.5%, low retrans
 //   - Degraded: loss >1%, retrans rising, RTT spiking
 func ClassifyBehavior(snap *Snapshot) Behavior {
-	if snap == nil || snap.Confidence < 20 {
+	if snap == nil || snap.Confidence < 10 {
 		return BehaviorUnknown
 	}
 

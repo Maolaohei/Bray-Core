@@ -3,6 +3,7 @@ package splithttp
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -14,10 +15,10 @@ func TestMetricsOutput(t *testing.T) {
 		MaxConnections: &RangeConfig{From: 1, To: 2},
 	}
 
-	callCount := 0
+	var callCount atomic.Int32
 	m := NewXmuxManager(xmuxConfig, func() XmuxConn {
-		callCount++
-		return &mockConn{id: callCount}
+		id := callCount.Add(1)
+		return &mockConn{id: int(id)}
 	})
 	defer m.Close()
 
@@ -40,11 +41,6 @@ func TestMetricsOutput(t *testing.T) {
 		}
 	}
 
-	// Simulate warmup
-	m.EnqueueWarmup("node1.example.com", 1)
-	m.EnqueueWarmup("node2.example.com", 2)
-	m.processWarmupQueue()
-
 	// Simulate TTFB recording
 	for i := 0; i < 20; i++ {
 		m.RecordTTFB(time.Duration(10+i*3) * time.Millisecond)
@@ -61,10 +57,6 @@ func TestMetricsOutput(t *testing.T) {
 	fmt.Printf("\n=== Raw Values ===\n")
 	fmt.Printf("ReuseHit: %d\n", metrics.ReuseHit)
 	fmt.Printf("NewConn: %d\n", metrics.NewConn)
-	fmt.Printf("WarmupHit: %d\n", metrics.WarmupHit)
-	fmt.Printf("WarmupEnqueue: %d\n", metrics.WarmupEnqueue)
-	fmt.Printf("WarmupSuccess: %d\n", metrics.WarmupSuccess)
-	fmt.Printf("WarmupFailed: %d\n", metrics.WarmupFailed)
 	fmt.Printf("TTFBSamples: %d\n", metrics.TTFBSamples)
 	fmt.Printf("AvgTTFB: %v\n", metrics.AvgTTFB)
 	fmt.Printf("MaxTTFB: %v\n", metrics.MaxTTFB)

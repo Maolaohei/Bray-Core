@@ -77,7 +77,7 @@ func TestClassifyBehavior_Saturated(t *testing.T) {
 
 func TestClassifyBehavior_Unknown_LowConfidence(t *testing.T) {
 	snap := &Snapshot{
-		Confidence: 10, // too low
+		Confidence: 5, // below minimum threshold (10)
 		RTT:        NewMetric(10 * time.Millisecond),
 	}
 	if got := ClassifyBehavior(snap); got != BehaviorUnknown {

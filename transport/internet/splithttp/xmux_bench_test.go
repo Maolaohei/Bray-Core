@@ -78,18 +78,6 @@ func BenchmarkXMUXPoolScheduling(b *testing.B) {
 	}
 }
 
-func BenchmarkXMUXWarmupEnqueue(b *testing.B) {
-	m := NewXmuxManager(XmuxConfig{}, func() XmuxConn {
-		return &benchFakeConn{}
-	})
-	defer m.Close()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		m.EnqueueWarmup("example.com", 1)
-	}
-}
-
 func BenchmarkXMUXMetrics(b *testing.B) {
 	m := NewXmuxManager(XmuxConfig{}, func() XmuxConn {
 		return &benchFakeConn{}

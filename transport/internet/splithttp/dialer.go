@@ -46,6 +46,7 @@ var (
 	globalDialerMap    map[dialerConf]*XmuxManager
 	globalDialerAccess sync.Mutex
 	globalDialerQuit   chan struct{}
+	globalDialerDone   chan struct{} // closed when cleanup goroutine exits
 )
 
 const (
@@ -66,7 +67,8 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 	if globalDialerMap == nil {
 		globalDialerMap = make(map[dialerConf]*XmuxManager)
 		globalDialerQuit = make(chan struct{})
-		go globalDialerCleanup()
+		globalDialerDone = make(chan struct{})
+		go globalDialerCleanup(globalDialerDone)
 	}
 
 	key := dialerConf{dest, streamSettings}
@@ -83,6 +85,33 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		xmuxManager = NewXmuxManager(xmuxConfig, func() XmuxConn {
 			return createHTTPClient(dest, streamSettings)
 		})
+
+		// Build probe URL for real TCP/TLS dial trigger.
+		tlsCfg := tls.ConfigFromStreamSettings(streamSettings)
+		realityCfg := reality.ConfigFromStreamSettings(streamSettings)
+		var probeScheme string
+		if tlsCfg != nil || realityCfg != nil {
+			probeScheme = "https"
+		} else {
+			probeScheme = "http"
+		}
+		probeHost := transportConfig.Host
+		if probeHost == "" && tlsCfg != nil {
+			probeHost = tlsCfg.ServerName
+		}
+		if probeHost == "" && realityCfg != nil {
+			probeHost = realityCfg.ServerName
+		}
+		if probeHost == "" {
+			probeHost = dest.Address.String()
+		}
+		if browser_dialer.HasBrowserDialer() && realityCfg == nil {
+			if !(probeScheme == "http" && dest.Port == 80) && !(probeScheme == "https" && dest.Port == 443) {
+				probeHost += ":" + dest.Port.String()
+			}
+		}
+		xmuxManager.probeURL = probeScheme + "://" + probeHost + transportConfig.GetNormalizedPath()
+
 		globalDialerMap[key] = xmuxManager
 	}
 
@@ -393,7 +422,8 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 
 // globalDialerCleanup periodically removes idle XmuxManagers from the global map.
 // Prevents memory and goroutine leaks when destinations change over time.
-func globalDialerCleanup() {
+// Exits when globalDialerQuit is closed, cleaning up all remaining managers.
+func globalDialerCleanup(done chan struct{}) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -408,9 +438,35 @@ func globalDialerCleanup() {
 			}
 			globalDialerAccess.Unlock()
 		case <-globalDialerQuit:
+			globalDialerAccess.Lock()
+			for _, manager := range globalDialerMap {
+				manager.Close()
+			}
+			globalDialerMap = nil
+			globalDialerAccess.Unlock()
+			close(done)
 			return
 		}
 	}
+}
+
+// ResetGlobalDialer closes the cleanup goroutine and resets the global state.
+// Blocks until the cleanup goroutine finishes closing all managers.
+// Intended for test cleanup — call after each test that uses Dial.
+func ResetGlobalDialer() {
+	globalDialerAccess.Lock()
+	if globalDialerQuit != nil {
+		close(globalDialerQuit)
+		globalDialerQuit = nil
+		done := globalDialerDone
+		globalDialerDone = nil
+		globalDialerAccess.Unlock()
+		if done != nil {
+			<-done
+		}
+		return
+	}
+	globalDialerAccess.Unlock()
 }
 
 func init() {
@@ -591,6 +647,13 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
 	}
 
+	// Decrement LeftRequests once per Dial call (all modes).
+	// stream-one/stream-down/stream-up: decremented above.
+	// packet-up: decremented here.
+	if xmuxClient != nil {
+		xmuxClient.LeftRequests.Add(-1)
+	}
+
 	maxUploadSize := scMaxEachPostBytes.rand()
 	// WithSizeLimit(0) will still allow single bytes to pass, and a lot of
 	// code relies on this behavior. Subtract 1 so that together with
@@ -653,9 +716,13 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 				lastWrite = time.Now()
 
-				if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Add(-1) <= 0 ||
+				if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Load() <= 0 ||
 					(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
+					oldClient := dynamicXmuxClient
 					dynamicHTTPClient, dynamicXmuxClient = getHTTPClient(ctx, dest, streamSettings)
+					if oldClient != nil && oldClient != dynamicXmuxClient {
+						oldClient.StopProfiling()
+					}
 				}
 
 				go func(hClient DialerClient) {

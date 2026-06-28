@@ -1,11 +1,12 @@
 package splithttp
 
 import (
-	"container/heap"
 	"context"
 	"fmt"
 	"math"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,6 +99,7 @@ func (c *XmuxClient) AddRunning() {
 			return // connection is being closed, reject
 		}
 		if c.Running.CompareAndSwap(old, old+1) {
+			c.recomputeScore()
 			return
 		}
 	}
@@ -105,6 +107,7 @@ func (c *XmuxClient) AddRunning() {
 
 func (c *XmuxClient) DoneRunning() {
 	c.Running.Add(-1)
+	c.recomputeScore()
 	c.maybeClose()
 }
 
@@ -117,6 +120,7 @@ func (c *XmuxClient) maybeClose() {
 	}
 	// Try to atomically transition from 0 to -1 (closing state)
 	if c.Running.CompareAndSwap(0, -1) {
+		c.StopProfiling()
 		common.Close(c.XmuxConn)
 	}
 }
@@ -240,33 +244,12 @@ func (c *XmuxClient) StopProfilingLocked() {
 	}
 }
 
-// WarmupTarget represents a domain that should be pre-connected.
-type WarmupTarget struct {
-	Domain    string
-	Priority  int // lower = higher priority
-	CreatedAt time.Time
-}
-
-// warmupHeap is a min-heap of WarmupTargets ordered by Priority (lower = higher priority).
-type warmupHeap []WarmupTarget
-
-func (h warmupHeap) Len() int            { return len(h) }
-func (h warmupHeap) Less(i, j int) bool  { return h[i].Priority < h[j].Priority }
-func (h warmupHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *warmupHeap) Push(x interface{}) { *h = append(*h, x.(WarmupTarget)) }
-func (h *warmupHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
-}
-
 type XmuxManager struct {
 	xmuxConfig   XmuxConfig
 	concurrency  int32 // base concurrency (from config)
 	connections  int32 // base connections (from config)
 	newConnFunc  func() XmuxConn
+	probeURL     string // URL for HEAD probe to trigger real TCP/TLS dial
 	pool         XmuxClientPool
 	stopCh       chan struct{}
 	doneCh       chan struct{} // closed when all goroutines exit
@@ -282,12 +265,9 @@ type XmuxManager struct {
 	_dynamicConc   atomic.Int32     // current effective concurrency (AIMD smoothed), lock-free read
 	scaledOnce     bool             // whether dynamic scaling has been applied at least once
 
-	// Dynamic warmup queue
-	warmupQueue  warmupHeap          // min-heap by priority
-	warmupSet    map[string]struct{} // O(1) dedup
+	// Dynamic warmup queue (reserved for future use)
 	warmupMu     sync.Mutex
-	warmupSem    chan struct{} // semaphore for concurrent warmups
-	netHash      string        // current network hash for change detection
+	netHash      string // current network hash for change detection
 	lastNetCheck time.Time
 
 	// Metrics for quantifiable validation
@@ -295,8 +275,6 @@ type XmuxManager struct {
 		// Connection reuse vs new
 		reuseHit   atomic.Int64 // XMUX pool hit (reuse connection)
 		newConn    atomic.Int64 // New connection created
-		warmupHit  atomic.Int64 // Connection came from warmup
-		warmupMiss atomic.Int64 // Warmup failed or not ready
 
 		// TTFB tracking (nanoseconds)
 		ttfbSum   atomic.Int64 // Sum of TTFB values
@@ -306,11 +284,6 @@ type XmuxManager struct {
 		// Network recovery
 		netRecoveryCount atomic.Int64 // Number of network changes detected
 		netRecoveryTime  atomic.Int64 // Last recovery time (nanoseconds)
-
-		// Warmup stats
-		warmupEnqueue atomic.Int64 // Domains enqueued
-		warmupSuccess atomic.Int64 // Warmup connections established
-		warmupFailed  atomic.Int64 // Warmup connections failed
 	}
 }
 
@@ -323,9 +296,6 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
 		lastActivity: atomic.Int64{},
-		warmupQueue:  make(warmupHeap, 0),
-		warmupSet:    make(map[string]struct{}),
-		warmupSem:    make(chan struct{}, 2), // max 2 concurrent warmups
 	}
 
 	// Start background goroutines for connection management.
@@ -369,8 +339,6 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 // preConnectLoop establishes initial pool connections using exponential backoff.
 // Once pool has connections, exits — healthCheckLoop handles ongoing maintenance.
 func (m *XmuxManager) preConnectLoop() {
-	m.processWarmupQueue()
-
 	if m.pool.Len() == 0 {
 		errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient (initial)")
 		m.newXmuxClient()
@@ -384,7 +352,6 @@ func (m *XmuxManager) preConnectLoop() {
 		case <-m.stopCh:
 			return
 		case <-time.After(backoff):
-			m.processWarmupQueue()
 			if m.pool.Len() == 0 {
 				errors.LogDebug(context.Background(), "XMUX: pre-connect retry, backoff: ", backoff)
 				m.newXmuxClient()
@@ -398,79 +365,6 @@ func (m *XmuxManager) preConnectLoop() {
 			}
 		}
 	}
-}
-
-// EnqueueWarmup adds a domain to the warmup queue.
-func (m *XmuxManager) EnqueueWarmup(domain string, priority int) {
-	m.warmupMu.Lock()
-	defer m.warmupMu.Unlock()
-
-	// O(1) dedup via set
-	if _, exists := m.warmupSet[domain]; exists {
-		return
-	}
-
-	heap.Push(&m.warmupQueue, WarmupTarget{
-		Domain:    domain,
-		Priority:  priority,
-		CreatedAt: time.Now(),
-	})
-	m.warmupSet[domain] = struct{}{}
-
-	m.RecordWarmupEnqueue()
-}
-
-// processWarmupQueue processes pending warmup targets until semaphore is full or queue is empty.
-func (m *XmuxManager) processWarmupQueue() {
-	for {
-		m.warmupMu.Lock()
-		if len(m.warmupQueue) == 0 {
-			m.warmupMu.Unlock()
-			return
-		}
-
-		// Pop highest-priority target from heap
-		target := heap.Pop(&m.warmupQueue).(WarmupTarget)
-		delete(m.warmupSet, target.Domain)
-		m.warmupMu.Unlock()
-
-		// Try to acquire semaphore
-		select {
-		case m.warmupSem <- struct{}{}:
-			go func() {
-				defer func() { <-m.warmupSem }()
-				defer func() {
-					if r := recover(); r != nil {
-						errors.LogDebug(context.Background(), "XMUX: executeWarmup recovered panic: ", r)
-					}
-				}()
-				m.executeWarmup(target)
-			}()
-		default:
-			// Semaphore full — re-queue and stop processing
-			m.warmupMu.Lock()
-			heap.Push(&m.warmupQueue, target)
-			m.warmupSet[target.Domain] = struct{}{}
-			m.warmupMu.Unlock()
-			return
-		}
-	}
-}
-
-// executeWarmup creates a pre-connection for a warmup target.
-func (m *XmuxManager) executeWarmup(target WarmupTarget) {
-	errors.LogDebug(context.Background(), "XMUX: warmup starting for ", target.Domain)
-
-	// Create connection and add to pool via newXmuxClient
-	xmuxClient := m.newXmuxClient()
-	if xmuxClient == nil || xmuxClient.XmuxConn == nil {
-		errors.LogDebug(context.Background(), "XMUX: warmup failed for ", target.Domain)
-		m.RecordWarmupFailed()
-		return
-	}
-
-	errors.LogDebug(context.Background(), "XMUX: warmup completed for ", target.Domain)
-	m.RecordWarmupSuccess()
 }
 
 // networkWatchLoop monitors network changes and triggers warmup.
@@ -941,7 +835,40 @@ func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
 	}
 	xmuxClient := m.initNewClient(conn)
 	m.pool.Append(xmuxClient)
+
+	// Probe: send HEAD request to trigger real TCP/TLS connection.
+	// Without this, http.Client/Transport is lazy — connection is only
+	// established on first Do(). The probe makes preConnect effective.
+	if m.probeURL != "" {
+		go m.probeConnection(conn)
+	}
+
 	return xmuxClient
+}
+
+// probeConnection sends a HEAD request to trigger real dial through the transport.
+func (m *XmuxManager) probeConnection(conn XmuxConn) {
+	dc, ok := conn.(DialerClient)
+	if !ok {
+		return
+	}
+	bdc, ok := dc.(*DefaultDialerClient)
+	if !ok {
+		return // BrowserDialerClient or other non-HTTP client
+	}
+	u, err := url.Parse(m.probeURL)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(context.Background(), "HEAD", u.String(), nil)
+	if err != nil {
+		return
+	}
+	resp, err := bdc.client.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }
 
 // addToPool creates a new XmuxClient from an already-established conn and appends it to the pool.
@@ -1191,16 +1118,6 @@ func (m *XmuxManager) RecordNewConn() {
 	m.metrics.newConn.Add(1)
 }
 
-// RecordWarmupHit records a connection that came from warmup.
-func (m *XmuxManager) RecordWarmupHit() {
-	m.metrics.warmupHit.Add(1)
-}
-
-// RecordWarmupMiss records a warmup miss.
-func (m *XmuxManager) RecordWarmupMiss() {
-	m.metrics.warmupMiss.Add(1)
-}
-
 // RecordTTFB records a Time-To-First-Byte measurement.
 func (m *XmuxManager) RecordTTFB(ttfb time.Duration) {
 	ns := int64(ttfb)
@@ -1219,26 +1136,10 @@ func (m *XmuxManager) RecordTTFB(ttfb time.Duration) {
 	}
 }
 
-// RecordWarmupEnqueue records a domain enqueued for warmup.
-func (m *XmuxManager) RecordWarmupEnqueue() {
-	m.metrics.warmupEnqueue.Add(1)
-}
-
-// RecordWarmupSuccess records a successful warmup connection.
-func (m *XmuxManager) RecordWarmupSuccess() {
-	m.metrics.warmupSuccess.Add(1)
-}
-
-// RecordWarmupFailed records a failed warmup connection.
-func (m *XmuxManager) RecordWarmupFailed() {
-	m.metrics.warmupFailed.Add(1)
-}
-
 // GetMetrics returns current metrics snapshot.
 func (m *XmuxManager) GetMetrics() XmuxMetrics {
 	reuseHit := m.metrics.reuseHit.Load()
 	newConn := m.metrics.newConn.Load()
-	warmupHit := m.metrics.warmupHit.Load()
 
 	totalConns := reuseHit + newConn
 	reuseRate := float64(0)
@@ -1253,35 +1154,25 @@ func (m *XmuxManager) GetMetrics() XmuxMetrics {
 	}
 
 	return XmuxMetrics{
-		ReuseHit:      reuseHit,
-		NewConn:       newConn,
-		WarmupHit:     warmupHit,
-		WarmupMiss:    m.metrics.warmupMiss.Load(),
-		ReuseRate:     reuseRate,
-		AvgTTFB:       avgTTFB,
-		MaxTTFB:       time.Duration(m.metrics.ttfbMax.Load()),
-		TTFBSamples:   ttfbCount,
-		NetRecovery:   m.metrics.netRecoveryCount.Load(),
-		WarmupEnqueue: m.metrics.warmupEnqueue.Load(),
-		WarmupSuccess: m.metrics.warmupSuccess.Load(),
-		WarmupFailed:  m.metrics.warmupFailed.Load(),
+		ReuseHit:    reuseHit,
+		NewConn:     newConn,
+		ReuseRate:   reuseRate,
+		AvgTTFB:     avgTTFB,
+		MaxTTFB:     time.Duration(m.metrics.ttfbMax.Load()),
+		TTFBSamples: ttfbCount,
+		NetRecovery: m.metrics.netRecoveryCount.Load(),
 	}
 }
 
 // XmuxMetrics holds quantifiable metrics for validation.
 type XmuxMetrics struct {
-	ReuseHit      int64         // Connection reuse count
-	NewConn       int64         // New connection count
-	WarmupHit     int64         // Connections from warmup
-	WarmupMiss    int64         // Warmup failures
-	ReuseRate     float64       // Reuse percentage (0-100)
-	AvgTTFB       time.Duration // Average TTFB
-	MaxTTFB       time.Duration // Max TTFB observed
-	TTFBSamples   int64         // Number of TTFB samples
-	NetRecovery   int64         // Network change events
-	WarmupEnqueue int64         // Domains enqueued
-	WarmupSuccess int64         // Successful warmups
-	WarmupFailed  int64         // Failed warmups
+	ReuseHit    int64         // Connection reuse count
+	NewConn     int64         // New connection count
+	ReuseRate   float64       // Reuse percentage (0-100)
+	AvgTTFB     time.Duration // Average TTFB
+	MaxTTFB     time.Duration // Max TTFB observed
+	TTFBSamples int64         // Number of TTFB samples
+	NetRecovery int64         // Number of network change events
 }
 
 // String returns a human-readable metrics summary.
@@ -1289,15 +1180,11 @@ func (m XmuxMetrics) String() string {
 	return fmt.Sprintf(
 		"XMUX Metrics:\n"+
 			"  Reuse Rate: %.1f%% (%d/%d)\n"+
-			"  Warmup Hit: %d, Miss: %d\n"+
 			"  Avg TTFB: %v, Max TTFB: %v (samples: %d)\n"+
-			"  Network Recoveries: %d\n"+
-			"  Warmup: %d enqueued, %d success, %d failed",
+			"  Network Recoveries: %d",
 		m.ReuseRate, m.ReuseHit, m.ReuseHit+m.NewConn,
-		m.WarmupHit, m.WarmupMiss,
 		m.AvgTTFB, m.MaxTTFB, m.TTFBSamples,
 		m.NetRecovery,
-		m.WarmupEnqueue, m.WarmupSuccess, m.WarmupFailed,
 	)
 }
 
