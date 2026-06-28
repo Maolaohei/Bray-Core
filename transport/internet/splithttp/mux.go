@@ -365,23 +365,18 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 	return m
 }
 
-// preConnectLoop maintains at least 1 warm connection in the pool.
-// Phase 1: Exponential backoff (0→600→1200→2400→4800ms) until pool is warm
-// Phase 2: Regular keepalive (8s interval) once pool has connections
+// preConnectLoop establishes initial pool connections using exponential backoff.
+// Once pool has connections, exits — healthCheckLoop handles ongoing maintenance.
 func (m *XmuxManager) preConnectLoop() {
-	// Process warmup queue first
 	m.processWarmupQueue()
 
-	// Initial attempt (0ms delay)
 	if m.pool.Len() == 0 {
 		errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient (initial)")
 		m.newXmuxClient()
 	}
 
-	// Phase 1: Exponential backoff until pool is warm
 	backoff := 600 * time.Millisecond
 	maxBackoff := 4800 * time.Millisecond
-	keepaliveInterval := 8 * time.Second
 
 	for {
 		select {
@@ -389,7 +384,6 @@ func (m *XmuxManager) preConnectLoop() {
 			return
 		case <-time.After(backoff):
 			m.processWarmupQueue()
-
 			if m.pool.Len() == 0 {
 				errors.LogDebug(context.Background(), "XMUX: pre-connect retry, backoff: ", backoff)
 				m.newXmuxClient()
@@ -398,30 +392,7 @@ func (m *XmuxManager) preConnectLoop() {
 					backoff = maxBackoff
 				}
 			} else {
-				// Pool is warm, switch to keepalive mode
-				errors.LogDebug(context.Background(), "XMUX: pool warm, switching to keepalive (", keepaliveInterval, ")")
-				m.keepaliveLoop(keepaliveInterval)
-				return
-			}
-		}
-	}
-}
-
-// keepaliveLoop periodically checks pool health after initial warmup.
-func (m *XmuxManager) keepaliveLoop(interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.stopCh:
-			return
-		case <-ticker.C:
-			m.processWarmupQueue()
-			if m.pool.Len() == 0 {
-				// Pool drained, switch back to backoff mode
-				errors.LogDebug(context.Background(), "XMUX: pool empty, switching to backoff mode")
-				m.preConnectLoop()
+				errors.LogDebug(context.Background(), "XMUX: pool warm, preConnectLoop done")
 				return
 			}
 		}
