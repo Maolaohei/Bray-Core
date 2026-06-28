@@ -19,6 +19,49 @@ type XmuxConn interface {
 	IsClosed() bool
 }
 
+// XmuxClientPool is a read-write separated connection pool.
+// Reads (Len, Snapshot) use RLock for concurrent access.
+// Writes (Remove, Append, CloseAll) use exclusive Lock.
+type XmuxClientPool struct {
+	mu      sync.RWMutex
+	clients []*XmuxClient
+}
+
+// Len returns the pool size under a read lock.
+func (p *XmuxClientPool) Len() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.clients)
+}
+
+// Snapshot returns a shallow copy of the client slice for read-only iteration.
+// Callers must NOT modify the returned slice.
+func (p *XmuxClientPool) Snapshot() []*XmuxClient {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	snap := make([]*XmuxClient, len(p.clients))
+	copy(snap, p.clients)
+	return snap
+}
+
+// RemoveAt removes the client at index i. Caller must hold p.mu (write lock).
+func (p *XmuxClientPool) RemoveAt(i int) {
+	p.clients = append(p.clients[:i], p.clients[i+1:]...)
+}
+
+// Append adds a client. Caller must hold p.mu (write lock).
+func (p *XmuxClientPool) Append(c *XmuxClient) {
+	p.clients = append(p.clients, c)
+}
+
+// CloseAll stops profilers and nils the slice. Caller must hold p.mu (write lock).
+func (p *XmuxClientPool) CloseAll() {
+	for _, c := range p.clients {
+		c.StopProfiling()
+	}
+	p.clients = nil
+}
+
 type XmuxClient struct {
 	XmuxConn     XmuxConn
 	Running      atomic.Int32
@@ -207,12 +250,11 @@ type XmuxManager struct {
 	concurrency  int32 // base concurrency (from config)
 	connections  int32 // base connections (from config)
 	newConnFunc  func() XmuxConn
-	xmuxClients  []*XmuxClient
-	clientsMu    sync.Mutex // protects xmuxClients slice
+	pool         XmuxClientPool
 	stopCh       chan struct{}
-	doneCh       chan struct{} // closed when all goroutines exit
-	lastActivity time.Time     // last time a client was obtained; used for idle cleanup
-	closeOnce    sync.Once     // ensures Close() is idempotent
+	doneCh       chan struct{}  // closed when all goroutines exit
+	lastActivity atomic.Int64   // nanosecond timestamp of last client obtain; lock-free
+	closeOnce    sync.Once      // ensures Close() is idempotent
 
 	// V2.1: Dynamic Connection Scaling
 	poolBehavior   quality.Behavior // dominant behavior across all clients
@@ -260,10 +302,9 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		concurrency:  xmuxConfig.GetNormalizedMaxConcurrency().rand(),
 		connections:  xmuxConfig.GetNormalizedMaxConnections().rand(),
 		newConnFunc:  newConnFunc,
-		xmuxClients:  make([]*XmuxClient, 0),
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
-		lastActivity: time.Now(),
+		lastActivity: atomic.Int64{},
 		warmupQueue:  make([]WarmupTarget, 0),
 		warmupSem:    make(chan struct{}, 2), // max 2 concurrent warmups
 	}
@@ -310,10 +351,7 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 func (m *XmuxManager) preConnectLoop() {
 	// Execute immediately on startup so the pool is warm before the first request
 	m.processWarmupQueue()
-	m.clientsMu.Lock()
-	empty := len(m.xmuxClients) == 0
-	m.clientsMu.Unlock()
-	if empty {
+	if m.pool.Len() == 0 {
 		errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient (initial)")
 		m.newXmuxClient()
 	}
@@ -330,10 +368,7 @@ func (m *XmuxManager) preConnectLoop() {
 			m.processWarmupQueue()
 
 			// Then ensure pool has connections
-			m.clientsMu.Lock()
-			empty = len(m.xmuxClients) == 0
-			m.clientsMu.Unlock()
-			if empty {
+			if m.pool.Len() == 0 {
 				errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient because pool is empty")
 				m.newXmuxClient()
 			}
@@ -474,13 +509,11 @@ func (m *XmuxManager) checkNetworkChange() {
 	}
 }
 
-// clearStaleConnections removes connections that may be invalid after network change.
+// clearStaleConnections marks all connections as potentially stale after network change.
 func (m *XmuxManager) clearStaleConnections() {
-	m.clientsMu.Lock()
-	defer m.clientsMu.Unlock()
-	// Mark all connections as potentially stale
-	// They will be removed on next health check if truly broken
-	for _, client := range m.xmuxClients {
+	m.pool.mu.Lock()
+	defer m.pool.mu.Unlock()
+	for _, client := range m.pool.clients {
 		client.lastRTT.Store(int64(maxRTTBeforeRemove+1) * int64(time.Millisecond)) // Set above threshold to trigger removal
 		client.consecDrops.Store(0)                                                 // Reset quality drops — failure was network, not link quality
 	}
@@ -536,62 +569,53 @@ func (m *XmuxManager) healthCheckLoop() {
 
 // healthCheckTick performs one tick of health checking.
 func (m *XmuxManager) healthCheckTick() {
-	// Phase 1: Under lock — collect stale connections and compute migration need
-	m.clientsMu.Lock()
+	// Phase 1: Under write lock — prune stale connections, compute migration need
+	m.pool.mu.Lock()
 
 	now := time.Now()
-	for i := 0; i < len(m.xmuxClients); {
-		xmuxClient := m.xmuxClients[i]
+	for i := 0; i < len(m.pool.clients); {
+		c := m.pool.clients[i]
 
-		// Always remove closed connections immediately
-		if xmuxClient.XmuxConn.IsClosed() {
+		if c.XmuxConn.IsClosed() {
 			errors.LogDebug(context.Background(), "XMUX: health-check removing closed xmuxClient")
-			xmuxClient.StopProfiling()
-			m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
+			c.StopProfiling()
+			m.pool.RemoveAt(i)
 			continue
 		}
-
-		// Skip if connection is actively being used
-		if xmuxClient.Running.Load() > 0 {
+		if c.Running.Load() > 0 {
 			i++
 			continue
 		}
-
-		// Cold start protection: don't remove connections younger than 10s
-		if xmuxClient.createdAt.After(now.Add(-coldStartProtectionMs * time.Millisecond)) {
+		if c.createdAt.After(now.Add(-coldStartProtectionMs * time.Millisecond)) {
 			i++
 			continue
 		}
-
-		// V2.0: Quality-based drain — consecutive quality drops
-		if xmuxClient.ShouldDrain() && xmuxClient.confidence.Load() >= 30 {
-			errors.LogDebug(context.Background(), "XMUX: health-check draining quality-degraded xmuxClient, consecutiveDrops=", xmuxClient.consecDrops.Load())
-			xmuxClient.StopProfiling()
-			m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
+		if c.ShouldDrain() && c.confidence.Load() >= 30 {
+			errors.LogDebug(context.Background(), "XMUX: health-check draining quality-degraded xmuxClient, consecutiveDrops=", c.consecDrops.Load())
+			c.StopProfiling()
+			m.pool.RemoveAt(i)
 			continue
 		}
-
-		// RTT-based removal: only remove if RTT is extremely high
-		rttMs := xmuxClient.GetRTT().Milliseconds()
-		if rttMs >= maxRTTBeforeRemove && xmuxClient.GetRTT() > 0 {
+		rttMs := c.GetRTT().Milliseconds()
+		if rttMs >= maxRTTBeforeRemove && c.GetRTT() > 0 {
 			errors.LogDebug(context.Background(), "XMUX: health-check removing high-RTT xmuxClient, rtt=", rttMs, "ms")
-			xmuxClient.StopProfiling()
-			m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
+			c.StopProfiling()
+			m.pool.RemoveAt(i)
 			continue
 		}
-
 		i++
 	}
 
 	effectiveConns := m.effectiveConnections()
+	poolLen := len(m.pool.clients) // safe: caller holds write lock
 	needNew := 0
 	if effectiveConns > 0 {
-		needNew = int(effectiveConns) - len(m.xmuxClients)
-	} else if len(m.xmuxClients) == 0 {
+		needNew = int(effectiveConns) - poolLen
+	} else if poolLen == 0 {
 		needNew = 1
 	}
 
-	m.clientsMu.Unlock()
+	m.pool.mu.Unlock()
 
 	// Phase 2: Without lock — network I/O (dialing)
 	for i := 0; i < needNew; i++ {
@@ -603,17 +627,14 @@ func (m *XmuxManager) healthCheckTick() {
 	}
 
 	// V2.1: Update pool behavior from client observations
-	// Use voting mechanism: count behaviors from all active clients
-	// Non-linear punishment: bad behavior (Lossy/Saturated) needs >40% to trigger degradation
+	snap := m.pool.Snapshot()
 	var dominantBehavior quality.Behavior
-	m.clientsMu.Lock()
-	if len(m.xmuxClients) > 0 {
-		// Use map to safely handle any behavior value
+	if len(snap) > 0 {
 		behaviorCounts := make(map[quality.Behavior]int)
 		totalKnown := 0
-		badCount := 0 // Lossy or Saturated
+		badCount := 0
 
-		for _, c := range m.xmuxClients {
+		for _, c := range snap {
 			if b := c.GetBehavior(); b != quality.BehaviorUnknown {
 				behaviorCounts[b]++
 				totalKnown++
@@ -624,7 +645,6 @@ func (m *XmuxManager) healthCheckTick() {
 		}
 
 		if totalKnown > 0 {
-			// Find most common behavior (voting)
 			maxCount := 0
 			for b, count := range behaviorCounts {
 				if count > maxCount {
@@ -632,12 +652,8 @@ func (m *XmuxManager) healthCheckTick() {
 					dominantBehavior = b
 				}
 			}
-
-			// Non-linear punishment: only degrade if bad connections exceed 40%
-			// Bad connections harm multiplexing more than good connections help
 			badRatio := float64(badCount) / float64(totalKnown)
 			if badRatio > 0.4 && dominantBehavior != quality.BehaviorLossy && dominantBehavior != quality.BehaviorSaturated {
-				// Override to worst observed bad behavior
 				if behaviorCounts[quality.BehaviorSaturated] > 0 {
 					dominantBehavior = quality.BehaviorSaturated
 				} else {
@@ -658,12 +674,9 @@ func (m *XmuxManager) Close() {
 		<-m.doneCh
 
 		// Drain pool: stop profilers and close connections
-		m.clientsMu.Lock()
-		for _, client := range m.xmuxClients {
-			client.StopProfiling()
-		}
-		m.xmuxClients = nil
-		m.clientsMu.Unlock()
+		m.pool.mu.Lock()
+		m.pool.CloseAll()
+		m.pool.mu.Unlock()
 	})
 }
 
@@ -842,13 +855,13 @@ func (m *XmuxManager) effectiveConcurrency() int32 {
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
-	m.clientsMu.Lock()
-	defer m.clientsMu.Unlock()
+	m.pool.mu.Lock()
+	defer m.pool.mu.Unlock()
 	return m.newXmuxClientLocked()
 }
 
 // newXmuxClientLocked creates a new client and appends to the pool.
-// Caller must hold m.clientsMu. Also calls RecordNewConn.
+// Caller must hold m.pool.mu.
 func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
 	m.RecordNewConn()
 
@@ -856,102 +869,103 @@ func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
 	if conn == nil {
 		return nil
 	}
-	xmuxClient := &XmuxClient{
-		XmuxConn:  conn,
-		createdAt: time.Now(),
-		learner:   quality.NewNetworkLearner(),
-	}
-	xmuxClient.leftUsage.Store(-1)
-	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
-		xmuxClient.leftUsage.Store(x - 1)
-	}
-	xmuxClient.LeftRequests.Store(math.MaxInt32)
-	if x := m.xmuxConfig.GetNormalizedHMaxRequestTimes().rand(); x > 0 {
-		xmuxClient.LeftRequests.Store(x)
-	}
-	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs().rand(); x > 0 {
-		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
-	}
-	xmuxClient.recomputeScore()
-	m.xmuxClients = append(m.xmuxClients, xmuxClient)
+	xmuxClient := m.initNewClient(conn)
+	m.pool.Append(xmuxClient)
 	return xmuxClient
 }
 
 // addToPool creates a new XmuxClient from an already-established conn and appends it to the pool.
-// This is used when the connection was created outside clientsMu (e.g., during lock-released dialing).
 func (m *XmuxManager) addToPool(conn XmuxConn) {
-	m.clientsMu.Lock()
-	defer m.clientsMu.Unlock()
+	m.pool.mu.Lock()
+	defer m.pool.mu.Unlock()
 	m.addToPoolLocked(conn)
 }
 
-// addToPoolLocked creates a new XmuxClient and appends it to the pool.
-// Caller must hold m.clientsMu.
+// addToPoolLocked creates a new XmuxClient and appends to the pool.
+// Caller must hold m.pool.mu.
 func (m *XmuxManager) addToPoolLocked(conn XmuxConn) {
 	m.RecordNewConn()
+	m.pool.Append(m.initNewClient(conn))
+}
 
-	xmuxClient := &XmuxClient{
+// initNewClient initializes a new XmuxClient with config-derived limits.
+func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
+	c := &XmuxClient{
 		XmuxConn:  conn,
 		createdAt: time.Now(),
 		learner:   quality.NewNetworkLearner(),
 	}
-	xmuxClient.leftUsage.Store(-1)
+	c.leftUsage.Store(-1)
 	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
-		xmuxClient.leftUsage.Store(x - 1)
+		c.leftUsage.Store(x - 1)
 	}
-	xmuxClient.LeftRequests.Store(math.MaxInt32)
+	c.LeftRequests.Store(math.MaxInt32)
 	if x := m.xmuxConfig.GetNormalizedHMaxRequestTimes().rand(); x > 0 {
-		xmuxClient.LeftRequests.Store(x)
+		c.LeftRequests.Store(x)
 	}
 	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs().rand(); x > 0 {
-		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
+		c.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
 	}
-	xmuxClient.recomputeScore()
-	m.xmuxClients = append(m.xmuxClients, xmuxClient)
+	c.recomputeScore()
+	return c
 }
 
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
-	m.clientsMu.Lock()
+	// Phase 1: Read lock — prune stale clients and find best candidate
+	m.pool.mu.RLock()
 
-	for i := 0; i < len(m.xmuxClients); {
-		xmuxClient := m.xmuxClients[i]
-		if xmuxClient.XmuxConn.IsClosed() ||
-			xmuxClient.leftUsage.Load() == 0 ||
-			xmuxClient.LeftRequests.Load() <= 0 ||
-			(xmuxClient.UnreusableAt != time.Time{} && time.Now().After(xmuxClient.UnreusableAt)) {
-			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
-				", Running = ", xmuxClient.Running.Load(),
-				", leftUsage = ", xmuxClient.leftUsage.Load(),
-				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
-				", UnreusableAt = ", xmuxClient.UnreusableAt)
-			xmuxClient.NotUsed.Store(true)
-			xmuxClient.maybeClose()
-			m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
-		} else {
-			i++
+	for i := 0; i < len(m.pool.clients); {
+		c := m.pool.clients[i]
+		if c.XmuxConn.IsClosed() ||
+			c.leftUsage.Load() == 0 ||
+			c.LeftRequests.Load() <= 0 ||
+			(c.UnreusableAt != time.Time{} && time.Now().After(c.UnreusableAt)) {
+			// Must upgrade to write lock for removal
+			m.pool.mu.RUnlock()
+			m.pool.mu.Lock()
+			// Re-check after acquiring write lock (another goroutine may have removed it)
+			if i < len(m.pool.clients) && m.pool.clients[i] == c {
+				errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", c.XmuxConn.IsClosed(),
+					", Running = ", c.Running.Load(),
+					", leftUsage = ", c.leftUsage.Load(),
+					", LeftRequests = ", c.LeftRequests.Load(),
+					", UnreusableAt = ", c.UnreusableAt)
+				c.NotUsed.Store(true)
+				c.maybeClose()
+				m.pool.RemoveAt(i)
+			}
+			m.pool.mu.Unlock()
+			m.pool.mu.RLock()
+			// Don't increment i — re-check this index (new element shifted in)
+			continue
 		}
+		i++
 	}
 
-	needNew := false
 	effectiveConns := m.effectiveConnections()
-	if len(m.xmuxClients) == 0 {
+	poolLen := len(m.pool.clients)
+	m.pool.mu.RUnlock()
+
+	needNew := false
+	if poolLen == 0 {
 		needNew = true
-	} else if effectiveConns > 0 && len(m.xmuxClients) < int(effectiveConns) {
+	} else if effectiveConns > 0 && poolLen < int(effectiveConns) {
 		needNew = true
 	}
 
 	if !needNew {
 		effectiveConc := m.effectiveConcurrency()
 
-		// Single-pass: filter by concurrency limit and find best score
+		// Snapshot-based selection: read-only iteration under RLock
+		snap := m.pool.Snapshot()
 		var best *XmuxClient
 		bestScore := int64(math.MaxInt64)
-		for _, xmuxClient := range m.xmuxClients {
-			if effectiveConc > 0 && xmuxClient.Running.Load() >= effectiveConc {
+		for _, c := range snap {
+			if effectiveConc > 0 && c.Running.Load() >= effectiveConc {
 				continue
 			}
-			if s := xmuxClient.cachedScore.Load(); s < bestScore {
-				best = xmuxClient
+			if s := c.cachedScore.Load(); s < bestScore {
+				best = c
 				bestScore = s
 			}
 		}
@@ -960,18 +974,17 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 			needNew = true
 		} else {
 			// CAS loop to atomically decrement leftUsage
-			// leftUsage: -1 = unlimited, 0 = exhausted, >0 = decrements
 			acquired := false
 			for {
 				old := best.leftUsage.Load()
 				if old == 0 {
-					// leftUsage explicitly exhausted (was >0, now 0)
 					best.NotUsed.Store(true)
 					best.maybeClose()
-					// Find next best from remaining pool
+					// Re-snapshot and find next best
+					snap = m.pool.Snapshot()
 					best = nil
 					bestScore = int64(math.MaxInt64)
-					for _, c := range m.xmuxClients {
+					for _, c := range snap {
 						if c.NotUsed.Load() {
 							continue
 						}
@@ -987,10 +1000,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 						needNew = true
 						break
 					}
-					continue // retry CAS on new best
+					continue
 				}
 				if old < 0 {
-					// unlimited reuse (-1), just return without decrementing
 					acquired = true
 					break
 				}
@@ -1001,32 +1013,27 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 			}
 
 			if acquired {
-				m.lastActivity = time.Now()
-				m.clientsMu.Unlock()
+				m.lastActivity.Store(time.Now().UnixNano())
 				m.RecordReuseHit()
 				return best
 			}
-			// needNew is true, fall through to create new connection
 		}
 	}
 
-	// Release lock before network dial to avoid blocking other callers
-	m.clientsMu.Unlock()
+	// Phase 2: Create new connection (no lock held)
 	errors.LogDebug(ctx, "XMUX: creating xmuxClient (pool empty or under limit)")
 
 	conn := m.newConnFunc()
 	if conn != nil {
 		m.addToPool(conn)
-		m.clientsMu.Lock()
-		m.lastActivity = time.Now()
-		// Return the last (newest) client in the pool.
-		// Do NOT decrement leftUsage — the caller hasn't "used" the connection yet.
-		if len(m.xmuxClients) > 0 {
-			c := m.xmuxClients[len(m.xmuxClients)-1]
-			m.clientsMu.Unlock()
+		m.pool.mu.RLock()
+		m.lastActivity.Store(time.Now().UnixNano())
+		if len(m.pool.clients) > 0 {
+			c := m.pool.clients[len(m.pool.clients)-1]
+			m.pool.mu.RUnlock()
 			return c
 		}
-		m.clientsMu.Unlock()
+		m.pool.mu.RUnlock()
 	}
 	return nil
 }
@@ -1233,7 +1240,9 @@ func (m *XmuxManager) LogMetrics() {
 // IdleFor returns how long since this manager last served a client request.
 // Used by the global cleanup goroutine to detect idle managers.
 func (m *XmuxManager) IdleFor() time.Duration {
-	m.clientsMu.Lock()
-	defer m.clientsMu.Unlock()
-	return time.Since(m.lastActivity)
+	ts := m.lastActivity.Load()
+	if ts == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, ts))
 }

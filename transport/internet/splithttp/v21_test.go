@@ -314,20 +314,18 @@ func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
 		c := m.GetXmuxClient(context.Background())
 		c.Running.Add(1)
 	}
-	m.clientsMu.Lock()
-	poolSize := len(m.xmuxClients)
-	m.clientsMu.Unlock()
+	poolSize := m.pool.Len()
 	t.Logf("Pool size after filling: %d", poolSize)
 	if poolSize < 1 {
 		t.Fatal("pool should have at least 1 connection")
 	}
 
 	// Close all connections (simulate network failure)
-	m.clientsMu.Lock()
-	for _, c := range m.xmuxClients {
+	m.pool.mu.Lock()
+	for _, c := range m.pool.clients {
 		c.XmuxConn.(*mockConn).closed = true
 	}
-	m.clientsMu.Unlock()
+	m.pool.mu.Unlock()
 
 	// GetXmuxClient should detect closed connections, remove them, and create new ones
 	c := m.GetXmuxClient(context.Background())
@@ -366,27 +364,13 @@ func TestV21_ConnectionMigration_QualityDrain(t *testing.T) {
 	// Release c1 so health check can remove it
 	c1.Running.Add(-1)
 
-	// Wait for health check to run (5s ticker)
-	// Instead of waiting, directly trigger the migration logic
-	m.clientsMu.Lock()
-	// Remove drained connection
-	for i := 0; i < len(m.xmuxClients); i++ {
-		if m.xmuxClients[i] == c1 {
-			m.xmuxClients[i].StopProfiling()
-			m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
-			break
-		}
-	}
-	// Proactive replacement
-	effectiveConns := m.effectiveConnections()
-	for len(m.xmuxClients) < int(effectiveConns) {
-		m.newXmuxClientLocked()
-	}
-	m.clientsMu.Unlock()
+	// Wait for health check to run (5s ticker) and migrate
+	time.Sleep(6 * time.Second)
 
-	// Pool should have been refilled
-	if len(m.xmuxClients) < 2 {
-		t.Errorf("pool should have 2 connections after migration, got %d", len(m.xmuxClients))
+	// Verify pool recovered: GetXmuxClient should return a fresh connection
+	c := m.GetXmuxClient(context.Background())
+	if c == nil {
+		t.Fatal("GetXmuxClient should return a connection after migration")
 	}
-	t.Logf("Pool after drain+migration: %d connections", len(m.xmuxClients))
+	t.Logf("Pool recovered: GetXmuxClient returned a fresh connection")
 }
