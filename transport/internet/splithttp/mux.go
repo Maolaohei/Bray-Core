@@ -366,8 +366,8 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 }
 
 // preConnectLoop maintains at least 1 warm connection in the pool.
-// Uses exponential backoff: 0ms → 600ms → 1200ms → 2400ms → 4800ms
-// Covers both client (proxy handshake delay) and server (direct) scenarios.
+// Phase 1: Exponential backoff (0→600→1200→2400→4800ms) until pool is warm
+// Phase 2: Regular keepalive (8s interval) once pool has connections
 func (m *XmuxManager) preConnectLoop() {
 	// Process warmup queue first
 	m.processWarmupQueue()
@@ -378,31 +378,51 @@ func (m *XmuxManager) preConnectLoop() {
 		m.newXmuxClient()
 	}
 
-	// Exponential backoff loop
+	// Phase 1: Exponential backoff until pool is warm
 	backoff := 600 * time.Millisecond
 	maxBackoff := 4800 * time.Millisecond
+	keepaliveInterval := 8 * time.Second
 
 	for {
 		select {
 		case <-m.stopCh:
 			return
 		case <-time.After(backoff):
-			// Process warmup queue first
 			m.processWarmupQueue()
 
-			// Then ensure pool has connections
 			if m.pool.Len() == 0 {
 				errors.LogDebug(context.Background(), "XMUX: pre-connect retry, backoff: ", backoff)
 				m.newXmuxClient()
-
-				// Increase backoff on failure
 				backoff *= 2
 				if backoff > maxBackoff {
 					backoff = maxBackoff
 				}
 			} else {
-				// Pool has connections, reset backoff
-				backoff = 600 * time.Millisecond
+				// Pool is warm, switch to keepalive mode
+				errors.LogDebug(context.Background(), "XMUX: pool warm, switching to keepalive (", keepaliveInterval, ")")
+				m.keepaliveLoop(keepaliveInterval)
+				return
+			}
+		}
+	}
+}
+
+// keepaliveLoop periodically checks pool health after initial warmup.
+func (m *XmuxManager) keepaliveLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			m.processWarmupQueue()
+			if m.pool.Len() == 0 {
+				// Pool drained, switch back to backoff mode
+				errors.LogDebug(context.Background(), "XMUX: pool empty, switching to backoff mode")
+				m.preConnectLoop()
+				return
 			}
 		}
 	}
