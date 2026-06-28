@@ -5,6 +5,8 @@ import (
 	"context"
 	go_errors "errors"
 	"fmt"
+	"io"
+	"net/http"
 	go_net "net"
 	"sort"
 	"strings"
@@ -237,7 +239,7 @@ func (s *DNS) Start() error {
 	}
 	s.Unlock()
 
-	// Warmup DoH connections in background to avoid cold-start TLS handshake delay
+	// Warmup DoH connections in background
 	go s.warmupDoHConnections()
 
 	if len(domains) > 0 {
@@ -246,9 +248,13 @@ func (s *DNS) Start() error {
 	return nil
 }
 
-// warmupDoHConnections sends a lightweight HEAD request to each DoH server
-// to pre-establish HTTP/2 connections, avoiding first-query TLS latency.
+// warmupDoHConnections pre-establishes HTTP/2 connections to DoH servers.
+// Uses HEAD requests with exponential backoff to avoid DNS overhead.
 func (s *DNS) warmupDoHConnections() {
+	// Wait 1s for proxy handshake (REALITY/TLS ~380ms) to complete
+	time.Sleep(1 * time.Second)
+
+	var wg sync.WaitGroup
 	for _, client := range s.clients {
 		if client.server.IsDisableCache() {
 			continue
@@ -257,12 +263,42 @@ func (s *DNS) warmupDoHConnections() {
 		if !ok {
 			continue
 		}
+		wg.Add(1)
 		go func(server *DoHNameServer) {
-			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
-			defer cancel()
-			server.warmupConnection(ctx)
+			defer wg.Done()
+			warmupSingleDoH(s.ctx, server)
 		}(dohServer)
 	}
+	wg.Wait()
+}
+
+func warmupSingleDoH(ctx context.Context, server *DoHNameServer) {
+	maxRetries := 3
+	baseDelay := 500 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		req, err := http.NewRequestWithContext(reqCtx, "HEAD", server.dohURL, nil)
+		if err != nil {
+			cancel()
+			return
+		}
+		resp, err := server.httpClient.Do(req)
+		cancel()
+
+		if err == nil {
+			if resp.Body != nil {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+			errors.LogDebug(ctx, server.Name(), " warmup OK, status: ", resp.StatusCode)
+			return
+		}
+
+		errors.LogDebug(ctx, server.Name(), " warmup attempt ", i+1, " failed: ", err)
+		time.Sleep(baseDelay * time.Duration(1<<uint(i)))
+	}
+	errors.LogDebug(ctx, server.Name(), " warmup failed after ", maxRetries, " retries")
 }
 
 // SetWarmupDomains configures domains to be pre-resolved at startup
@@ -452,17 +488,13 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 	}
 
 	// Fallback to system DNS when all configured servers fail and return no IPs.
-	// ErrEmptyResponse triggers fallback when both IPv4 and IPv6 are enabled
-	// (unexpected empty — likely caused by expectedIP filtering).
-	// When only one IP version is enabled, ErrEmptyResponse is expected (e.g. AAAA-only
-	// domain with IPv4-only query) and does NOT trigger fallback.
-	// SECURITY NOTE: On Chinese networks, system DNS goes through GFW-monitored resolvers.
-	// Users in China should set queryStrategy to UseIP and avoid system fallback.
+	// SECURITY: System fallback is disabled by default to prevent DNS leaks
+	// through GFW-monitored resolvers on Chinese networks.
+	// Only triggers when queryStrategy is UseSys (user explicitly opts in).
 	emptyResponseFallback := go_errors.Is(err, dns.ErrEmptyResponse) && option.IPv4Enable && option.IPv6Enable
 	if len(ips) == 0 && err != nil &&
 		(emptyResponseFallback || !go_errors.Is(err, dns.ErrEmptyResponse)) &&
-		!s.checkSystem && // avoid recursion (checkSystem already uses system DNS)
-		!s.disableFallback { // disableFallback also blocks system fallback for China safety
+		s.checkSystem { // only when USE_SYS is explicitly configured
 		errors.LogInfo(s.ctx, "DNS query failed for ", domain, ", falling back to system resolver: ", err)
 		fallbackCtx, fallbackCancel := context.WithTimeout(s.ctx, 2*time.Second)
 		sysIps, sysErr := go_net.DefaultResolver.LookupIPAddr(fallbackCtx, domain)
