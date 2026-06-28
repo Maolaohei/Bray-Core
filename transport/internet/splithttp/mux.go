@@ -273,8 +273,8 @@ type XmuxManager struct {
 	// Metrics for quantifiable validation
 	metrics struct {
 		// Connection reuse vs new
-		reuseHit   atomic.Int64 // XMUX pool hit (reuse connection)
-		newConn    atomic.Int64 // New connection created
+		reuseHit atomic.Int64 // XMUX pool hit (reuse connection)
+		newConn  atomic.Int64 // New connection created
 
 		// TTFB tracking (nanoseconds)
 		ttfbSum   atomic.Int64 // Sum of TTFB values
