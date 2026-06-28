@@ -2,6 +2,7 @@ package splithttp
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -299,12 +300,12 @@ func TestV21_DynamicConnectionScaling_PoolBehaviorUpdate(t *testing.T) {
 
 // TestV21_ConnectionMigration_ProactiveReplacement verifies pool stays filled after removal.
 func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
-	connCount := 0
+	var connCount atomic.Int32
 	m := NewXmuxManager(XmuxConfig{
 		MaxConnections: &RangeConfig{From: 3, To: 3},
 	}, func() XmuxConn {
-		connCount++
-		return &mockConn{id: connCount}
+		id := int(connCount.Add(1))
+		return &mockConn{id: id}
 	})
 	defer m.Close()
 
@@ -313,7 +314,9 @@ func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
 		c := m.GetXmuxClient(context.Background())
 		c.Running.Add(1)
 	}
+	m.clientsMu.Lock()
 	poolSize := len(m.xmuxClients)
+	m.clientsMu.Unlock()
 	t.Logf("Pool size after filling: %d", poolSize)
 	if poolSize < 1 {
 		t.Fatal("pool should have at least 1 connection")

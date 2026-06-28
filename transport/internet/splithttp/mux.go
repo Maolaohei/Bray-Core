@@ -46,7 +46,16 @@ type XmuxClient struct {
 }
 
 func (c *XmuxClient) AddRunning() {
-	c.Running.Add(1)
+	// Atomically check that we are not in closing state (-1)
+	for {
+		old := c.Running.Load()
+		if old < 0 {
+			return // connection is being closed, reject
+		}
+		if c.Running.CompareAndSwap(old, old+1) {
+			return
+		}
+	}
 }
 
 func (c *XmuxClient) DoneRunning() {
@@ -54,9 +63,15 @@ func (c *XmuxClient) DoneRunning() {
 	c.maybeClose()
 }
 
-// close the XmuxConn if it is not used and has no running requests
+// maybeClose closes the XmuxConn if it is not used and has no running requests.
+// Uses CAS to atomically transition Running from 0 to -1 (closing state),
+// preventing new requests from starting on this connection.
 func (c *XmuxClient) maybeClose() {
-	if c.NotUsed.Load() && c.Running.Load() <= 0 {
+	if !c.NotUsed.Load() {
+		return
+	}
+	// Try to atomically transition from 0 to -1 (closing state)
+	if c.Running.CompareAndSwap(0, -1) {
 		common.Close(c.XmuxConn)
 	}
 }
@@ -519,10 +534,10 @@ func (m *XmuxManager) healthCheckLoop() {
 	}
 }
 
-// healthCheckTick performs one tick of health checking. Extracted for safe deferred unlock.
+// healthCheckTick performs one tick of health checking.
 func (m *XmuxManager) healthCheckTick() {
+	// Phase 1: Under lock — collect stale connections and compute migration need
 	m.clientsMu.Lock()
-	defer m.clientsMu.Unlock()
 
 	now := time.Now()
 	for i := 0; i < len(m.xmuxClients); {
@@ -568,10 +583,6 @@ func (m *XmuxManager) healthCheckTick() {
 		i++
 	}
 
-	// V2.1: Connection Migration — proactively create replacements
-	// When pool drops below effective limit, create new connections immediately
-	// instead of waiting for the next preConnectLoop tick.
-	// Release clientsMu before dialing to avoid blocking GetXmuxClient callers.
 	effectiveConns := m.effectiveConnections()
 	needNew := 0
 	if effectiveConns > 0 {
@@ -580,9 +591,9 @@ func (m *XmuxManager) healthCheckTick() {
 		needNew = 1
 	}
 
-	// Release lock before network I/O
 	m.clientsMu.Unlock()
 
+	// Phase 2: Without lock — network I/O (dialing)
 	for i := 0; i < needNew; i++ {
 		errors.LogDebug(context.Background(), "XMUX: migration creating xmuxClient, pool+=", i+1, "/", needNew)
 		conn := m.newConnFunc()
@@ -939,22 +950,54 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 		if best == nil {
 			needNew = true
 		} else {
-
-			// CAS loop to avoid race between check and decrement
+			// CAS loop to atomically decrement leftUsage
+			// leftUsage: -1 = unlimited, 0 = exhausted, >0 = decrements
+			acquired := false
 			for {
 				old := best.leftUsage.Load()
-				if old <= 0 {
+				if old == 0 {
+					// leftUsage explicitly exhausted (was >0, now 0)
+					best.NotUsed.Store(true)
+					best.maybeClose()
+					// Find next best from remaining pool
+					best = nil
+					bestScore = int64(math.MaxInt64)
+					for _, c := range m.xmuxClients {
+						if c.NotUsed.Load() {
+							continue
+						}
+						if effectiveConc > 0 && c.Running.Load() >= effectiveConc {
+							continue
+						}
+						if s := c.cachedScore.Load(); s < bestScore {
+							best = c
+							bestScore = s
+						}
+					}
+					if best == nil {
+						needNew = true
+						break
+					}
+					continue // retry CAS on new best
+				}
+				if old < 0 {
+					// unlimited reuse (-1), just return without decrementing
+					acquired = true
 					break
 				}
 				if best.leftUsage.CompareAndSwap(old, old-1) {
+					acquired = true
 					break
 				}
 			}
 
-			m.lastActivity = time.Now()
-			m.clientsMu.Unlock()
-			m.RecordReuseHit()
-			return best
+			if acquired {
+				m.lastActivity = time.Now()
+				m.clientsMu.Unlock()
+				m.RecordReuseHit()
+				return best
+			}
+			// needNew is true, fall through to create new connection
 		}
 	}
 

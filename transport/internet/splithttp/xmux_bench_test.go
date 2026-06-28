@@ -161,10 +161,10 @@ func TestCachedScoreStaleness(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
+	// Get 3 clients and set their RTT
 	clients := make([]*XmuxClient, 3)
 	for i := 0; i < 3; i++ {
 		c := m.GetXmuxClient(context.Background())
-		c.Running.Add(-1)
 		clients[i] = c
 	}
 
@@ -175,8 +175,8 @@ func TestCachedScoreStaleness(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
-	// Concurrent workers simulate real load: each holds Running for a while
-	selectionCount := make(map[*XmuxClient]int)
+	// Track ALL clients returned by GetXmuxClient (including new ones)
+	allSelectionCount := make(map[*XmuxClient]int)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -186,11 +186,10 @@ func TestCachedScoreStaleness(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
 				c := m.GetXmuxClient(context.Background())
-				c.AddRunning() // simulate real usage
+				c.AddRunning()
 				mu.Lock()
-				selectionCount[c]++
+				allSelectionCount[c]++
 				mu.Unlock()
-				// Hold Running for longer to force rotation
 				time.Sleep(500 * time.Microsecond)
 				c.DoneRunning()
 			}
@@ -198,28 +197,28 @@ func TestCachedScoreStaleness(t *testing.T) {
 	}
 	wg.Wait()
 
-	t.Logf("Selection distribution (concurrent, 200 iterations x 6 workers):")
-	for i, c := range clients {
-		rtt := []int{10, 200, 200}[i]
-		t.Logf("  client[%d] RTT=%dms: selected %d times (%.1f%%)",
-			i, rtt, selectionCount[c], float64(selectionCount[c])/12.0)
-	}
+	// Check that the client with lowest RTT (clients[0]) was preferred
+	// when it was available (had capacity)
+	lowRTTCount := allSelectionCount[clients[0]]
+	highRTTCount := allSelectionCount[clients[1]] + allSelectionCount[clients[2]]
+
+	t.Logf("LowRTT (10ms): %d selections, HighRTT (200ms): %d selections",
+		lowRTTCount, highRTTCount)
 
 	total := 0
-	for _, count := range selectionCount {
+	for _, count := range allSelectionCount {
 		total += count
 	}
 	if total != 1200 {
 		t.Errorf("total selections = %d, want 1200", total)
 	}
 
-	// With concurrent load and MaxConcurrency=2, client[0] should get
-	// more selections (lower RTT) but not 100% because it can only
-	// handle 2 concurrent requests at a time
-	if selectionCount[clients[0]] == 1200 {
+	// With MaxConcurrency=2, the low-RTT client should get more selections
+	// than any single high-RTT client, but not 100% due to concurrency limits
+	if lowRTTCount == 1200 {
 		t.Error("client[0] got 100% - scheduling not rotating under load")
 	}
-	if selectionCount[clients[0]] == 0 {
+	if lowRTTCount == 0 {
 		t.Error("client[0] got 0% - lowest RTT not preferred")
 	}
 }
