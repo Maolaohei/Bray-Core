@@ -43,7 +43,7 @@ type DNS struct {
 	// configuration (node domains, REALITY, etc.) for DNS warmup.
 	extractWarmupDomains func() []string
 	// warmupInFlight tracks domains currently being resolved during warmup.
-	// Key: domain (string), Value: *sync.WaitGroup (nil means warmup done).
+	// Key: domain (string), Value: chan struct{} (closed when warmup completes).
 	warmupInFlight sync.Map
 	// clientCache caches sortClients results to avoid repeated allocation
 	// and domain matching on the same domain.
@@ -216,31 +216,13 @@ func (*DNS) Type() interface{} {
 }
 
 // Start implements common.Runnable.
+// Note: extractWarmupDomains is not set yet at Start() time (it's set later
+// by core/xray.go via SetWarmupDomainExtractor). The extractor-based warmup
+// is triggered by WarmupNow() after outbound handlers are registered.
+// Only user-configured warmupDomains are warmed up here.
 func (s *DNS) Start() error {
-	s.Lock()
-	// Start with domains extracted from outbound configuration
-	var domains []string
-	if s.extractWarmupDomains != nil {
-		domains = s.extractWarmupDomains()
-	}
-
-	// Append user-configured warmupDomains (deduplicated)
 	if len(s.warmupDomains) > 0 {
-		seen := make(map[string]struct{}, len(domains))
-		for _, d := range domains {
-			seen[d] = struct{}{}
-		}
-		for _, d := range s.warmupDomains {
-			if _, exists := seen[d]; !exists {
-				domains = append(domains, d)
-			}
-		}
-	}
-	s.Unlock()
-
-	// Domain warmup in background (DNS resolution warmup)
-	if len(domains) > 0 {
-		go s.warmup(domains)
+		go s.warmup(s.warmupDomains)
 	}
 	return nil
 }
@@ -292,6 +274,16 @@ func (s *DNS) WarmupNow() {
 	}
 }
 
+// ClearCache clears DNS cache for all name servers.
+// Called on network change to prevent stale IP lookups.
+func (s *DNS) ClearCache() {
+	for _, c := range s.clients {
+		if cn, ok := c.server.(CachedNameserver); ok {
+			cn.getCacheController().ClearCache()
+		}
+	}
+}
+
 // warmup resolves the given domains in the background to prime the DNS
 // cache. Errors are silently ignored since warmup is best-effort.
 func (s *DNS) warmup(domains []string) {
@@ -300,12 +292,14 @@ func (s *DNS) warmup(domains []string) {
 
 	var wg sync.WaitGroup
 	for _, domain := range domains {
-		s.warmupInFlight.Store(domain, struct{}{})
+		ch := make(chan struct{})
+		s.warmupInFlight.Store(domain, ch)
 		wg.Add(1)
 		s.wgs.Add(1)
 		go func(d string) {
 			defer wg.Done()
 			defer s.wgs.Done()
+			defer close(ch)
 			defer s.warmupInFlight.Delete(d)
 			s.LookupIP(d, *s.ipOption)
 		}(domain)
@@ -362,20 +356,11 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 
 	// If this domain is being warmup-resolved, wait briefly for it to complete
 	// to avoid redundant queries and benefit from the cached result.
-	if _, ok := s.warmupInFlight.Load(domain); ok {
+	if v, ok := s.warmupInFlight.Load(domain); ok {
+		ch := v.(chan struct{})
 		errors.LogDebug(s.ctx, "domain ", domain, " is being warmup-resolved, waiting...")
-		waitDone := make(chan struct{})
-		go func() {
-			for {
-				if _, loaded := s.warmupInFlight.Load(domain); !loaded {
-					close(waitDone)
-					return
-				}
-				time.Sleep(50 * time.Millisecond)
-			}
-		}()
 		select {
-		case <-waitDone:
+		case <-ch:
 			// Warmup completed — the cache should now have the result.
 		case <-time.After(500 * time.Millisecond):
 			// Don't block the caller too long; proceed with normal resolution.

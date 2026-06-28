@@ -13,6 +13,7 @@ import (
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/quality"
 )
 
@@ -419,37 +420,40 @@ func (m *XmuxManager) EnqueueWarmup(domain string, priority int) {
 	m.RecordWarmupEnqueue()
 }
 
-// processWarmupQueue processes pending warmup targets.
+// processWarmupQueue processes pending warmup targets until semaphore is full or queue is empty.
 func (m *XmuxManager) processWarmupQueue() {
-	m.warmupMu.Lock()
-	if len(m.warmupQueue) == 0 {
-		m.warmupMu.Unlock()
-		return
-	}
-
-	// Pop highest-priority target from heap
-	target := heap.Pop(&m.warmupQueue).(WarmupTarget)
-	delete(m.warmupSet, target.Domain)
-	m.warmupMu.Unlock()
-
-	// Check if we can warm up (semaphore)
-	select {
-	case m.warmupSem <- struct{}{}:
-		go func() {
-			defer func() { <-m.warmupSem }()
-			defer func() {
-				if r := recover(); r != nil {
-					errors.LogDebug(context.Background(), "XMUX: executeWarmup recovered panic: ", r)
-				}
-			}()
-			m.executeWarmup(target)
-		}()
-	default:
-		// Already at max concurrent warmups, re-queue
+	for {
 		m.warmupMu.Lock()
-		heap.Push(&m.warmupQueue, target)
-		m.warmupSet[target.Domain] = struct{}{}
+		if len(m.warmupQueue) == 0 {
+			m.warmupMu.Unlock()
+			return
+		}
+
+		// Pop highest-priority target from heap
+		target := heap.Pop(&m.warmupQueue).(WarmupTarget)
+		delete(m.warmupSet, target.Domain)
 		m.warmupMu.Unlock()
+
+		// Try to acquire semaphore
+		select {
+		case m.warmupSem <- struct{}{}:
+			go func() {
+				defer func() { <-m.warmupSem }()
+				defer func() {
+					if r := recover(); r != nil {
+						errors.LogDebug(context.Background(), "XMUX: executeWarmup recovered panic: ", r)
+					}
+				}()
+				m.executeWarmup(target)
+			}()
+		default:
+			// Semaphore full — re-queue and stop processing
+			m.warmupMu.Lock()
+			heap.Push(&m.warmupQueue, target)
+			m.warmupSet[target.Domain] = struct{}{}
+			m.warmupMu.Unlock()
+			return
+		}
 	}
 }
 
@@ -509,27 +513,48 @@ func (m *XmuxManager) checkNetworkChange() {
 
 	if m.netHash != newHash {
 		// Network changed!
-		errors.LogInfo(context.Background(), "XMUX: network change detected, triggering warmup")
+		errors.LogInfo(context.Background(), "XMUX: network change detected, clearing DNS cache and re-warming up")
 		m.netHash = newHash
 
 		// Track network recovery event
 		m.metrics.netRecoveryCount.Add(1)
 
+		// Clear stale DNS cache to prevent serving IPs from the old network
+		internet.ClearDNSCache()
+
+		// Re-warmup DNS on the new network (async, non-blocking)
+		go internet.TriggerDNSWarmup()
+
 		// Clear stale connections
 		m.clearStaleConnections()
-
-		// Re-enqueue warmup targets (will be populated by caller)
-		// The actual domain list is managed by the warmup manager
 	}
 }
 
-// clearStaleConnections marks all connections as potentially stale after network change.
+// clearStaleConnections removes all stale connections after network change
+// and immediately creates replacement connections.
 func (m *XmuxManager) clearStaleConnections() {
+	// Phase 1: Remove all stale connections under write lock
 	m.pool.mu.Lock()
-	defer m.pool.mu.Unlock()
-	for _, client := range m.pool.clients {
-		client.lastRTT.Store(int64(maxRTTBeforeRemove+1) * int64(time.Millisecond)) // Set above threshold to trigger removal
-		client.consecDrops.Store(0)                                                 // Reset quality drops — failure was network, not link quality
+	for i := 0; i < len(m.pool.clients); {
+		c := m.pool.clients[i]
+		errors.LogDebug(context.Background(), "XMUX: network-change removing stale xmuxClient, rtt=", c.GetRTT().Milliseconds(), "ms")
+		c.StopProfiling()
+		m.pool.RemoveAt(i)
+	}
+	effectiveConns := m.effectiveConnections()
+	m.pool.mu.Unlock()
+
+	// Phase 2: Immediately create replacement connections (no lock held)
+	targetConns := int(effectiveConns)
+	if targetConns < 1 {
+		targetConns = 1
+	}
+	for i := 0; i < targetConns; i++ {
+		errors.LogDebug(context.Background(), "XMUX: network-change creating replacement xmuxClient, pool+=", i+1, "/", targetConns)
+		conn := m.newConnFunc()
+		if conn != nil {
+			m.addToPool(conn)
+		}
 	}
 }
 
@@ -652,6 +677,8 @@ func (m *XmuxManager) healthCheckTick() {
 		conn := m.newConnFunc()
 		if conn != nil {
 			m.addToPool(conn)
+		} else {
+			errors.LogWarning(context.Background(), "XMUX: migration dial failed, pool will be under-filled until next health-check")
 		}
 	}
 
@@ -805,11 +832,15 @@ func (m *XmuxManager) computeTargetConns(b quality.Behavior, base int32) int32 {
 	}
 	switch b {
 	case quality.BehaviorLowLatency:
-		return base + base/2 // +50%
+		delta := base / 2
+		if delta < 1 {
+			delta = 1 // ensure at least +1 for small base values
+		}
+		return base + delta
 	case quality.BehaviorLossy, quality.BehaviorSaturated:
-		return base / 2 // -50%
+		return base / 2
 	case quality.BehaviorAggressive:
-		return base * 2 / 3 // -33%
+		return base * 2 / 3
 	default:
 		return base
 	}
@@ -822,11 +853,15 @@ func (m *XmuxManager) computeTargetConc(b quality.Behavior, base int32) int32 {
 	}
 	switch b {
 	case quality.BehaviorLowLatency:
-		return base * 2 // 2x
+		delta := base / 2
+		if delta < 1 {
+			delta = 1
+		}
+		return base + delta
 	case quality.BehaviorLossy, quality.BehaviorSaturated:
-		return base / 2 // 0.5x
+		return base / 2
 	case quality.BehaviorAggressive:
-		return base * 3 / 4 // 0.75x
+		return base * 3 / 4
 	default:
 		return base
 	}

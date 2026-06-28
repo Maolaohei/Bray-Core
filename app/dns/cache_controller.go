@@ -82,6 +82,18 @@ func NewCacheController(name string, disableCache bool, serveStale bool, serveEx
 	return c
 }
 
+// ClearCache removes all entries from the DNS cache.
+// Called on network change to prevent stale IP lookups.
+func (c *CacheController) ClearCache() {
+	c.Lock()
+	defer c.Unlock()
+
+	c.ips = make(map[string]*record)
+	c.dirtyips = nil
+	c.highWatermark = 0
+	errors.LogInfo(context.Background(), c.name, " cache cleared (network change)")
+}
+
 // CacheCleanup clears expired items from cache
 func (c *CacheController) CacheCleanup() error {
 	expiredKeys, err := c.collectExpiredKeys()

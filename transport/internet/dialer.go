@@ -294,3 +294,25 @@ func InitSystemDialer(dc dns.Client, om outbound.Manager) {
 	dnsClient = dc
 	obm = om
 }
+
+// ClearDNSCache clears the DNS cache for all name servers.
+// Called on network change to prevent stale IP lookups from cached results.
+func ClearDNSCache() {
+	if dnsClient == nil {
+		return
+	}
+	if c, ok := dnsClient.(interface{ ClearCache() }); ok {
+		c.ClearCache()
+	}
+}
+
+// TriggerDNSWarmup triggers an immediate DNS warmup for outbound domains.
+// Called on network change after cache clear to pre-resolve domains on the new network.
+func TriggerDNSWarmup() {
+	if dnsClient == nil {
+		return
+	}
+	if c, ok := dnsClient.(interface{ WarmupNow() }); ok {
+		c.WarmupNow()
+	}
+}

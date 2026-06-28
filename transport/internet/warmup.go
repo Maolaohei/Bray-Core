@@ -6,6 +6,7 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/features/outbound"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -152,20 +153,166 @@ func extractDomainsFromSenderSettings(ss *serial.TypedMessage, domainSet map[str
 }
 
 // extractTransportHostDomains extracts host domains from transport settings.
-// Note: Transport host extraction requires proper proto unmarshaling of TypedMessage,
-// which would cause circular dependencies. For now, this is a no-op.
-// Transport hosts can be explicitly configured via dns.warmupDomains.
+// For example, WebSocket "host" field and TCP header "domain" field.
 func extractTransportHostDomains(streamMsg protoreflect.Message, domainSet map[string]struct{}) {
-	// Intentionally empty - extracting from TypedMessage bytes is unreliable
-	// Use dns.warmupDomains config for explicit CDN domain warmup
+	tSettingsField := streamMsg.Descriptor().Fields().ByName("transport_settings")
+	if tSettingsField == nil || !streamMsg.Has(tSettingsField) {
+		return
+	}
+
+	tSettingsList := streamMsg.Get(tSettingsField).List()
+	for i := 0; i < tSettingsList.Len(); i++ {
+		tConfig := tSettingsList.Get(i).Message()
+		if !tConfig.IsValid() {
+			continue
+		}
+
+		settingsField := tConfig.Descriptor().Fields().ByName("settings")
+		if settingsField == nil || !tConfig.Has(settingsField) {
+			continue
+		}
+
+		settingsMsg := tConfig.Get(settingsField).Message()
+		if !settingsMsg.IsValid() {
+			continue
+		}
+
+		extractDomainsFromTypedMessage(settingsMsg, domainSet)
+	}
 }
 
-// extractHeaderFakeHostDomains extracts fakeHost from header settings.
-// Note: Header settings are nested inside transport TypedMessage.
-// For now, this is a no-op due to the same circular dependency issue.
+// extractHeaderFakeHostDomains extracts fakeHost from TCP header settings.
 func extractHeaderFakeHostDomains(streamMsg protoreflect.Message, domainSet map[string]struct{}) {
-	// Intentionally empty - extracting from TypedMessage bytes is unreliable
-	// Use dns.warmupDomains config for explicit header host warmup
+	tSettingsField := streamMsg.Descriptor().Fields().ByName("transport_settings")
+	if tSettingsField == nil || !streamMsg.Has(tSettingsField) {
+		return
+	}
+
+	tSettingsList := streamMsg.Get(tSettingsField).List()
+	for i := 0; i < tSettingsList.Len(); i++ {
+		tConfig := tSettingsList.Get(i).Message()
+		if !tConfig.IsValid() {
+			continue
+		}
+
+		protoNameField := tConfig.Descriptor().Fields().ByName("protocol_name")
+		if protoNameField == nil || !tConfig.Has(protoNameField) {
+			continue
+		}
+		protoName := tConfig.Get(protoNameField).String()
+		if protoName != "tcp" {
+			continue
+		}
+
+		settingsField := tConfig.Descriptor().Fields().ByName("settings")
+		if settingsField == nil || !tConfig.Has(settingsField) {
+			continue
+		}
+
+		settingsMsg := tConfig.Get(settingsField).Message()
+		if !settingsMsg.IsValid() {
+			continue
+		}
+
+		extractHeaderDomainsFromTCP(settingsMsg, domainSet)
+	}
+}
+
+// extractDomainsFromTypedMessage deserializes a TypedMessage and looks for
+// a "host" string field containing a domain.
+func extractDomainsFromTypedMessage(settingsMsg protoreflect.Message, domainSet map[string]struct{}) {
+	typeField := settingsMsg.Descriptor().Fields().ByName("type")
+	valueField := settingsMsg.Descriptor().Fields().ByName("value")
+	if typeField == nil || valueField == nil {
+		return
+	}
+	if !settingsMsg.Has(typeField) || !settingsMsg.Has(valueField) {
+		return
+	}
+
+	msgType := settingsMsg.Get(typeField).String()
+	msgBytes := settingsMsg.Get(valueField).Bytes()
+
+	instance, err := serial.GetInstance(msgType)
+	if err != nil {
+		return
+	}
+
+	pbMsg, ok := instance.(protoreflect.ProtoMessage)
+	if !ok {
+		return
+	}
+
+	if err := proto.Unmarshal(msgBytes, pbMsg); err != nil {
+		return
+	}
+
+	innerMsg := pbMsg.ProtoReflect()
+
+	// Look for "host" field (string) — common in WebSocket, HTTP/2, etc.
+	hostField := innerMsg.Descriptor().Fields().ByName("host")
+	if hostField != nil && innerMsg.Has(hostField) && hostField.Kind() == protoreflect.StringKind {
+		host := innerMsg.Get(hostField).String()
+		if host != "" && !isIP(host) {
+			domainSet[host] = struct{}{}
+		}
+	}
+}
+
+// extractHeaderDomainsFromTCP extracts fake domains from TCP header settings.
+func extractHeaderDomainsFromTCP(settingsMsg protoreflect.Message, domainSet map[string]struct{}) {
+	typeField := settingsMsg.Descriptor().Fields().ByName("type")
+	valueField := settingsMsg.Descriptor().Fields().ByName("value")
+	if typeField == nil || valueField == nil {
+		return
+	}
+	if !settingsMsg.Has(typeField) || !settingsMsg.Has(valueField) {
+		return
+	}
+
+	msgType := settingsMsg.Get(typeField).String()
+	msgBytes := settingsMsg.Get(valueField).Bytes()
+
+	instance, err := serial.GetInstance(msgType)
+	if err != nil {
+		return
+	}
+
+	pbMsg, ok := instance.(protoreflect.ProtoMessage)
+	if !ok {
+		return
+	}
+
+	if err := proto.Unmarshal(msgBytes, pbMsg); err != nil {
+		return
+	}
+
+	innerMsg := pbMsg.ProtoReflect()
+
+	// TCP header settings have a "domain" field with a list of domain names
+	domainField := innerMsg.Descriptor().Fields().ByName("domain")
+	if domainField == nil || !innerMsg.Has(domainField) {
+		return
+	}
+	if domainField.Kind() != protoreflect.MessageKind {
+		return
+	}
+
+	domainList := innerMsg.Get(domainField).List()
+	for i := 0; i < domainList.Len(); i++ {
+		domainMsg := domainList.Get(i).Message()
+		if !domainMsg.IsValid() {
+			continue
+		}
+		// Each domain entry has a "domain" string field
+		dField := domainMsg.Descriptor().Fields().ByName("domain")
+		if dField != nil && domainMsg.Has(dField) {
+			d := domainMsg.Get(dField).String()
+			if d != "" && !isIP(d) {
+				domainSet[d] = struct{}{}
+			}
+		}
+	}
 }
 
 func extractRealityDomainsFromMsg(streamMsg protoreflect.Message, domainSet map[string]struct{}) {
