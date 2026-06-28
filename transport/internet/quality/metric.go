@@ -39,3 +39,6 @@ type Float64 = Metric[float64]
 
 // Uint32 is a convenience alias for Metric[uint32].
 type Uint32 = Metric[uint32]
+
+// Now returns time.Now(). Convenience for snapshot creation.
+func Now() time.Time { return time.Now() }

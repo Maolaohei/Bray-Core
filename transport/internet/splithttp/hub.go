@@ -246,7 +246,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				Reader:         request.Body,
 				ResponseWriter: writer,
 			}
-			err = currentSession.uploadQueue.Push(*NewPacket(httpSC, nil, 0))
+			err = currentSession.uploadQueue.Push(Packet{
+				Reader: httpSC,
+			})
 			if err != nil {
 				errors.LogInfoInner(context.Background(), err, "failed to upload (PushReader)")
 				writer.WriteHeader(http.StatusConflict)
@@ -392,7 +394,10 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 
-		err = currentSession.uploadQueue.Push(*NewPacket(nil, payload, seq))
+		err = currentSession.uploadQueue.Push(Packet{
+			Payload: payload,
+			Seq:     seq,
+		})
 		if err != nil {
 			errors.LogInfoInner(context.Background(), err, "failed to upload (PushPayload)")
 			writer.WriteHeader(http.StatusInternalServerError)

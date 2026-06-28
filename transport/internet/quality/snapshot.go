@@ -42,7 +42,6 @@ func NewUnknownSnapshot() *Snapshot {
 	return &Snapshot{
 		Timestamp:  time.Now(),
 		Source:     SourceUnknown,
-		Quality:    UnknownQuality(),
 		Confidence: 0,
 	}
 }

@@ -26,13 +26,7 @@ func getKeyLogWriter(path string) *os.File {
 	keyLogCache.Lock()
 	defer keyLogCache.Unlock()
 	if f, ok := keyLogCache.handles[path]; ok {
-		// Verify file is still valid (not rotated externally).
-		if _, err := f.Stat(); err == nil {
-			return f
-		}
-		// File was rotated or removed — close old handle, reopen.
-		f.Close()
-		delete(keyLogCache.handles, path)
+		return f
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {

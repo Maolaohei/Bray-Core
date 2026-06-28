@@ -245,7 +245,7 @@ func (c *XmuxClient) StopProfilingLocked() {
 }
 
 type XmuxManager struct {
-	xmuxConfig   *XmuxConfig
+	xmuxConfig   XmuxConfig
 	concurrency  int32 // base concurrency (from config)
 	connections  int32 // base connections (from config)
 	newConnFunc  func() XmuxConn
@@ -287,10 +287,7 @@ type XmuxManager struct {
 	}
 }
 
-func NewXmuxManager(xmuxConfig *XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
-	if xmuxConfig == nil {
-		xmuxConfig = &XmuxConfig{}
-	}
+func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
 	m := &XmuxManager{
 		xmuxConfig:   xmuxConfig,
 		concurrency:  xmuxConfig.GetNormalizedMaxConcurrency().rand(),
@@ -678,15 +675,6 @@ func (m *XmuxManager) UpdatePoolBehavior(b quality.Behavior) {
 func (m *XmuxManager) applyAIMD(b, prevBehavior quality.Behavior) {
 	baseConns := m.connections
 	baseConc := m.concurrency
-
-	// Use ConfigForBehavior recommended values as upper bounds.
-	cfg := quality.ConfigForBehavior(b)
-	if cfg.MaxConnections > 0 && int32(cfg.MaxConnections) < baseConns*2 {
-		baseConns = int32(cfg.MaxConnections)
-	}
-	if cfg.MaxConcurrency > 0 && int32(cfg.MaxConcurrency) < baseConc*2 {
-		baseConc = int32(cfg.MaxConcurrency)
-	}
 
 	if !m.scaledOnce {
 		// First time: set initial values based on behavior

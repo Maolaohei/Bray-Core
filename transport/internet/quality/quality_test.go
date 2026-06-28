@@ -53,6 +53,16 @@ func TestQualityWeightsXMUX(t *testing.T) {
 	}
 }
 
+func TestQualityWeightsHEv3(t *testing.T) {
+	w := DefaultHEv3Weights()
+	q := Quality{Latency: 90, Loss: 20, Stability: 60}
+	overall := w.ComputeOverall(q)
+	// (90*0.7 + 20*0.3) / 1.0 = 63 + 6 = 69
+	if overall != 69 {
+		t.Fatalf("got %d, want 69", overall)
+	}
+}
+
 func TestQualityWeightsNormalize(t *testing.T) {
 	w := QualityWeights{LatencyWeight: 3, LossWeight: 4, StabilityWeight: 3}
 	q := Quality{Latency: 100, Loss: 100, Stability: 100}

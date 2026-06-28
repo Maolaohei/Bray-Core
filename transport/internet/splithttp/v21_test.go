@@ -160,7 +160,7 @@ func TestV21_Learner_TransitionRate(t *testing.T) {
 
 // TestV21_DynamicConnectionScaling_EffectiveConnections verifies pool sizing per behavior with debounce.
 func TestV21_DynamicConnectionScaling_EffectiveConnections(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
+	m := NewXmuxManager(XmuxConfig{
 		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
@@ -185,7 +185,7 @@ func TestV21_DynamicConnectionScaling_EffectiveConnections(t *testing.T) {
 
 // TestV21_DynamicConnectionScaling_OscillationPrevention verifies debounce prevents rapid switching.
 func TestV21_DynamicConnectionScaling_OscillationPrevention(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
+	m := NewXmuxManager(XmuxConfig{
 		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
@@ -219,7 +219,7 @@ func TestV21_DynamicConnectionScaling_OscillationPrevention(t *testing.T) {
 
 // TestV21_DynamicConnectionScaling_AIMD_Decrease verifies multiplicative decrease on worsening.
 func TestV21_DynamicConnectionScaling_AIMD_Decrease(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
+	m := NewXmuxManager(XmuxConfig{
 		MaxConnections: &RangeConfig{From: 8, To: 8},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
@@ -245,7 +245,7 @@ func TestV21_DynamicConnectionScaling_AIMD_Decrease(t *testing.T) {
 
 // TestV21_DynamicConnectionScaling_AIMD_Increase verifies additive increase on improvement.
 func TestV21_DynamicConnectionScaling_AIMD_Increase(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
+	m := NewXmuxManager(XmuxConfig{
 		MaxConnections: &RangeConfig{From: 8, To: 8},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
@@ -271,7 +271,7 @@ func TestV21_DynamicConnectionScaling_AIMD_Increase(t *testing.T) {
 
 // TestV21_DynamicConnectionScaling_PoolBehaviorUpdate verifies pool behavior updates with debounce.
 func TestV21_DynamicConnectionScaling_PoolBehaviorUpdate(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{}, func() XmuxConn { return &mockConn{} })
+	m := NewXmuxManager(XmuxConfig{}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
 
 	// Initially unknown
@@ -301,7 +301,7 @@ func TestV21_DynamicConnectionScaling_PoolBehaviorUpdate(t *testing.T) {
 // TestV21_ConnectionMigration_ProactiveReplacement verifies pool stays filled after removal.
 func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
 	var connCount atomic.Int32
-	m := NewXmuxManager(&XmuxConfig{
+	m := NewXmuxManager(XmuxConfig{
 		MaxConnections: &RangeConfig{From: 3, To: 3},
 	}, func() XmuxConn {
 		id := int(connCount.Add(1))
@@ -340,7 +340,7 @@ func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
 
 // TestV21_ConnectionMigration_QualityDrain verifies drain triggers replacement.
 func TestV21_ConnectionMigration_QualityDrain(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
+	m := NewXmuxManager(XmuxConfig{
 		MaxConnections: &RangeConfig{From: 2, To: 2},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()

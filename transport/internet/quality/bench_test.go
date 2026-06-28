@@ -2,6 +2,20 @@ package quality
 
 import "testing"
 
+func BenchmarkEWMAOnSuccess(b *testing.B) {
+	e := NewEWMA(0.5)
+	for i := 0; i < b.N; i++ {
+		e.OnSuccess()
+	}
+}
+
+func BenchmarkEWMAOnFailure(b *testing.B) {
+	e := NewEWMA(0.5)
+	for i := 0; i < b.N; i++ {
+		e.OnFailure()
+	}
+}
+
 func BenchmarkQualityComputeOverall(b *testing.B) {
 	w := DefaultXMUXWeights()
 	q := Quality{Latency: 85, Loss: 90, Stability: 70}
