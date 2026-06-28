@@ -25,6 +25,8 @@ var PacketPool = sync.Pool{
 	},
 }
 
+// NewPacket gets a Packet from the pool and fills it. Caller should use
+// ReleasePacket when done to return it to the pool.
 func NewPacket(reader io.ReadCloser, payload []byte, seq uint64) *Packet {
 	p := PacketPool.Get().(*Packet)
 	p.Reader = reader
@@ -33,6 +35,7 @@ func NewPacket(reader io.ReadCloser, payload []byte, seq uint64) *Packet {
 	return p
 }
 
+// ReleasePacket clears a Packet and returns it to the pool.
 func ReleasePacket(p *Packet) {
 	p.Reader = nil
 	p.Payload = nil
@@ -144,6 +147,7 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 					h.heap.push(packet)
 				} else {
 					h.nextSeq = packet.Seq + 1
+					ReleasePacket(&packet)
 				}
 
 				return n, nil

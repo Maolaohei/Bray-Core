@@ -10,7 +10,7 @@ import (
 
 func TestMetricsOutput(t *testing.T) {
 	// Create a mock XMUX manager
-	xmuxConfig := XmuxConfig{
+	xmuxConfig := &XmuxConfig{
 		MaxConcurrency: &RangeConfig{From: 2, To: 4},
 		MaxConnections: &RangeConfig{From: 1, To: 2},
 	}

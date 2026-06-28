@@ -17,12 +17,10 @@ import (
 	mrand "math/rand"
 	"net/http"
 	"net/url"
-	"reflect"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	"github.com/Maolaohei/REALITY"
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
@@ -82,11 +80,8 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 		fmt.Printf("REALITY localAddr: %v\tis using X25519MLKEM768 for TLS' communication: %v\n", localAddr, c.HandshakeState.ServerHello.ServerShare.Group == utls.X25519MLKEM768)
 		fmt.Printf("REALITY localAddr: %v\tis using ML-DSA-65 for cert's extra verification: %v\n", localAddr, len(c.Config.Mldsa65Verify) > 0)
 	}
-	p, ok := reflect.TypeOf(c.Conn).Elem().FieldByName("peerCertificates")
-	if !ok {
-		return errors.New("REALITY: peerCertificates field not found via reflect")
-	}
-	certs := *(*([]*x509.Certificate))(unsafe.Pointer(uintptr(unsafe.Pointer(c.Conn)) + p.Offset))
+	state := c.Conn.ConnectionState()
+	certs := state.PeerCertificates
 	if len(certs) == 0 {
 		return errors.New("REALITY: no peer certificates")
 	}
@@ -298,9 +293,18 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 			}
 			get(true)
 			concurrency := int(crypto.RandBetween(config.SpiderY[2], config.SpiderY[3]))
-			for i := 0; i < concurrency; i++ {
-				go get(false)
+			if concurrency > 16 {
+				concurrency = 16 // cap to prevent goroutine storm
 			}
+			var wg sync.WaitGroup
+			for i := 0; i < concurrency; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					get(false)
+				}()
+			}
+			wg.Wait()
 			// Do not close the connection
 		}()
 		return nil, errors.New("REALITY: connection rejected").AtWarning()

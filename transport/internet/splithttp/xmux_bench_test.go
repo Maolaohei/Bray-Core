@@ -18,7 +18,7 @@ func (c *benchFakeConn) IsClosed() bool {
 }
 
 func BenchmarkXMUXGetXmuxClient(b *testing.B) {
-	m := NewXmuxManager(XmuxConfig{}, func() XmuxConn {
+	m := NewXmuxManager(&XmuxConfig{}, func() XmuxConn {
 		return &benchFakeConn{}
 	})
 	defer m.Close()
@@ -30,7 +30,7 @@ func BenchmarkXMUXGetXmuxClient(b *testing.B) {
 }
 
 func BenchmarkXMUXGetXmuxClientParallel(b *testing.B) {
-	m := NewXmuxManager(XmuxConfig{
+	m := NewXmuxManager(&XmuxConfig{
 		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}, func() XmuxConn {
 		return &benchFakeConn{}
@@ -61,7 +61,7 @@ func BenchmarkXMUXRTTEWMA(b *testing.B) {
 func BenchmarkXMUXPoolScheduling(b *testing.B) {
 	for _, poolSize := range []int{1, 4, 8, 16, 32} {
 		b.Run("pool_"+itoa(poolSize), func(b *testing.B) {
-			m := NewXmuxManager(XmuxConfig{
+			m := NewXmuxManager(&XmuxConfig{
 				MaxConnections: &RangeConfig{From: int32(poolSize), To: int32(poolSize)},
 			}, func() XmuxConn {
 				return &benchFakeConn{}
@@ -79,7 +79,7 @@ func BenchmarkXMUXPoolScheduling(b *testing.B) {
 }
 
 func BenchmarkXMUXMetrics(b *testing.B) {
-	m := NewXmuxManager(XmuxConfig{}, func() XmuxConn {
+	m := NewXmuxManager(&XmuxConfig{}, func() XmuxConn {
 		return &benchFakeConn{}
 	})
 	defer m.Close()
@@ -94,7 +94,7 @@ func BenchmarkXMUXMetrics(b *testing.B) {
 func BenchmarkXMUXConcurrentReadWrite(b *testing.B) {
 	for _, workers := range []int{1, 4, 8, 16} {
 		b.Run("workers_"+itoa(workers), func(b *testing.B) {
-			m := NewXmuxManager(XmuxConfig{
+			m := NewXmuxManager(&XmuxConfig{
 				MaxConcurrency: &RangeConfig{From: 2, To: 2},
 				MaxConnections: &RangeConfig{From: 4, To: 4},
 			}, func() XmuxConn {
@@ -139,7 +139,7 @@ func itoa(n int) string {
 // TestCachedScoreStaleness verifies that cached scores properly rotate
 // connections when inflight counts change under concurrent load.
 func TestCachedScoreStaleness(t *testing.T) {
-	m := NewXmuxManager(XmuxConfig{
+	m := NewXmuxManager(&XmuxConfig{
 		MaxConnections: &RangeConfig{From: 3, To: 3},
 		MaxConcurrency: &RangeConfig{From: 2, To: 2},
 	}, func() XmuxConn {

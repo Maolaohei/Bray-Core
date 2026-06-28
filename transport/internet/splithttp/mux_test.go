@@ -17,7 +17,7 @@ func (f *fakeRoundTripper) IsClosed() bool {
 }
 
 func TestMaxConnections(t *testing.T) {
-	xmuxConfig := XmuxConfig{
+	xmuxConfig := &XmuxConfig{
 		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}
 
@@ -45,7 +45,7 @@ func TestMaxConnections(t *testing.T) {
 }
 
 func TestCMaxReuseTimes(t *testing.T) {
-	xmuxConfig := XmuxConfig{
+	xmuxConfig := &XmuxConfig{
 		CMaxReuseTimes: &RangeConfig{From: 2, To: 2},
 	}
 
@@ -72,7 +72,7 @@ func TestCMaxReuseTimes(t *testing.T) {
 }
 
 func TestMaxConcurrency(t *testing.T) {
-	xmuxConfig := XmuxConfig{
+	xmuxConfig := &XmuxConfig{
 		MaxConcurrency: &RangeConfig{From: 2, To: 2},
 	}
 
@@ -94,7 +94,7 @@ func TestMaxConcurrency(t *testing.T) {
 }
 
 func TestDefault(t *testing.T) {
-	xmuxConfig := XmuxConfig{}
+	xmuxConfig := &XmuxConfig{}
 
 	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
 		return &fakeRoundTripper{}
@@ -114,7 +114,7 @@ func TestDefault(t *testing.T) {
 }
 
 func TestConcurrentPoolAccess(t *testing.T) {
-	xmuxConfig := XmuxConfig{
+	xmuxConfig := &XmuxConfig{
 		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}
 

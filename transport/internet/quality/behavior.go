@@ -130,19 +130,15 @@ func ClassifyBehavior(snap *Snapshot) Behavior {
 
 // BehaviorConfig returns recommended XMUX parameters for a given behavior.
 type BehaviorConfig struct {
-	MaxConnections   int
-	MaxConcurrency   int
-	PreConnectCount  int
-	WarmupDelayScale float64 // multiplier for warmup delay (1.0 = normal)
+	MaxConnections int
+	MaxConcurrency int
 }
 
 // DefaultBehaviorConfig returns the default XMUX configuration.
 func DefaultBehaviorConfig() BehaviorConfig {
 	return BehaviorConfig{
-		MaxConnections:   4,
-		MaxConcurrency:   32,
-		PreConnectCount:  1,
-		WarmupDelayScale: 1.0,
+		MaxConnections: 4,
+		MaxConcurrency: 32,
 	}
 }
 
@@ -151,23 +147,14 @@ func ConfigForBehavior(b Behavior) BehaviorConfig {
 	def := DefaultBehaviorConfig()
 	switch b {
 	case BehaviorLowLatency:
-		// LotSpeed-like: more concurrency, faster warmup
 		def.MaxConcurrency = 64
-		def.WarmupDelayScale = 0.5
 	case BehaviorAggressive:
-		// Brutal-like: fewer pre-connects to avoid over-stacking
 		def.MaxConnections = 2
-		def.PreConnectCount = 0
-		def.WarmupDelayScale = 0.3
 	case BehaviorLossy:
-		// Reduce concurrency, slower warmup
 		def.MaxConcurrency = 16
-		def.WarmupDelayScale = 2.0
 	case BehaviorSaturated:
-		// Fewer connections, reduce head-of-line blocking
 		def.MaxConnections = 2
 		def.MaxConcurrency = 16
-		def.WarmupDelayScale = 1.5
 	}
 	return def
 }
