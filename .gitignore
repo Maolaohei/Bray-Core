@@ -36,6 +36,7 @@ vprotogen
 errorgen
 !common/errors/errorgen/
 *.dat
+bin/xray_*
 
 # Build assets
 /build_assets/
@@ -84,3 +85,11 @@ reasonix.toml
 **/.codewhale/
 **/.deepseek/
 **/checklist.md
+DEFECT_REPORT.md
+client_log.txt
+server_log.txt
+tags.txt
+test_client.json
+test_server.json
+testing/mem_alloc_flame.png
+testing/mem_alloc_flame.svg
