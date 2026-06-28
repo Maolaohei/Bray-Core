@@ -366,29 +366,43 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 }
 
 // preConnectLoop maintains at least 1 warm connection in the pool.
+// Uses exponential backoff: 0ms → 600ms → 1200ms → 2400ms → 4800ms
+// Covers both client (proxy handshake delay) and server (direct) scenarios.
 func (m *XmuxManager) preConnectLoop() {
-	// Execute immediately on startup so the pool is warm before the first request
+	// Process warmup queue first
 	m.processWarmupQueue()
+
+	// Initial attempt (0ms delay)
 	if m.pool.Len() == 0 {
 		errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient (initial)")
 		m.newXmuxClient()
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	// Exponential backoff loop
+	backoff := 600 * time.Millisecond
+	maxBackoff := 4800 * time.Millisecond
 
 	for {
 		select {
 		case <-m.stopCh:
 			return
-		case <-ticker.C:
+		case <-time.After(backoff):
 			// Process warmup queue first
 			m.processWarmupQueue()
 
 			// Then ensure pool has connections
 			if m.pool.Len() == 0 {
-				errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient because pool is empty")
+				errors.LogDebug(context.Background(), "XMUX: pre-connect retry, backoff: ", backoff)
 				m.newXmuxClient()
+
+				// Increase backoff on failure
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			} else {
+				// Pool has connections, reset backoff
+				backoff = 600 * time.Millisecond
 			}
 		}
 	}
