@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -30,6 +31,8 @@ type DNS struct {
 	hosts                  *StaticHosts
 	clients                []*Client
 	ctx                    context.Context
+	cancel                 context.CancelFunc
+	wgs                    sync.WaitGroup
 	domainMatcher          geodata.DomainMatcher
 	matcherInfos           []*DomainMatcherInfo
 	checkSystem            bool
@@ -39,6 +42,18 @@ type DNS struct {
 	// extractWarmupDomains is a function that extracts domains from outbound
 	// configuration (node domains, REALITY, etc.) for DNS warmup.
 	extractWarmupDomains func() []string
+	// warmupInFlight tracks domains currently being resolved during warmup.
+	// Key: domain (string), Value: *sync.WaitGroup (nil means warmup done).
+	warmupInFlight sync.Map
+	// clientCache caches sortClients results to avoid repeated allocation
+	// and domain matching on the same domain.
+	clientCache     sync.Map // map[string]*clientCacheEntry
+	clientCacheSize int64   // atomic counter for clientCache entries
+}
+
+type clientCacheEntry struct {
+	clients   []*Client
+	expiresAt time.Time
 }
 
 // DomainMatcherInfo contains information attached to index returned by Server.domainMatcher.
@@ -177,11 +192,14 @@ func New(ctx context.Context, config *Config) (*DNS, error) {
 		clients = append(clients, NewLocalDNSClient(ipOption))
 	}
 
+	dnsCtx, dnsCancel := context.WithCancel(ctx)
+
 	return &DNS{
 		hosts:                  hosts,
 		ipOption:               &ipOption,
 		clients:                clients,
-		ctx:                    ctx,
+		ctx:                    dnsCtx,
+		cancel:                 dnsCancel,
 		domainMatcher:          domainMatcher,
 		matcherInfos:           matcherInfos,
 		disableFallback:        config.DisableFallback,
@@ -219,10 +237,31 @@ func (s *DNS) Start() error {
 	}
 	s.Unlock()
 
+	// Warmup DoH connections in background to avoid cold-start TLS handshake delay
+	go s.warmupDoHConnections()
+
 	if len(domains) > 0 {
 		go s.warmup(domains)
 	}
 	return nil
+}
+
+// warmupDoHConnections sends lightweight queries through DoH servers
+// to pre-establish HTTP/2 connections, avoiding first-query TLS latency.
+func (s *DNS) warmupDoHConnections() {
+	for _, client := range s.clients {
+		if client.server.IsDisableCache() {
+			continue
+		}
+		if _, ok := client.server.(*DoHNameServer); !ok {
+			continue
+		}
+		// Send a root-domain query to trigger connection establishment
+		// Use context with short timeout to avoid blocking startup
+		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+		client.QueryIP(ctx, ".", dns.IPOption{IPv4Enable: true, IPv6Enable: false})
+		cancel()
+	}
 }
 
 // SetWarmupDomains configures domains to be pre-resolved at startup
@@ -280,9 +319,13 @@ func (s *DNS) warmup(domains []string) {
 
 	var wg sync.WaitGroup
 	for _, domain := range domains {
+		s.warmupInFlight.Store(domain, struct{}{})
 		wg.Add(1)
+		s.wgs.Add(1)
 		go func(d string) {
 			defer wg.Done()
+			defer s.wgs.Done()
+			defer s.warmupInFlight.Delete(d)
 			s.LookupIP(d, *s.ipOption)
 		}(domain)
 	}
@@ -290,7 +333,24 @@ func (s *DNS) warmup(domains []string) {
 }
 
 // Close implements common.Closable.
+// It cancels the DNS context and waits up to 3 seconds for in-flight
+// queries and warmup goroutines to finish.
 func (s *DNS) Close() error {
+	s.cancel()
+
+	done := make(chan struct{})
+	go func() {
+		s.wgs.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		errors.LogInfo(s.ctx, "DNS: all in-flight queries drained")
+	case <-time.After(3 * time.Second):
+		errors.LogWarning(s.ctx, "DNS: drain timeout, some queries may still be in-flight")
+	}
+
 	return nil
 }
 
@@ -310,10 +370,38 @@ func (s *DNS) IsOwnLink(ctx context.Context) bool {
 
 // LookupIP implements dns.Client.
 func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, error) {
+	s.wgs.Add(1)
+	defer s.wgs.Done()
+
 	// Normalize the FQDN form query
 	domain = strings.TrimSuffix(domain, ".")
 	if domain == "" {
 		return nil, 0, errors.New("empty domain name")
+	}
+
+	// If this domain is being warmup-resolved, wait briefly for it to complete
+	// to avoid redundant queries and benefit from the cached result.
+	if _, ok := s.warmupInFlight.Load(domain); ok {
+		errors.LogDebug(s.ctx, "domain ", domain, " is being warmup-resolved, waiting...")
+		waitDone := make(chan struct{})
+		go func() {
+			for {
+				if _, loaded := s.warmupInFlight.Load(domain); !loaded {
+					close(waitDone)
+					return
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}()
+		select {
+		case <-waitDone:
+			// Warmup completed — the cache should now have the result.
+		case <-time.After(500 * time.Millisecond):
+			// Don't block the caller too long; proceed with normal resolution.
+			errors.LogDebug(s.ctx, "warmup wait timed out for ", domain, ", proceeding with normal query")
+		case <-s.ctx.Done():
+			return nil, 0, s.ctx.Err()
+		}
 	}
 
 	if s.checkSystem {
@@ -362,11 +450,16 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 		ips, ttl, err = s.serialQuery(domain, option)
 	}
 
-	// Fallback to system DNS when all configured servers FAIL and return no IPs.
-	// Empty response (ErrEmptyResponse) alone does NOT trigger fallback —
-	// this is normal when IPv6 is disabled and domain only has AAAA records.
+	// Fallback to system DNS when all configured servers fail and return no IPs.
+	// ErrEmptyResponse triggers fallback when both IPv4 and IPv6 are enabled
+	// (unexpected empty — likely caused by expectedIP filtering).
+	// When only one IP version is enabled, ErrEmptyResponse is expected (e.g. AAAA-only
+	// domain with IPv4-only query) and does NOT trigger fallback.
+	// SECURITY NOTE: On Chinese networks, system DNS goes through GFW-monitored resolvers.
+	// Users in China should set queryStrategy to UseIP and avoid system fallback.
+	emptyResponseFallback := go_errors.Is(err, dns.ErrEmptyResponse) && option.IPv4Enable && option.IPv6Enable
 	if len(ips) == 0 && err != nil &&
-		!go_errors.Is(err, dns.ErrEmptyResponse) &&
+		(emptyResponseFallback || !go_errors.Is(err, dns.ErrEmptyResponse)) &&
 		!s.checkSystem { // avoid recursion (checkSystem already uses system DNS)
 		errors.LogInfo(s.ctx, "DNS query failed for ", domain, ", falling back to system resolver: ", err)
 		fallbackCtx, fallbackCancel := context.WithTimeout(s.ctx, 2*time.Second)
@@ -389,10 +482,45 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 	return ips, ttl, err
 }
 
+const clientCacheTTL = 60 * time.Second
+
 func (s *DNS) sortClients(domain string) []*Client {
+	// Check cache first
+	if v, ok := s.clientCache.Load(domain); ok {
+		entry := v.(*clientCacheEntry)
+		if time.Now().Before(entry.expiresAt) {
+			return entry.clients
+		}
+		s.clientCache.Delete(domain)
+	}
+
+	clients := s.doSortClients(domain)
+
+	// Store in cache (cap at 2048 entries to prevent memory growth)
+	s.clientCache.Store(domain, &clientCacheEntry{
+		clients:   clients,
+		expiresAt: time.Now().Add(clientCacheTTL),
+	})
+	if atomic.AddInt64(&s.clientCacheSize, 1) > 2048 {
+		// Evict expired entries
+		now := time.Now()
+		s.clientCache.Range(func(key, value any) bool {
+			entry := value.(*clientCacheEntry)
+			if now.After(entry.expiresAt) {
+				s.clientCache.Delete(key)
+				atomic.AddInt64(&s.clientCacheSize, -1)
+			}
+			return true
+		})
+	}
+
+	return clients
+}
+
+func (s *DNS) doSortClients(domain string) []*Client {
 	clients := make([]*Client, 0, len(s.clients))
 	clientUsed := make([]bool, len(s.clients))
-	clientNames := make([]string, 0, len(s.clients))
+	var clientNames []string
 	domainRules := []string{}
 
 	// Priority domain matching

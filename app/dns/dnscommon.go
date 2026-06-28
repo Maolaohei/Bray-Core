@@ -5,9 +5,9 @@ import (
 	"encoding/binary"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
@@ -61,12 +61,36 @@ func (r *IPRecord) getIPs() ([]net.IP, int32, error) {
 
 var errRecordNotFound = errors.New("record not found")
 
+// optResourcePool reuses dnsmessage.Resource + OPTResource across queries
+// to reduce per-query heap allocations.
+var optResourcePool = sync.Pool{
+	New: func() any {
+		return &dnsmessage.Resource{
+			Body: &dnsmessage.OPTResource{},
+		}
+	},
+}
+
+// messagePool reuses dnsmessage.Message structs across queries.
+var messagePool = sync.Pool{
+	New: func() any {
+		return &dnsmessage.Message{}
+	},
+}
+
 type dnsRequest struct {
 	reqType dnsmessage.Type
 	domain  string
 	start   time.Time
 	expire  time.Time
 	msg     *dnsmessage.Message
+}
+
+// dnsRequestPool reuses dnsRequest structs across queries.
+var dnsRequestPool = sync.Pool{
+	New: func() any {
+		return &dnsRequest{}
+	},
 }
 
 func genEDNS0Options(clientIP net.IP, padding int) *dnsmessage.Resource {
@@ -77,10 +101,10 @@ func genEDNS0Options(clientIP net.IP, padding int) *dnsmessage.Resource {
 	const EDNS0SUBNET = 0x8
 	const EDNS0PADDING = 0xc
 
-	opt := new(dnsmessage.Resource)
-	common.Must(opt.Header.SetEDNS0(1350, 0xfe00, true))
-	body := dnsmessage.OPTResource{}
-	opt.Body = &body
+	opt := optResourcePool.Get().(*dnsmessage.Resource)
+	opt.Header.SetEDNS0(1350, 0xfe00, true)
+	body := opt.Body.(*dnsmessage.OPTResource)
+	body.Options = body.Options[:0] // reset without realloc
 
 	if len(clientIP) != 0 {
 		var netmask int
@@ -127,6 +151,38 @@ func genEDNS0Options(clientIP net.IP, padding int) *dnsmessage.Resource {
 	return opt
 }
 
+// releaseOptResource returns an OPT resource to the pool.
+// Must only be called after the Resource is no longer referenced.
+func releaseOptResource(opt *dnsmessage.Resource) {
+	if opt == nil {
+		return
+	}
+	optResourcePool.Put(opt)
+}
+
+// releaseMessage resets and returns a Message to the pool.
+func releaseMessage(msg *dnsmessage.Message) {
+	if msg == nil {
+		return
+	}
+	msg.Questions = msg.Questions[:0]
+	msg.Additionals = msg.Additionals[:0]
+	msg.Answers = msg.Answers[:0]
+	msg.Authorities = msg.Authorities[:0]
+	msg.Header = dnsmessage.Header{}
+	messagePool.Put(msg)
+}
+
+// releaseDnsRequest releases both the Message inside and the dnsRequest struct.
+func releaseDnsRequest(req *dnsRequest) {
+	if req == nil {
+		return
+	}
+	releaseMessage(req.msg)
+	req.msg = nil
+	dnsRequestPool.Put(req)
+}
+
 func buildReqMsgs(domain string, option dns_feature.IPOption, reqIDGen func() uint16, reqOpts *dnsmessage.Resource) ([]*dnsRequest, error) {
 	name, err := dnsmessage.NewName(domain)
 	if err != nil {
@@ -149,36 +205,39 @@ func buildReqMsgs(domain string, option dns_feature.IPOption, reqIDGen func() ui
 	now := time.Now()
 
 	if option.IPv4Enable {
-		msg := new(dnsmessage.Message)
+		msg := messagePool.Get().(*dnsmessage.Message)
 		msg.Header.ID = reqIDGen()
 		msg.Header.RecursionDesired = true
-		msg.Questions = []dnsmessage.Question{qA}
+		msg.Questions = append(msg.Questions[:0], qA)
 		if reqOpts != nil {
-			msg.Additionals = append(msg.Additionals, *reqOpts)
+			msg.Additionals = append(msg.Additionals[:0], *reqOpts)
 		}
-		reqs = append(reqs, &dnsRequest{
-			reqType: dnsmessage.TypeA,
-			domain:  domain,
-			start:   now,
-			msg:     msg,
-		})
+		req := dnsRequestPool.Get().(*dnsRequest)
+		req.reqType = dnsmessage.TypeA
+		req.domain = domain
+		req.start = now
+		req.msg = msg
+		reqs = append(reqs, req)
 	}
 
 	if option.IPv6Enable {
-		msg := new(dnsmessage.Message)
+		msg := messagePool.Get().(*dnsmessage.Message)
 		msg.Header.ID = reqIDGen()
 		msg.Header.RecursionDesired = true
-		msg.Questions = []dnsmessage.Question{qAAAA}
+		msg.Questions = append(msg.Questions[:0], qAAAA)
 		if reqOpts != nil {
-			msg.Additionals = append(msg.Additionals, *reqOpts)
+			msg.Additionals = append(msg.Additionals[:0], *reqOpts)
 		}
-		reqs = append(reqs, &dnsRequest{
-			reqType: dnsmessage.TypeAAAA,
-			domain:  domain,
-			start:   now,
-			msg:     msg,
-		})
+		req := dnsRequestPool.Get().(*dnsRequest)
+		req.reqType = dnsmessage.TypeAAAA
+		req.domain = domain
+		req.start = now
+		req.msg = msg
+		reqs = append(reqs, req)
 	}
+
+	// Release OPT resource back to pool after it's been copied into messages
+	releaseOptResource(reqOpts)
 
 	return reqs, nil
 }

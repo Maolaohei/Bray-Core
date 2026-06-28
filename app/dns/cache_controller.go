@@ -24,6 +24,31 @@ const (
 	migrationBatchSize      = 4096
 )
 
+type recordPool struct {
+	pool sync.Pool
+}
+
+func (p *recordPool) get() *record {
+	v := p.pool.Get()
+	if v == nil {
+		return &record{}
+	}
+	r := v.(*record)
+	r.A = nil
+	r.AAAA = nil
+	return r
+}
+
+func (p *recordPool) put(r *record) {
+	if r != nil {
+		r.A = nil
+		r.AAAA = nil
+		p.pool.Put(r)
+	}
+}
+
+var recordObjPool = recordPool{}
+
 type CacheController struct {
 	name            string
 	disableCache    bool
@@ -132,6 +157,7 @@ func (c *CacheController) writeAndShrink(expiredKeys []string) {
 		}
 		if rec.A == nil && rec.AAAA == nil {
 			delete(c.ips, domain)
+			recordObjPool.put(rec)
 		}
 	}
 
@@ -260,7 +286,7 @@ func (c *CacheController) updateRecord(req *dnsRequest, rep *IPRecord) {
 	c.Lock()
 	lockWait := time.Since(req.start) - rtt
 
-	newRec := &record{}
+	newRec := recordObjPool.get()
 	oldRec := c.ips[req.domain]
 	var dirtyRec *record
 	if c.dirtyips != nil {

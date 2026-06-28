@@ -195,6 +195,7 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			defer cancel()
 
 			b, err := dns.PackMessage(r.msg)
+			releaseDnsRequest(r)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to pack dns query for ", fqdn)
 				if noResponseErrCh != nil {

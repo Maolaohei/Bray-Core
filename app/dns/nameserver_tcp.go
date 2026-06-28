@@ -19,6 +19,8 @@ import (
 	"github.com/xtls/xray-core/transport/internet"
 )
 
+const tcpConnPoolSize = 4
+
 // TCPNameServer implemented DNS over TCP (RFC7766).
 type TCPNameServer struct {
 	cacheController *CacheController
@@ -26,6 +28,7 @@ type TCPNameServer struct {
 	reqID           uint32
 	dial            func(context.Context) (net.Conn, error)
 	clientIP        net.IP
+	connPool        chan net.Conn
 }
 
 // NewTCPNameServer creates DNS over TCP server object for remote resolving.
@@ -85,6 +88,7 @@ func baseTCPNameServer(url *url.URL, prefix string, disableCache bool, serveStal
 		cacheController: NewCacheController(prefix+"//"+dest.NetAddr(), disableCache, serveStale, serveExpiredTTL),
 		destination:     &dest,
 		clientIP:        clientIP,
+		connPool:        make(chan net.Conn, tcpConnPoolSize),
 	}
 
 	return s, nil
@@ -107,6 +111,28 @@ func (s *TCPNameServer) newReqID() uint16 {
 // getCacheController implements CachedNameserver.
 func (s *TCPNameServer) getCacheController() *CacheController {
 	return s.cacheController
+}
+
+func (s *TCPNameServer) getConn(ctx context.Context) (net.Conn, error) {
+	select {
+	case conn := <-s.connPool:
+		if conn != nil {
+			return conn, nil
+		}
+	default:
+	}
+	return s.dial(ctx)
+}
+
+func (s *TCPNameServer) putConn(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	select {
+	case s.connPool <- conn:
+	default:
+		conn.Close()
+	}
 }
 
 // sendQuery implements CachedNameserver.
@@ -152,6 +178,7 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			defer cancel()
 
 			b, err := dns.PackMessage(r.msg)
+			releaseDnsRequest(r)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to pack dns query")
 				if noResponseErrCh != nil {
@@ -160,7 +187,7 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 				return
 			}
 
-			conn, err := s.dial(dnsCtx)
+			conn, err := s.getConn(dnsCtx)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to dial namesever")
 				if noResponseErrCh != nil {
@@ -168,7 +195,14 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 				}
 				return
 			}
-			defer conn.Close()
+			connOK := false
+			defer func() {
+				if connOK {
+					s.putConn(conn)
+				} else {
+					conn.Close()
+				}
+			}()
 			dnsReqBuf := buf.New()
 			err = binary.Write(dnsReqBuf, binary.BigEndian, uint16(b.Len()))
 			if err != nil {
@@ -237,6 +271,7 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			}
 
 			s.cacheController.updateRecord(r, rec)
+			connOK = true
 		}(req)
 	}
 }

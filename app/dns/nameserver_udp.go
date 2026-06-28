@@ -132,11 +132,13 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 			s.addPendingRequest(&newReq)
 			b, _ := dns.PackMessage(newReq.msg)
 			s.udpServer.Dispatch(toDnsContext(newReq.ctx, s.address.String()), *s.address, b)
+			releaseDnsRequest(&req.dnsRequest)
 			return
 		}
 	}
 
 	s.cacheController.updateRecord(&req.dnsRequest, ipRec)
+	releaseDnsRequest(&req.dnsRequest)
 }
 
 func (s *ClassicNameServer) newReqID() uint16 {

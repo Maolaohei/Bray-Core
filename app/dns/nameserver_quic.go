@@ -120,6 +120,7 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- e
 			defer cancel()
 
 			b, err := dns.PackMessage(r.msg)
+			releaseDnsRequest(r)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to pack dns query")
 				if noResponseErrCh != nil {
