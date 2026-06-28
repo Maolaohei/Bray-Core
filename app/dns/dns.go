@@ -5,8 +5,6 @@ import (
 	"context"
 	go_errors "errors"
 	"fmt"
-	"io"
-	"net/http"
 	go_net "net"
 	"sort"
 	"strings"
@@ -239,65 +237,11 @@ func (s *DNS) Start() error {
 	}
 	s.Unlock()
 
-	// Warmup DoH connections in background — adaptive backoff
-	go s.warmupDoHConnections()
-
+	// Domain warmup in background (DNS resolution warmup)
 	if len(domains) > 0 {
 		go s.warmup(domains)
 	}
 	return nil
-}
-
-// warmupDoHConnections pre-establishes HTTP/2 connections to DoH servers.
-// Uses adaptive backoff: starts immediately, retries with exponential delay.
-// - Direct connection (server): succeeds on 1st attempt, zero overhead
-// - Proxied connection (client): fails initially, waits for proxy handshake
-func (s *DNS) warmupDoHConnections() {
-	var wg sync.WaitGroup
-	for _, client := range s.clients {
-		if client.server.IsDisableCache() {
-			continue
-		}
-		dohServer, ok := client.server.(*DoHNameServer)
-		if !ok {
-			continue
-		}
-		wg.Add(1)
-		go func(server *DoHNameServer) {
-			defer wg.Done()
-			s.warmupSingleDoH(server)
-		}(dohServer)
-	}
-	wg.Wait()
-}
-
-func (s *DNS) warmupSingleDoH(server *DoHNameServer) {
-	maxRetries := 5
-	baseDelay := 200 * time.Millisecond
-
-	for i := 0; i < maxRetries; i++ {
-		reqCtx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
-		req, err := http.NewRequestWithContext(reqCtx, "HEAD", server.dohURL, nil)
-		if err != nil {
-			cancel()
-			return
-		}
-		resp, err := server.httpClient.Do(req)
-		cancel()
-
-		if err == nil {
-			if resp.Body != nil {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-			}
-			errors.LogDebug(s.ctx, server.Name(), " warmup OK on attempt ", i+1, ", status: ", resp.StatusCode)
-			return
-		}
-
-		errors.LogDebug(s.ctx, server.Name(), " warmup attempt ", i+1, " failed: ", err)
-		time.Sleep(baseDelay * time.Duration(1<<uint(i)))
-	}
-	errors.LogDebug(s.ctx, server.Name(), " warmup failed after ", maxRetries, " retries")
 }
 
 // SetWarmupDomains configures domains to be pre-resolved at startup
