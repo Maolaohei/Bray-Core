@@ -219,8 +219,8 @@ type XmuxManager struct {
 	poolBehaviorMu sync.RWMutex
 	behaviorStreak int              // consecutive observations of same behavior (for debounce)
 	streakBehavior quality.Behavior // behavior being streaked
-	_dynamicConns  int32            // current effective connections (AIMD smoothed)
-	_dynamicConc   int32            // current effective concurrency (AIMD smoothed)
+	_dynamicConns  atomic.Int32     // current effective connections (AIMD smoothed), lock-free read
+	_dynamicConc   atomic.Int32     // current effective concurrency (AIMD smoothed), lock-free read
 	scaledOnce     bool             // whether dynamic scaling has been applied at least once
 
 	// Dynamic warmup queue
@@ -702,14 +702,15 @@ func (m *XmuxManager) UpdatePoolBehavior(b quality.Behavior) {
 // applyAIMD adjusts effective connections/concurrency using AIMD.
 // Additive Increase: when behavior improves, increase by step
 // Multiplicative Decrease: when behavior worsens, multiply by 0.5
+// Uses atomic Store for lock-free reads by GetXmuxClient.
 func (m *XmuxManager) applyAIMD(b, prevBehavior quality.Behavior) {
 	baseConns := m.connections
 	baseConc := m.concurrency
 
 	if !m.scaledOnce {
 		// First time: set initial values based on behavior
-		m._dynamicConns = m.computeTargetConns(b, baseConns)
-		m._dynamicConc = m.computeTargetConc(b, baseConc)
+		m._dynamicConns.Store(m.computeTargetConns(b, baseConns))
+		m._dynamicConc.Store(m.computeTargetConc(b, baseConc))
 		m.scaledOnce = true
 		return
 	}
@@ -717,31 +718,35 @@ func (m *XmuxManager) applyAIMD(b, prevBehavior quality.Behavior) {
 	if isBehaviorImprovement(b, prevBehavior) {
 		// Additive Increase: move toward target by 1 step
 		targetConns := m.computeTargetConns(b, baseConns)
-		if m._dynamicConns < targetConns {
-			m._dynamicConns += aimdStep
+		if cur := m._dynamicConns.Load(); cur < targetConns {
+			m._dynamicConns.Store(cur + aimdStep)
 		}
 		targetConc := m.computeTargetConc(b, baseConc)
-		if m._dynamicConc < targetConc {
-			m._dynamicConc += aimdStep
+		if cur := m._dynamicConc.Load(); cur < targetConc {
+			m._dynamicConc.Store(cur + aimdStep)
 		}
 	} else if isBehaviorWorsening(b, prevBehavior) {
 		// Multiplicative Decrease: halve immediately
-		m._dynamicConns = m._dynamicConns / 2
-		m._dynamicConc = m._dynamicConc / 2
+		m._dynamicConns.Store(m._dynamicConns.Load() / 2)
+		m._dynamicConc.Store(m._dynamicConc.Load() / 2)
 	}
 
 	// Clamp to sane bounds
-	if m._dynamicConns < 1 {
-		m._dynamicConns = 1
+	if v := m._dynamicConns.Load(); v < 1 {
+		m._dynamicConns.Store(1)
 	}
-	if baseConns > 0 && m._dynamicConns > baseConns*2 {
-		m._dynamicConns = baseConns * 2
+	if baseConns > 0 {
+		if v := m._dynamicConns.Load(); v > baseConns*2 {
+			m._dynamicConns.Store(baseConns * 2)
+		}
 	}
-	if m._dynamicConc < 1 {
-		m._dynamicConc = 1
+	if v := m._dynamicConc.Load(); v < 1 {
+		m._dynamicConc.Store(1)
 	}
-	if baseConc > 0 && m._dynamicConc > baseConc*2 {
-		m._dynamicConc = baseConc * 2
+	if baseConc > 0 {
+		if v := m._dynamicConc.Load(); v > baseConc*2 {
+			m._dynamicConc.Store(baseConc * 2)
+		}
 	}
 }
 
@@ -813,23 +818,27 @@ func (m *XmuxManager) GetPoolBehavior() quality.Behavior {
 }
 
 // effectiveConnections returns the AIMD-smoothed connection limit.
+// Lock-free read via atomic.Load — safe for concurrent callers.
 func (m *XmuxManager) effectiveConnections() int32 {
 	m.poolBehaviorMu.RLock()
-	defer m.poolBehaviorMu.RUnlock()
-	if !m.scaledOnce {
+	scaled := m.scaledOnce
+	m.poolBehaviorMu.RUnlock()
+	if !scaled {
 		return m.connections
 	}
-	return m._dynamicConns
+	return m._dynamicConns.Load()
 }
 
 // effectiveConcurrency returns the AIMD-smoothed concurrency limit.
+// Lock-free read via atomic.Load — safe for concurrent callers.
 func (m *XmuxManager) effectiveConcurrency() int32 {
 	m.poolBehaviorMu.RLock()
-	defer m.poolBehaviorMu.RUnlock()
-	if !m.scaledOnce {
+	scaled := m.scaledOnce
+	m.poolBehaviorMu.RUnlock()
+	if !scaled {
 		return m.concurrency
 	}
-	return m._dynamicConc
+	return m._dynamicConc.Load()
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
