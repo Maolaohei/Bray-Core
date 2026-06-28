@@ -268,9 +268,9 @@ type XmuxManager struct {
 	newConnFunc  func() XmuxConn
 	pool         XmuxClientPool
 	stopCh       chan struct{}
-	doneCh       chan struct{}  // closed when all goroutines exit
-	lastActivity atomic.Int64   // nanosecond timestamp of last client obtain; lock-free
-	closeOnce    sync.Once      // ensures Close() is idempotent
+	doneCh       chan struct{} // closed when all goroutines exit
+	lastActivity atomic.Int64  // nanosecond timestamp of last client obtain; lock-free
+	closeOnce    sync.Once     // ensures Close() is idempotent
 
 	// V2.1: Dynamic Connection Scaling
 	poolBehavior   quality.Behavior // dominant behavior across all clients
@@ -282,7 +282,7 @@ type XmuxManager struct {
 	scaledOnce     bool             // whether dynamic scaling has been applied at least once
 
 	// Dynamic warmup queue
-	warmupQueue  warmupHeap   // min-heap by priority
+	warmupQueue  warmupHeap          // min-heap by priority
 	warmupSet    map[string]struct{} // O(1) dedup
 	warmupMu     sync.Mutex
 	warmupSem    chan struct{} // semaphore for concurrent warmups
