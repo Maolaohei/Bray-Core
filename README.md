@@ -319,10 +319,61 @@ ClientHello → Handshake Engine → MirrorConn (client↔target)
 
 ## 测试
 
-```bash
-# 全量单元测试
-go test -short -timeout 60s ./transport/internet/tcpinfo/ ./transport/internet/quality/ ./transport/internet/splithttp/
+### REALITY 密码学层测试（纯 TLS，无 Xray 栈）
 
+```bash
+# 运行全量 REALITY 测试（L1-L6 + E2E + pprof）
+cd REALITY && go test -v -timeout=120s
+
+# 运行特定级别
+go test -v -tags l1 -run "TestL1" -timeout=60s      # 单元测试
+go test -v -tags l2 -run "TestL2" -timeout=60s      # 握手测试
+go test -v -tags l3 -run "TestL3" -timeout=120s     # E2E 测试
+go test -v -tags l4 -run "TestL4" -timeout=60s      # TLS 兼容性
+go test -v -tags l5 -run "TestL5" -timeout=300s     # Soak 测试
+go test -v -tags l6 -run "TestL6" -timeout=60s      # 回归门禁
+
+# CPU/Memory profiling
+go test -v -tags pprof -run TestL6_PProfBenchmark -timeout=60s
+```
+
+### Xray 栈集成测试（REALITY + splithttp + XMUX + proxy）
+
+```bash
+# 运行全量集成测试
+go test -v -tags l3 -timeout=300s ./testing/scenarios/ -run "TestREALITY"
+
+# 运行 pprof Top10 分析 + Show:true vs Show:false 对比
+go test -v -tags l3 -timeout=180s ./testing/scenarios/ -run "TestREALITYFullSuiteWithPprof|TestREALITYShowFalseBenchmark"
+
+# 运行 XHTTP/XMUX 测试
+go test -v -tags l3 -timeout=300s ./testing/scenarios/ -run "TestVlessXHTTPReality"
+```
+
+### 测试目录结构
+
+```
+REALITY/                              ← 纯密码学层（TLS 握手、缓存、指纹）
+├── prebuild_test.go                  ← Profile 缓存 CRUD、持久化、后台刷新
+├── gate_l1_unit_test.go              ← Profile 存取、过期、隔离、指纹
+├── gate_l2_handshake_test.go         ← TLS 握手、数据传输、并发
+├── gate_l3_e2e_test.go               ← Echo/HTTP 回环、空闲恢复、大数据
+├── gate_l3_production_test.go        ← 分流、降级、长连接、端口扫描
+├── gate_l4_tls_compat_test.go        ← TLS 1.3、ALPN、密码套件
+├── gate_l5_soak_test.go              ← 内存泄漏、长时间 soak
+├── gate_l6_regression_test.go        ← 发版门禁、回归、序列号
+├── e2e_gate_test.go                  ← 完整 E2E 管道
+└── pprof_benchmark_test.go           ← CPU/内存 profiling
+
+testing/scenarios/                    ← Xray 栈集成（REALITY + splithttp + XMUX）
+├── reality_production_test.go        ← 握手、并发、缓存复用/隔离
+├── reality_stress_test.go            ← 高并发、XHTTP、pprof Top10、Show:false
+└── reality_xhttp_xmux_test.go       ← XHTTP、XMUX、冷启动、混合包大小
+```
+
+### 其他测试
+
+```bash
 # XMUX benchmarks
 go test -bench "^BenchmarkXMUX" -run "^$" -timeout 30s ./transport/internet/splithttp/
 
