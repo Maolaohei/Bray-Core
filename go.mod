@@ -37,7 +37,7 @@ require (
 )
 
 require (
-	github.com/Maolaohei/REALITY v0.1.1
+	github.com/Maolaohei/REALITY v0.2.0
 	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/btree v1.1.2 // indirect
@@ -59,5 +59,3 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/Maolaohei/REALITY => ./REALITY
