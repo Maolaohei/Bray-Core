@@ -31,6 +31,8 @@ message Config {
   repeated int64 spider_y = 27;
 
   string master_key_log = 31;
+
+  string cache_dir = 35;
 }
 
 message LimitFallback {

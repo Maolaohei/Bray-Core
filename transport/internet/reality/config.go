@@ -57,6 +57,7 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 		SessionTicketsDisabled: true,
 
 		KeyLogWriter: KeyLogWriterFromConfig(c),
+		CacheDir: c.CacheDir,
 	}
 
 	if c.Mldsa65Seed != nil {

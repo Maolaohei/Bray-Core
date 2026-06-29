@@ -12,7 +12,6 @@ import (
 	gotls "crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
-	"fmt"
 	"io"
 	mrand "math/rand"
 	"net/http"
@@ -79,8 +78,8 @@ func (c *UConn) HandshakeAddress() net.Address {
 func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	if c.Config.Show {
 		localAddr := c.LocalAddr().String()
-		fmt.Printf("REALITY localAddr: %v\tis using X25519MLKEM768 for TLS' communication: %v\n", localAddr, c.HandshakeState.ServerHello.ServerShare.Group == utls.X25519MLKEM768)
-		fmt.Printf("REALITY localAddr: %v\tis using ML-DSA-65 for cert's extra verification: %v\n", localAddr, len(c.Config.Mldsa65Verify) > 0)
+		errors.LogDebug(context.Background(), "REALITY localAddr: ", localAddr, "\tis using X25519MLKEM768 for TLS' communication: ", c.HandshakeState.ServerHello.ServerShare.Group == utls.X25519MLKEM768)
+		errors.LogDebug(context.Background(), "REALITY localAddr: ", localAddr, "\tis using ML-DSA-65 for cert's extra verification: ", len(c.Config.Mldsa65Verify) > 0)
 	}
 	p, ok := reflect.TypeOf(c.Conn).Elem().FieldByName("peerCertificates")
 	if !ok {
@@ -164,7 +163,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		copy(hello.SessionId[8:], config.ShortId)
 		_, _ = rand.Read(hello.SessionId[16:])
 		if config.Show {
-			fmt.Printf("REALITY localAddr: %v\thello.SessionId[:16]: %v\n", localAddr, hello.SessionId[:16])
+			errors.LogDebug(ctx, "REALITY localAddr: ", localAddr, "\thello.SessionId[:16]: ", hello.SessionId[:16])
 		}
 		publicKey, err := ecdh.X25519().NewPublicKey(config.PublicKey)
 		if err != nil {
@@ -187,7 +186,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		}
 		aead := crypto.NewAesGcm(uConn.AuthKey)
 		if config.Show {
-			fmt.Printf("REALITY localAddr: %v\tuConn.AuthKey[:16]: %v\tAEAD: %T\n", localAddr, uConn.AuthKey[:16], aead)
+			errors.LogDebug(ctx, "REALITY localAddr: ", localAddr, "\tuConn.AuthKey[:16]: ", uConn.AuthKey[:16], "\tAEAD: ", reflect.TypeOf(aead).String())
 		}
 		sealed := aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
 		if len(sealed) != 16+16 {
@@ -199,7 +198,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		return nil, err
 	}
 	if config.Show {
-		fmt.Printf("REALITY localAddr: %v\tuConn.Verified: %v\n", localAddr, uConn.Verified)
+		errors.LogDebug(ctx, "REALITY localAddr: ", localAddr, "\tuConn.Verified: ", uConn.Verified)
 	}
 	if !uConn.Verified {
 		errors.LogError(ctx, "REALITY: standard x509 fallback, serverName=", uConn.ServerName)
@@ -212,7 +211,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 				Transport: &http2.Transport{
 					DialTLSContext: func(ctx context.Context, network, addr string, cfg *gotls.Config) (net.Conn, error) {
 						if config.Show {
-							fmt.Printf("REALITY localAddr: %v\tDialTLSContext\n", localAddr)
+							errors.LogDebug(ctx, "REALITY localAddr: ", localAddr, "\tDialTLSContext")
 						}
 						return uConn, nil
 					},
@@ -251,7 +250,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 				headerModes := []string{"nav", "chrome", "firefox", "safari"}
 				utils.TryDefaultHeadersWith(req.Header, headerModes[crypto.RandBetween(0, int64(len(headerModes)-1))])
 				if first && config.Show {
-					fmt.Printf("REALITY localAddr: %v\treq.UserAgent(): %v\n", localAddr, req.UserAgent())
+					errors.LogDebug(ctx, "REALITY localAddr: ", localAddr, "\treq.UserAgent(): ", req.UserAgent())
 				}
 				times := 1
 				if !first {
@@ -286,9 +285,9 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 					}
 					req.URL.Path = spiderPickPath(paths)
 					if config.Show {
-						fmt.Printf("REALITY localAddr: %v\treq.Referer(): %v\n", localAddr, req.Referer())
-						fmt.Printf("REALITY localAddr: %v\tlen(body): %v\n", localAddr, len(body))
-						fmt.Printf("REALITY localAddr: %v\tlen(paths): %v\n", localAddr, len(paths))
+						errors.LogDebug(ctx, "REALITY localAddr: ", localAddr, "\treq.Referer(): ", req.Referer())
+						errors.LogDebug(ctx, "REALITY localAddr: ", localAddr, "\tlen(body): ", len(body))
+						errors.LogDebug(ctx, "REALITY localAddr: ", localAddr, "\tlen(paths): ", len(paths))
 					}
 					maps.Unlock()
 					if !first {
