@@ -37,6 +37,7 @@ errorgen
 !common/errors/errorgen/
 *.dat
 bin/xray_*
+bin/xray-*
 
 # Build assets
 /build_assets/
