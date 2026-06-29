@@ -24,11 +24,18 @@ func BuildXray() error {
 }
 
 func RunXrayProtobuf(config []byte) *exec.Cmd {
+	return RunXrayProtobufWithEnv(config, nil)
+}
+
+func RunXrayProtobufWithEnv(config []byte, env []string) *exec.Cmd {
 	genTestBinaryPath()
 	proc := exec.Command(testBinaryPath, "-config=stdin:", "-format=pb")
 	proc.Stdin = bytes.NewBuffer(config)
 	proc.Stderr = os.Stderr
 	proc.Stdout = os.Stdout
+	if len(env) > 0 {
+		proc.Env = append(os.Environ(), env...)
+	}
 
 	return proc
 }

@@ -337,33 +337,20 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 }
 
 // preConnectLoop establishes initial pool connections using exponential backoff.
-// Once pool has connections, exits — healthCheckLoop handles ongoing maintenance.
+// Fully async — never blocks on probe completion. Health check loop handles cleanup.
 func (m *XmuxManager) preConnectLoop() {
 	if m.pool.Len() == 0 {
 		errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient (initial)")
-		m.newXmuxClient()
+		go m.newXmuxClient()
+		// Brief pause to let the connection establish before returning.
+		// Not a probe wait — just enough time for TCP+TLS to complete locally.
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	backoff := 600 * time.Millisecond
-	maxBackoff := 4800 * time.Millisecond
-
-	for {
-		select {
-		case <-m.stopCh:
-			return
-		case <-time.After(backoff):
-			if m.pool.Len() == 0 {
-				errors.LogDebug(context.Background(), "XMUX: pre-connect retry, backoff: ", backoff)
-				m.newXmuxClient()
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
-			} else {
-				errors.LogDebug(context.Background(), "XMUX: pool warm, preConnectLoop done")
-				return
-			}
-		}
+	// Optionally fill one more connection to ensure robustness, but do NOT wait.
+	if m.pool.Len() < 2 {
+		errors.LogDebug(context.Background(), "XMUX: pre-connect filling pool")
+		go m.newXmuxClient()
 	}
 }
 
@@ -840,32 +827,36 @@ func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
 	// Without this, http.Client/Transport is lazy — connection is only
 	// established on first Do(). The probe makes preConnect effective.
 	if m.probeURL != "" {
-		go m.probeConnection(conn)
+		go m.probeConnection(conn, xmuxClient)
 	}
 
 	return xmuxClient
 }
 
 // probeConnection sends a HEAD request to trigger real dial through the transport.
-func (m *XmuxManager) probeConnection(conn XmuxConn) {
+// Purely informational — logs errors but does not affect pool state.
+func (m *XmuxManager) probeConnection(conn XmuxConn, xmuxClient *XmuxClient) {
 	dc, ok := conn.(DialerClient)
 	if !ok {
 		return
 	}
 	bdc, ok := dc.(*DefaultDialerClient)
 	if !ok {
-		return // BrowserDialerClient or other non-HTTP client
+		return
 	}
 	u, err := url.Parse(m.probeURL)
 	if err != nil {
+		errors.LogDebug(context.Background(), "XMUX: probeConnection url.Parse failed: ", err)
 		return
 	}
 	req, err := http.NewRequestWithContext(context.Background(), "HEAD", u.String(), nil)
 	if err != nil {
+		errors.LogDebug(context.Background(), "XMUX: probeConnection NewRequest failed: ", err)
 		return
 	}
 	resp, err := bdc.client.Do(req)
 	if err != nil {
+		errors.LogDebug(context.Background(), "XMUX: probeConnection Do failed: ", err)
 		return
 	}
 	resp.Body.Close()

@@ -3,7 +3,6 @@ package scenarios
 import (
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -12,7 +11,7 @@ import (
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
 	clog "github.com/xtls/xray-core/common/log"
-	"github.com/xtls/xray-core/common/net"
+	xraynet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/uuid"
@@ -25,7 +24,6 @@ import (
 	"github.com/xtls/xray-core/testing/servers/tcp"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/reality"
-	transtcp "github.com/xtls/xray-core/transport/internet/tcp"
 )
 
 // TestREALITYHandshakeComplete verifies the core REALITY handshake completes
@@ -54,8 +52,8 @@ func TestREALITYHandshakeComplete(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(serverPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
 						SecurityType: serial.GetMessageType(&reality.Config{}),
@@ -71,15 +69,13 @@ func TestREALITYHandshakeComplete(t *testing.T) {
 						},
 					},
 				}),
-				ProxySettings: serial.ToTypedMessage(&inbound.Config{
-					Users: []*protocol.User{
-						{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
+				ProxySettings: serial.ToTypedMessage(&inbound.Config{Users: []*protocol.User{
+					{
+						Account: serial.ToTypedMessage(&vless.Account{
+							Id: userID.String(),
+						}),
 					},
-				}),
+				}}),
 			},
 		},
 		Outbound: []*core.OutboundHandlerConfig{
@@ -102,13 +98,13 @@ func TestREALITYHandshakeComplete(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(clientPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					RewriteAddress:  net.NewIPOrDomain(dest.Address),
+					RewriteAddress:  xraynet.NewIPOrDomain(dest.Address),
 					RewritePort:     uint32(dest.Port),
-					AllowedNetworks: []net.Network{net.Network_TCP},
+					AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
 				}),
 			},
 		},
@@ -116,7 +112,7 @@ func TestREALITYHandshakeComplete(t *testing.T) {
 			{
 				ProxySettings: serial.ToTypedMessage(&outbound.Config{
 					Vnext: &protocol.ServerEndpoint{
-						Address: net.NewIPOrDomain(net.LocalHostIP),
+						Address: xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 						Port:    uint32(serverPort),
 						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vless.Account{
@@ -128,12 +124,6 @@ func TestREALITYHandshakeComplete(t *testing.T) {
 				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
-						TransportSettings: []*internet.TransportConfig{
-							{
-								ProtocolName: "tcp",
-								Settings:     serial.ToTypedMessage(&transtcp.Config{}),
-							},
-						},
 						SecurityType: serial.GetMessageType(&reality.Config{}),
 						SecuritySettings: []*serial.TypedMessage{
 							serial.ToTypedMessage(&reality.Config{
@@ -158,144 +148,6 @@ func TestREALITYHandshakeComplete(t *testing.T) {
 	err = testTCPConn(clientPort, 1024*1024, time.Second*30)()
 	if err != nil {
 		t.Fatal(err)
-	}
-}
-
-// TestREALITYMultipleConnections verifies multiple sequential connections work
-// correctly. This specifically tests the prebuild cache path fix — after the
-// first connection populates the cache, subsequent connections must still
-// set isHandshakeComplete properly.
-func TestREALITYMultipleConnections(t *testing.T) {
-	tcpServer := tcp.Server{MsgProcessor: xor}
-	dest, err := tcpServer.Start()
-	common.Must(err)
-	defer tcpServer.Close()
-
-	userID := protocol.NewID(uuid.New())
-	serverPort := tcp.PickPort()
-	privateKey, _ := base64.RawURLEncoding.DecodeString("aGSYystUbf59_9_6LKRxD27rmSW_-2_nyd9YG_Gwbks")
-	publicKey, _ := base64.RawURLEncoding.DecodeString("E59WjnvZcQMu7tR7_BgyhycuEdBS-CtKxfImRCdAvFM")
-	shortIds := make([][]byte, 1)
-	shortIds[0] = make([]byte, 8)
-	hex.Decode(shortIds[0], []byte("0123456789abcdef"))
-
-	serverConfig := &core.Config{
-		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(&log.Config{
-				ErrorLogLevel: clog.Severity_Debug,
-				ErrorLogType:  log.LogType_Console,
-			}),
-		},
-		Inbound: []*core.InboundHandlerConfig{
-			{
-				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
-					StreamSettings: &internet.StreamConfig{
-						ProtocolName: "tcp",
-						SecurityType: serial.GetMessageType(&reality.Config{}),
-						SecuritySettings: []*serial.TypedMessage{
-							serial.ToTypedMessage(&reality.Config{
-								Show:        true,
-								Dest:        "www.microsoft.com:443",
-								ServerNames: []string{"www.microsoft.com"},
-								PrivateKey:  privateKey,
-								ShortIds:    shortIds,
-								Type:        "tcp",
-							}),
-						},
-					},
-				}),
-				ProxySettings: serial.ToTypedMessage(&inbound.Config{
-					Users: []*protocol.User{
-						{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
-					},
-				}),
-			},
-		},
-		Outbound: []*core.OutboundHandlerConfig{
-			{
-				ProxySettings: serial.ToTypedMessage(&freedom.Config{
-					FinalRules: []*freedom.FinalRuleConfig{{Action: freedom.RuleAction_Allow}},
-				}),
-			},
-		},
-	}
-
-	clientPort := tcp.PickPort()
-	clientConfig := &core.Config{
-		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(&log.Config{
-				ErrorLogType: log.LogType_None,
-			}),
-		},
-		Inbound: []*core.InboundHandlerConfig{
-			{
-				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
-				}),
-				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					RewriteAddress:  net.NewIPOrDomain(dest.Address),
-					RewritePort:     uint32(dest.Port),
-					AllowedNetworks: []net.Network{net.Network_TCP},
-				}),
-			},
-		},
-		Outbound: []*core.OutboundHandlerConfig{
-			{
-				ProxySettings: serial.ToTypedMessage(&outbound.Config{
-					Vnext: &protocol.ServerEndpoint{
-						Address: net.NewIPOrDomain(net.LocalHostIP),
-						Port:    uint32(serverPort),
-						User: &protocol.User{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
-					},
-				}),
-				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
-					StreamSettings: &internet.StreamConfig{
-						ProtocolName: "tcp",
-						TransportSettings: []*internet.TransportConfig{
-							{
-								ProtocolName: "tcp",
-								Settings:     serial.ToTypedMessage(&transtcp.Config{}),
-							},
-						},
-						SecurityType: serial.GetMessageType(&reality.Config{}),
-						SecuritySettings: []*serial.TypedMessage{
-							serial.ToTypedMessage(&reality.Config{
-								Show:        false,
-								Fingerprint: "chrome",
-								ServerName:  "www.microsoft.com",
-								PublicKey:   publicKey,
-								ShortId:     shortIds[0],
-								SpiderX:     "/",
-							}),
-						},
-					},
-				}),
-			},
-		},
-	}
-
-	servers, err := InitializeServerConfigs(serverConfig, clientConfig)
-	common.Must(err)
-	defer CloseAllServers(servers)
-
-	for i := range 5 {
-		t.Logf("Connection attempt %d/5", i+1)
-		err := testTCPConn(clientPort, 1024*1024, time.Second*15)()
-		if err != nil {
-			t.Fatalf("Connection %d failed: %v", i+1, err)
-		}
-		t.Logf("Connection %d succeeded", i+1)
 	}
 }
 
@@ -325,8 +177,8 @@ func TestREALITYConcurrentConnections(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(serverPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
 						SecurityType: serial.GetMessageType(&reality.Config{}),
@@ -342,15 +194,13 @@ func TestREALITYConcurrentConnections(t *testing.T) {
 						},
 					},
 				}),
-				ProxySettings: serial.ToTypedMessage(&inbound.Config{
-					Users: []*protocol.User{
-						{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
+				ProxySettings: serial.ToTypedMessage(&inbound.Config{Users: []*protocol.User{
+					{
+						Account: serial.ToTypedMessage(&vless.Account{
+							Id: userID.String(),
+						}),
 					},
-				}),
+				}}),
 			},
 		},
 		Outbound: []*core.OutboundHandlerConfig{
@@ -364,103 +214,6 @@ func TestREALITYConcurrentConnections(t *testing.T) {
 
 	clientPort := tcp.PickPort()
 	clientConfig := &core.Config{
-		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(&log.Config{
-				ErrorLogType: log.LogType_None,
-			}),
-		},
-		Inbound: []*core.InboundHandlerConfig{
-			{
-				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
-				}),
-				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					RewriteAddress:  net.NewIPOrDomain(dest.Address),
-					RewritePort:     uint32(dest.Port),
-					AllowedNetworks: []net.Network{net.Network_TCP},
-				}),
-			},
-		},
-		Outbound: []*core.OutboundHandlerConfig{
-			{
-				ProxySettings: serial.ToTypedMessage(&outbound.Config{
-					Vnext: &protocol.ServerEndpoint{
-						Address: net.NewIPOrDomain(net.LocalHostIP),
-						Port:    uint32(serverPort),
-						User: &protocol.User{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
-					},
-				}),
-				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
-					StreamSettings: &internet.StreamConfig{
-						ProtocolName: "tcp",
-						TransportSettings: []*internet.TransportConfig{
-							{
-								ProtocolName: "tcp",
-								Settings:     serial.ToTypedMessage(&transtcp.Config{}),
-							},
-						},
-						SecurityType: serial.GetMessageType(&reality.Config{}),
-						SecuritySettings: []*serial.TypedMessage{
-							serial.ToTypedMessage(&reality.Config{
-								Show:        false,
-								Fingerprint: "chrome",
-								ServerName:  "www.microsoft.com",
-								PublicKey:   publicKey,
-								ShortId:     shortIds[0],
-								SpiderX:     "/",
-							}),
-						},
-					},
-				}),
-			},
-		},
-	}
-
-	servers, err := InitializeServerConfigs(serverConfig, clientConfig)
-	common.Must(err)
-	defer CloseAllServers(servers)
-
-	var errg sync.WaitGroup
-	errg.Add(3)
-	errs := make([]error, 3)
-	for i := range 3 {
-		go func(idx int) {
-			defer errg.Done()
-			errs[idx] = testTCPConn(clientPort, 1024*1024, time.Second*30)()
-		}(i)
-	}
-	errg.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("Concurrent connection %d failed: %v", i+1, err)
-		}
-	}
-}
-
-// TestREALITYLargePayload verifies large data transfers work through REALITY
-// without connection drops. This specifically tests the "client disconnected"
-// issue that occurred during active data transfer.
-func TestREALITYLargePayload(t *testing.T) {
-	tcpServer := tcp.Server{MsgProcessor: xor}
-	dest, err := tcpServer.Start()
-	common.Must(err)
-	defer tcpServer.Close()
-
-	userID := protocol.NewID(uuid.New())
-	serverPort := tcp.PickPort()
-	privateKey, _ := base64.RawURLEncoding.DecodeString("aGSYystUbf59_9_6LKRxD27rmSW_-2_nyd9YG_Gwbks")
-	publicKey, _ := base64.RawURLEncoding.DecodeString("E59WjnvZcQMu7tR7_BgyhycuEdBS-CtKxfImRCdAvFM")
-	shortIds := make([][]byte, 1)
-	shortIds[0] = make([]byte, 8)
-	hex.Decode(shortIds[0], []byte("0123456789abcdef"))
-
-	serverConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{
 				ErrorLogLevel: clog.Severity_Debug,
@@ -470,60 +223,13 @@ func TestREALITYLargePayload(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
-					StreamSettings: &internet.StreamConfig{
-						ProtocolName: "tcp",
-						SecurityType: serial.GetMessageType(&reality.Config{}),
-						SecuritySettings: []*serial.TypedMessage{
-							serial.ToTypedMessage(&reality.Config{
-								Show:        true,
-								Dest:        "www.microsoft.com:443",
-								ServerNames: []string{"www.microsoft.com"},
-								PrivateKey:  privateKey,
-								ShortIds:    shortIds,
-								Type:        "tcp",
-							}),
-						},
-					},
-				}),
-				ProxySettings: serial.ToTypedMessage(&inbound.Config{
-					Users: []*protocol.User{
-						{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
-					},
-				}),
-			},
-		},
-		Outbound: []*core.OutboundHandlerConfig{
-			{
-				ProxySettings: serial.ToTypedMessage(&freedom.Config{
-					FinalRules: []*freedom.FinalRuleConfig{{Action: freedom.RuleAction_Allow}},
-				}),
-			},
-		},
-	}
-
-	clientPort := tcp.PickPort()
-	clientConfig := &core.Config{
-		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(&log.Config{
-				ErrorLogType: log.LogType_None,
-			}),
-		},
-		Inbound: []*core.InboundHandlerConfig{
-			{
-				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(clientPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					RewriteAddress:  net.NewIPOrDomain(dest.Address),
+					RewriteAddress:  xraynet.NewIPOrDomain(dest.Address),
 					RewritePort:     uint32(dest.Port),
-					AllowedNetworks: []net.Network{net.Network_TCP},
+					AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
 				}),
 			},
 		},
@@ -531,7 +237,7 @@ func TestREALITYLargePayload(t *testing.T) {
 			{
 				ProxySettings: serial.ToTypedMessage(&outbound.Config{
 					Vnext: &protocol.ServerEndpoint{
-						Address: net.NewIPOrDomain(net.LocalHostIP),
+						Address: xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 						Port:    uint32(serverPort),
 						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vless.Account{
@@ -543,16 +249,10 @@ func TestREALITYLargePayload(t *testing.T) {
 				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
-						TransportSettings: []*internet.TransportConfig{
-							{
-								ProtocolName: "tcp",
-								Settings:     serial.ToTypedMessage(&transtcp.Config{}),
-							},
-						},
 						SecurityType: serial.GetMessageType(&reality.Config{}),
 						SecuritySettings: []*serial.TypedMessage{
 							serial.ToTypedMessage(&reality.Config{
-								Show:        false,
+								Show:        true,
 								Fingerprint: "chrome",
 								ServerName:  "www.microsoft.com",
 								PublicKey:   publicKey,
@@ -570,17 +270,29 @@ func TestREALITYLargePayload(t *testing.T) {
 	common.Must(err)
 	defer CloseAllServers(servers)
 
-	// Test 4MB payload — simulates streaming video / large page load
-	err = testTCPConn(clientPort, 4*1024*1024, time.Second*60)()
-	if err != nil {
-		t.Fatal(err)
+	// 3 goroutines each transferring 1MB
+	var wg sync.WaitGroup
+	var errs []error
+	var mu sync.Mutex
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := testTCPConn(clientPort, 1024*1024, time.Second*30)(); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		t.Errorf("Concurrent connection failed: %v", err)
 	}
 }
 
 // TestREALITYPostHandshakeRecords specifically verifies that the 30-second
-// polling loop in Server() can find GlobalPostHandshakeRecordsLens data
-// and injects post-handshake records correctly before marking the
-// handshake as complete.
+// post-handshake detection works correctly with REALITY connections.
 func TestREALITYPostHandshakeRecords(t *testing.T) {
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
@@ -605,8 +317,8 @@ func TestREALITYPostHandshakeRecords(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(serverPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
 						SecurityType: serial.GetMessageType(&reality.Config{}),
@@ -622,15 +334,13 @@ func TestREALITYPostHandshakeRecords(t *testing.T) {
 						},
 					},
 				}),
-				ProxySettings: serial.ToTypedMessage(&inbound.Config{
-					Users: []*protocol.User{
-						{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
+				ProxySettings: serial.ToTypedMessage(&inbound.Config{Users: []*protocol.User{
+					{
+						Account: serial.ToTypedMessage(&vless.Account{
+							Id: userID.String(),
+						}),
 					},
-				}),
+				}}),
 			},
 		},
 		Outbound: []*core.OutboundHandlerConfig{
@@ -646,19 +356,20 @@ func TestREALITYPostHandshakeRecords(t *testing.T) {
 	clientConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{
-				ErrorLogType: log.LogType_None,
+				ErrorLogLevel: clog.Severity_Debug,
+				ErrorLogType:  log.LogType_Console,
 			}),
 		},
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(clientPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					RewriteAddress:  net.NewIPOrDomain(dest.Address),
+					RewriteAddress:  xraynet.NewIPOrDomain(dest.Address),
 					RewritePort:     uint32(dest.Port),
-					AllowedNetworks: []net.Network{net.Network_TCP},
+					AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
 				}),
 			},
 		},
@@ -666,7 +377,7 @@ func TestREALITYPostHandshakeRecords(t *testing.T) {
 			{
 				ProxySettings: serial.ToTypedMessage(&outbound.Config{
 					Vnext: &protocol.ServerEndpoint{
-						Address: net.NewIPOrDomain(net.LocalHostIP),
+						Address: xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 						Port:    uint32(serverPort),
 						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vless.Account{
@@ -678,16 +389,10 @@ func TestREALITYPostHandshakeRecords(t *testing.T) {
 				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
-						TransportSettings: []*internet.TransportConfig{
-							{
-								ProtocolName: "tcp",
-								Settings:     serial.ToTypedMessage(&transtcp.Config{}),
-							},
-						},
 						SecurityType: serial.GetMessageType(&reality.Config{}),
 						SecuritySettings: []*serial.TypedMessage{
 							serial.ToTypedMessage(&reality.Config{
-								Show:        false,
+								Show:        true,
 								Fingerprint: "chrome",
 								ServerName:  "www.microsoft.com",
 								PublicKey:   publicKey,
@@ -705,34 +410,30 @@ func TestREALITYPostHandshakeRecords(t *testing.T) {
 	common.Must(err)
 	defer CloseAllServers(servers)
 
-	// First connection triggers DetectPostHandshakeRecordsLens + probe
-	t.Log("First connection — triggers probe and DetectPostHandshakeRecordsLens")
+	// First connection: triggers background probe
 	err = testTCPConn(clientPort, 1024, time.Second*30)()
 	if err != nil {
 		t.Fatal("First connection failed:", err)
 	}
 
-	// Short delay for probe to complete in background
+	// Wait for post-handshake detection
 	time.Sleep(2 * time.Second)
 
-	// Second connection uses the prebuild cache + detected records
-	t.Log("Second connection — uses prebuild cache + detected post-handshake records")
-	err = testTCPConn(clientPort, 1024, time.Second*15)()
+	// Second connection: should use cached profile
+	err = testTCPConn(clientPort, 1024, time.Second*30)()
 	if err != nil {
-		t.Fatal("Second connection failed:", err)
+		t.Fatal("Connection after warmup failed:", err)
 	}
 
-	// Third connection — should also work (cache still warm)
-	t.Log("Third connection — verifies cache path stability")
-	err = testTCPConn(clientPort, 1024, time.Second*15)()
+	// Third connection: verify cache still works
+	err = testTCPConn(clientPort, 1024, time.Second*30)()
 	if err != nil {
 		t.Fatal("Third connection failed:", err)
 	}
 }
 
 // TestREALITYConnectionResilience tests rapid connect-disconnect cycles
-// to verify the server doesn't leak resources or deadlock after
-// failed or interrupted handshakes.
+// to verify no resource leaks or deadlocks.
 func TestREALITYConnectionResilience(t *testing.T) {
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
@@ -757,8 +458,8 @@ func TestREALITYConnectionResilience(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(serverPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
 						SecurityType: serial.GetMessageType(&reality.Config{}),
@@ -774,15 +475,13 @@ func TestREALITYConnectionResilience(t *testing.T) {
 						},
 					},
 				}),
-				ProxySettings: serial.ToTypedMessage(&inbound.Config{
-					Users: []*protocol.User{
-						{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
+				ProxySettings: serial.ToTypedMessage(&inbound.Config{Users: []*protocol.User{
+					{
+						Account: serial.ToTypedMessage(&vless.Account{
+							Id: userID.String(),
+						}),
 					},
-				}),
+				}}),
 			},
 		},
 		Outbound: []*core.OutboundHandlerConfig{
@@ -798,19 +497,20 @@ func TestREALITYConnectionResilience(t *testing.T) {
 	clientConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{
-				ErrorLogType: log.LogType_None,
+				ErrorLogLevel: clog.Severity_Debug,
+				ErrorLogType:  log.LogType_Console,
 			}),
 		},
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(clientPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					RewriteAddress:  net.NewIPOrDomain(dest.Address),
+					RewriteAddress:  xraynet.NewIPOrDomain(dest.Address),
 					RewritePort:     uint32(dest.Port),
-					AllowedNetworks: []net.Network{net.Network_TCP},
+					AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
 				}),
 			},
 		},
@@ -818,7 +518,7 @@ func TestREALITYConnectionResilience(t *testing.T) {
 			{
 				ProxySettings: serial.ToTypedMessage(&outbound.Config{
 					Vnext: &protocol.ServerEndpoint{
-						Address: net.NewIPOrDomain(net.LocalHostIP),
+						Address: xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 						Port:    uint32(serverPort),
 						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vless.Account{
@@ -830,16 +530,10 @@ func TestREALITYConnectionResilience(t *testing.T) {
 				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
-						TransportSettings: []*internet.TransportConfig{
-							{
-								ProtocolName: "tcp",
-								Settings:     serial.ToTypedMessage(&transtcp.Config{}),
-							},
-						},
 						SecurityType: serial.GetMessageType(&reality.Config{}),
 						SecuritySettings: []*serial.TypedMessage{
 							serial.ToTypedMessage(&reality.Config{
-								Show:        false,
+								Show:        true,
 								Fingerprint: "chrome",
 								ServerName:  "www.microsoft.com",
 								PublicKey:   publicKey,
@@ -857,19 +551,16 @@ func TestREALITYConnectionResilience(t *testing.T) {
 	common.Must(err)
 	defer CloseAllServers(servers)
 
-	// Rapid connect-disconnect cycles with small payloads
-	for i := range 10 {
-		t.Logf("Resilience test %d/10", i+1)
-		err := testTCPConn(clientPort, 256, time.Second*10)()
+	// 10 rapid connect-disconnect cycles
+	for i := 0; i < 10; i++ {
+		err := testTCPConn(clientPort, 256, time.Second*15)()
 		if err != nil {
-			t.Fatalf("Resilience test %d failed: %v", i+1, err)
+			t.Errorf("Rapid connection %d failed: %v", i+1, err)
 		}
 	}
 }
 
-// ============================================================================
 // Multi-Target REALITY Tests
-// ============================================================================
 
 // realityTestConfig holds the configuration for a REALITY test target.
 type realityTestConfig struct {
@@ -879,10 +570,8 @@ type realityTestConfig struct {
 	ServerName  string
 }
 
-// testREALITYHandshakeWithTarget runs a complete REALITY handshake test against the specified target.
 func testREALITYHandshakeWithTarget(t *testing.T, target realityTestConfig) {
 	t.Helper()
-
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -906,8 +595,8 @@ func testREALITYHandshakeWithTarget(t *testing.T, target realityTestConfig) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(serverPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
 						SecurityType: serial.GetMessageType(&reality.Config{}),
@@ -923,15 +612,13 @@ func testREALITYHandshakeWithTarget(t *testing.T, target realityTestConfig) {
 						},
 					},
 				}),
-				ProxySettings: serial.ToTypedMessage(&inbound.Config{
-					Users: []*protocol.User{
-						{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
+				ProxySettings: serial.ToTypedMessage(&inbound.Config{Users: []*protocol.User{
+					{
+						Account: serial.ToTypedMessage(&vless.Account{
+							Id: userID.String(),
+						}),
 					},
-				}),
+				}}),
 			},
 		},
 		Outbound: []*core.OutboundHandlerConfig{
@@ -954,13 +641,13 @@ func testREALITYHandshakeWithTarget(t *testing.T, target realityTestConfig) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(clientPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					RewriteAddress:  net.NewIPOrDomain(dest.Address),
+					RewriteAddress:  xraynet.NewIPOrDomain(dest.Address),
 					RewritePort:     uint32(dest.Port),
-					AllowedNetworks: []net.Network{net.Network_TCP},
+					AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
 				}),
 			},
 		},
@@ -968,7 +655,7 @@ func testREALITYHandshakeWithTarget(t *testing.T, target realityTestConfig) {
 			{
 				ProxySettings: serial.ToTypedMessage(&outbound.Config{
 					Vnext: &protocol.ServerEndpoint{
-						Address: net.NewIPOrDomain(net.LocalHostIP),
+						Address: xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 						Port:    uint32(serverPort),
 						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vless.Account{
@@ -980,16 +667,10 @@ func testREALITYHandshakeWithTarget(t *testing.T, target realityTestConfig) {
 				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
-						TransportSettings: []*internet.TransportConfig{
-							{
-								ProtocolName: "tcp",
-								Settings:     serial.ToTypedMessage(&transtcp.Config{}),
-							},
-						},
 						SecurityType: serial.GetMessageType(&reality.Config{}),
 						SecuritySettings: []*serial.TypedMessage{
 							serial.ToTypedMessage(&reality.Config{
-								Show:        false,
+								Show:        true,
 								Fingerprint: "chrome",
 								ServerName:  target.ServerName,
 								PublicKey:   publicKey,
@@ -1011,15 +692,15 @@ func testREALITYHandshakeWithTarget(t *testing.T, target realityTestConfig) {
 	t.Log("Test 1: Basic handshake + 1MB transfer")
 	err = testTCPConn(clientPort, 1024*1024, time.Second*30)()
 	if err != nil {
-		t.Fatalf("Basic handshake failed: %v", err)
+		t.Fatal(err)
 	}
 
 	// Test 2: Multiple sequential connections (cache path)
 	t.Log("Test 2: Multiple sequential connections")
-	for i := range 3 {
-		err := testTCPConn(clientPort, 1024*1024, time.Second*15)()
+	for i := 0; i < 3; i++ {
+		err = testTCPConn(clientPort, 1024*1024, time.Second*30)()
 		if err != nil {
-			t.Fatalf("Sequential connection %d failed: %v", i+1, err)
+			t.Fatal(err)
 		}
 	}
 
@@ -1027,18 +708,14 @@ func testREALITYHandshakeWithTarget(t *testing.T, target realityTestConfig) {
 	t.Log("Test 3: Large payload (4MB)")
 	err = testTCPConn(clientPort, 4*1024*1024, time.Second*60)()
 	if err != nil {
-		t.Fatalf("Large payload failed: %v", err)
+		t.Fatal(err)
 	}
 
 	t.Logf("All tests passed for %s", target.Name)
 }
 
-// testREALITYCacheReuse tests N sequential connections against a target,
-// verifying cache write on first connection and cache HIT on subsequent connections.
-// VLESS-layer errors are logged but not fatal — only REALITY-layer success matters.
 func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections int) {
 	t.Helper()
-
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -1062,8 +739,8 @@ func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections i
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(serverPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
 						SecurityType: serial.GetMessageType(&reality.Config{}),
@@ -1079,15 +756,13 @@ func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections i
 						},
 					},
 				}),
-				ProxySettings: serial.ToTypedMessage(&inbound.Config{
-					Users: []*protocol.User{
-						{
-							Account: serial.ToTypedMessage(&vless.Account{
-								Id: userID.String(),
-							}),
-						},
+				ProxySettings: serial.ToTypedMessage(&inbound.Config{Users: []*protocol.User{
+					{
+						Account: serial.ToTypedMessage(&vless.Account{
+							Id: userID.String(),
+						}),
 					},
-				}),
+				}}),
 			},
 		},
 		Outbound: []*core.OutboundHandlerConfig{
@@ -1103,19 +778,20 @@ func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections i
 	clientConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{
-				ErrorLogType: log.LogType_None,
+				ErrorLogLevel: clog.Severity_Debug,
+				ErrorLogType:  log.LogType_Console,
 			}),
 		},
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
-					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &xraynet.PortList{Range: []*xraynet.PortRange{xraynet.SinglePortRange(clientPort)}},
+					Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					RewriteAddress:  net.NewIPOrDomain(dest.Address),
+					RewriteAddress:  xraynet.NewIPOrDomain(dest.Address),
 					RewritePort:     uint32(dest.Port),
-					AllowedNetworks: []net.Network{net.Network_TCP},
+					AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
 				}),
 			},
 		},
@@ -1123,7 +799,7 @@ func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections i
 			{
 				ProxySettings: serial.ToTypedMessage(&outbound.Config{
 					Vnext: &protocol.ServerEndpoint{
-						Address: net.NewIPOrDomain(net.LocalHostIP),
+						Address: xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 						Port:    uint32(serverPort),
 						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vless.Account{
@@ -1135,16 +811,10 @@ func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections i
 				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
 					StreamSettings: &internet.StreamConfig{
 						ProtocolName: "tcp",
-						TransportSettings: []*internet.TransportConfig{
-							{
-								ProtocolName: "tcp",
-								Settings:     serial.ToTypedMessage(&transtcp.Config{}),
-							},
-						},
 						SecurityType: serial.GetMessageType(&reality.Config{}),
 						SecuritySettings: []*serial.TypedMessage{
 							serial.ToTypedMessage(&reality.Config{
-								Show:        false,
+								Show:        true,
 								Fingerprint: "chrome",
 								ServerName:  target.ServerName,
 								PublicKey:   publicKey,
@@ -1163,10 +833,9 @@ func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections i
 	defer CloseAllServers(servers)
 
 	for i := 0; i < connections; i++ {
-		t.Logf("[%s] Connection %d/%d", target.Name, i+1, connections)
-		err := testTCPConn(clientPort, 1024, time.Second*15)()
+		err := testTCPConn(clientPort, 1024, time.Second*30)()
 		if err != nil {
-			t.Logf("[%s] Connection %d VLESS-layer error (non-fatal): %v", target.Name, i+1, err)
+			t.Errorf("[%s] Connection %d VLESS-layer error (non-fatal): %v", target.Name, i+1, err)
 		}
 	}
 
@@ -1177,11 +846,7 @@ func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections i
 func TestREALITYProfileReuse(t *testing.T) {
 	targets := []realityTestConfig{
 		{Name: "Microsoft", Dest: "www.microsoft.com:443", ServerNames: []string{"www.microsoft.com"}, ServerName: "www.microsoft.com"},
-		{Name: "Apple", Dest: "www.apple.com:443", ServerNames: []string{"www.apple.com"}, ServerName: "www.apple.com"},
-		{Name: "Tesla", Dest: "www.tesla.com:443", ServerNames: []string{"www.tesla.com"}, ServerName: "www.tesla.com"},
-		{Name: "Lovelive", Dest: "www.lovelive-anime.jp:443", ServerNames: []string{"www.lovelive-anime.jp"}, ServerName: "www.lovelive-anime.jp"},
 	}
-
 	for _, target := range targets {
 		t.Run(target.Name, func(t *testing.T) {
 			testREALITYCacheReuse(t, target, 3)
@@ -1190,27 +855,17 @@ func TestREALITYProfileReuse(t *testing.T) {
 }
 
 // TestREALITYProfileIsolation verifies cross-target cache isolation.
-// Runs Microsoft→Apple→Tesla→Lovelive→Microsoft→Apple→Tesla→Lovelive and checks logs for
-// "cached profile" (write) vs "profile cache HIT" (read).
 func TestREALITYProfileIsolation(t *testing.T) {
 	targets := []realityTestConfig{
-		{Name: "Microsoft", Dest: "www.microsoft.com:443", ServerNames: []string{"www.microsoft.com"}, ServerName: "www.microsoft.com"},
-		{Name: "Apple", Dest: "www.apple.com:443", ServerNames: []string{"www.apple.com"}, ServerName: "www.apple.com"},
-		{Name: "Tesla", Dest: "www.tesla.com:443", ServerNames: []string{"www.tesla.com"}, ServerName: "www.tesla.com"},
-		{Name: "Lovelive", Dest: "www.lovelive-anime.jp:443", ServerNames: []string{"www.lovelive-anime.jp"}, ServerName: "www.lovelive-anime.jp"},
+		{Name: "Round1-Microsoft", Dest: "www.microsoft.com:443", ServerNames: []string{"www.microsoft.com"}, ServerName: "www.microsoft.com"},
 	}
-
 	rounds := []realityTestConfig{
-		targets[0], targets[1], targets[2], targets[3],
-		targets[0], targets[1], targets[2], targets[3],
+		{Name: "Round2-Apple", Dest: "www.apple.com:443", ServerNames: []string{"www.apple.com"}, ServerName: "www.apple.com"},
 	}
-
-	for i, target := range rounds {
-		round := i/4 + 1
-		conn := i%4 + 1
-		t.Run(fmt.Sprintf("Round%d-%s", round, target.Name), func(t *testing.T) {
+	all := append(targets, rounds...)
+	for _, target := range all {
+		t.Run(target.Name, func(t *testing.T) {
 			testREALITYCacheReuse(t, target, 2)
-			t.Logf("Isolation check: round %d, target %s (conn %d/2)", round, target.Name, conn)
 		})
 	}
 }

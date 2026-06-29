@@ -205,7 +205,6 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			errors.LogDebug(ctxInner, "XHTTP dial: TCP failed in ", tcpDur.Round(time.Millisecond), ": ", err)
 			return nil, err
 		}
-		errors.LogDebug(ctxInner, "XHTTP dial: TCP connected in ", tcpDur.Round(time.Millisecond))
 
 		// Notify profiling: raw TCP socket before TLS/REALITY wrapping
 		if dc.onNewConn != nil {
@@ -233,7 +232,6 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 				return nil, err
 			}
 			conn = newConn
-			errors.LogDebug(ctxInner, "XHTTP dial: REALITY handshake in ", realityDur.Round(time.Millisecond))
 			return conn, nil
 		}
 
@@ -252,7 +250,6 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			} else {
 				conn = tls.Client(conn, gotlsConfig)
 			}
-			errors.LogDebug(ctxInner, "XHTTP dial: TLS handshake in ", time.Since(t1).Round(time.Millisecond))
 		}
 
 		return conn, nil
@@ -528,8 +525,6 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		sessionId = transportConfiguration.GenerateSessionID()
 	}
 
-	errors.LogInfo(ctx, "XHTTP is dialing to ", dest, ", mode ", mode, ", HTTP version ", httpVersion, ", host ", requestURL.Host)
-
 	requestURL2 := requestURL
 	httpClient2 := httpClient
 	xmuxClient2 := xmuxClient
@@ -578,7 +573,6 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		requestURL2.Path = config2.GetNormalizedPath()
 		requestURL2.RawQuery = config2.GetNormalizedQuery()
 		httpClient2, xmuxClient2 = getHTTPClient(ctx, dest2, memory2)
-		errors.LogInfo(ctx, "XHTTP is downloading from ", dest2, ", mode stream-down, HTTP version ", httpVersion2, ", host ", requestURL2.Host)
 	}
 
 	if xmuxClient != nil {

@@ -74,7 +74,35 @@ func InitializeServerConfigs(configs ...*core.Config) ([]*exec.Cmd, error) {
 	return servers, nil
 }
 
+func InitializeServerConfigsWithPprof(pprofPort int, configs ...*core.Config) ([]*exec.Cmd, error) {
+	servers := make([]*exec.Cmd, 0, 10)
+	pprofEnv := []string{fmt.Sprintf("XRAY_PPROF=:%d", pprofPort)}
+
+	for i, config := range configs {
+		var server *exec.Cmd
+		var err error
+		if i == 0 {
+			server, err = InitializeServerConfigWithEnv(config, pprofEnv)
+		} else {
+			server, err = InitializeServerConfig(config)
+		}
+		if err != nil {
+			CloseAllServers(servers)
+			return nil, err
+		}
+		servers = append(servers, server)
+	}
+
+	time.Sleep(time.Second * 2)
+
+	return servers, nil
+}
+
 func InitializeServerConfig(config *core.Config) (*exec.Cmd, error) {
+	return InitializeServerConfigWithEnv(config, nil)
+}
+
+func InitializeServerConfigWithEnv(config *core.Config, env []string) (*exec.Cmd, error) {
 	err := BuildXray()
 	if err != nil {
 		return nil, err
@@ -85,7 +113,7 @@ func InitializeServerConfig(config *core.Config) (*exec.Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	proc := RunXrayProtobuf(configBytes)
+	proc := RunXrayProtobufWithEnv(configBytes, env)
 
 	if err := proc.Start(); err != nil {
 		return nil, err

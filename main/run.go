@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path"
@@ -92,6 +95,16 @@ func executeRun(cmd *base.Command, args []string) {
 		os.Exit(-1)
 	}
 	defer server.Close()
+
+	if pprofAddr := os.Getenv("XRAY_PPROF"); pprofAddr != "" {
+		ln, err := net.Listen("tcp", pprofAddr)
+		if err != nil {
+			fmt.Println("pprof listen error:", err)
+		} else {
+			fmt.Println("pprof listening on", pprofAddr)
+			go http.Serve(ln, nil)
+		}
+	}
 
 	// Explicitly triggering GC to remove garbage from config loading.
 	runtime.GC()
