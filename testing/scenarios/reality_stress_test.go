@@ -130,7 +130,7 @@ func buildStressConfig(t *testing.T, path string) (clientPort xraynet.Port, clea
 					ProtocolName: "splithttp",
 					TransportSettings: []*internet.TransportConfig{{
 						ProtocolName: "splithttp",
-						Settings: serial.ToTypedMessage(&splithttp.Config{Path: path}),
+						Settings:     serial.ToTypedMessage(&splithttp.Config{Path: path}),
 					}},
 					SecurityType: serial.GetMessageType(&reality.Config{}),
 					SecuritySettings: []*serial.TypedMessage{serial.ToTypedMessage(&reality.Config{
@@ -265,7 +265,7 @@ func TestREALITYHighConcurrentAccess(t *testing.T) {
 func TestREALITYLargeFileDownload(t *testing.T) {
 	const (
 		chunkSize = 256 * 1024 // 256KB/块
-		chunks    = 40          // 40 块 = 10 MB 总计
+		chunks    = 40         // 40 块 = 10 MB 总计
 		rounds    = 3
 	)
 
@@ -291,7 +291,7 @@ func TestREALITYLargeFileDownload(t *testing.T) {
 					ProtocolName: "splithttp",
 					TransportSettings: []*internet.TransportConfig{{
 						ProtocolName: "splithttp",
-						Settings: serial.ToTypedMessage(&splithttp.Config{Path: "/stress-download"}),
+						Settings:     serial.ToTypedMessage(&splithttp.Config{Path: "/stress-download"}),
 					}},
 					SecurityType: serial.GetMessageType(&reality.Config{}),
 					SecuritySettings: []*serial.TypedMessage{serial.ToTypedMessage(&reality.Config{
@@ -319,8 +319,8 @@ func TestREALITYLargeFileDownload(t *testing.T) {
 				Listen:   xraynet.NewIPOrDomain(xraynet.LocalHostIP),
 			}),
 			ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-				RewriteAddress: xraynet.NewIPOrDomain(dest.Address),
-				RewritePort:    uint32(dest.Port),
+				RewriteAddress:  xraynet.NewIPOrDomain(dest.Address),
+				RewritePort:     uint32(dest.Port),
 				AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
 			}),
 		}},
@@ -336,7 +336,7 @@ func TestREALITYLargeFileDownload(t *testing.T) {
 					ProtocolName: "splithttp",
 					TransportSettings: []*internet.TransportConfig{{
 						ProtocolName: "splithttp",
-						Settings: serial.ToTypedMessage(&splithttp.Config{Path: "/stress-download"}),
+						Settings:     serial.ToTypedMessage(&splithttp.Config{Path: "/stress-download"}),
 					}},
 					SecurityType: serial.GetMessageType(&reality.Config{}),
 					SecuritySettings: []*serial.TypedMessage{serial.ToTypedMessage(&reality.Config{
@@ -504,7 +504,7 @@ func buildXHTTPModeConfig(t *testing.T, mode string) (clientPort xraynet.Port, c
 			}),
 			ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
 				RewriteAddress: xraynet.NewIPOrDomain(xraynet.ParseAddress("www.baidu.com")),
-				RewritePort: 443, AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
+				RewritePort:    443, AllowedNetworks: []xraynet.Network{xraynet.Network_TCP},
 			}),
 		}},
 		Outbound: []*core.OutboundHandlerConfig{{
@@ -519,7 +519,7 @@ func buildXHTTPModeConfig(t *testing.T, mode string) (clientPort xraynet.Port, c
 					ProtocolName: "splithttp",
 					TransportSettings: []*internet.TransportConfig{{
 						ProtocolName: "splithttp",
-						Settings: serial.ToTypedMessage(&splithttp.Config{Path: path, Mode: mode}),
+						Settings:     serial.ToTypedMessage(&splithttp.Config{Path: path, Mode: mode}),
 					}},
 					SecurityType: serial.GetMessageType(&reality.Config{}),
 					SecuritySettings: []*serial.TypedMessage{serial.ToTypedMessage(&reality.Config{
@@ -607,9 +607,9 @@ func TestREALITYXHTTPModes(t *testing.T) {
 // ============================================================================
 
 type profileEntry struct {
-	size   float64
-	pct    float64
-	name   string
+	size float64
+	pct  float64
+	name string
 }
 
 // buildStressConfigWithPprof 创建 REALITY server/client 配置，server 进程开启 pprof。
@@ -677,7 +677,7 @@ func buildStressConfigWithPprof(t *testing.T, path string, pprofPort int, showDe
 					ProtocolName: "splithttp",
 					TransportSettings: []*internet.TransportConfig{{
 						ProtocolName: "splithttp",
-						Settings: serial.ToTypedMessage(&splithttp.Config{Path: path}),
+						Settings:     serial.ToTypedMessage(&splithttp.Config{Path: path}),
 					}},
 					SecurityType: serial.GetMessageType(&reality.Config{}),
 					SecuritySettings: []*serial.TypedMessage{serial.ToTypedMessage(&reality.Config{
