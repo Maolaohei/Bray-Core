@@ -240,36 +240,40 @@ func findOutboundInterface(tunIndex int, fixedName string) (*net.Interface, erro
 		return iface, nil
 	}
 
-	probeIPs := []net.IP{
-		net.ParseIP("8.8.8.8"),
-		net.ParseIP("2001:4860:4860::8888"),
+	// Try IPv4 first, then IPv6
+	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+		iface, err := findDefaultInterface(family, tunIndex)
+		if err == nil {
+			return iface, nil
+		}
 	}
 
-	for _, ip := range probeIPs {
-		routes, err := netlink.RouteGet(ip)
-		if err != nil || len(routes) == 0 {
-			continue
-		}
-		route := routes[0]
-		if route.LinkIndex == tunIndex {
-			continue
+	return nil, errors.New("no usable outbound interface found")
+}
+
+// findDefaultInterface enumerates all routes for the given address family,
+// filters for default routes (Dst == nil or /0), and returns the interface
+// with the lowest metric that is not the TUN interface.
+func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
+	routes, err := netlink.RouteList(nil, family)
+	if err != nil {
+		return nil, err
+	}
+
+	var selected *net.Interface
+	selectedMetric := -1
+
+	for _, route := range routes {
+		// Only consider default routes
+		if route.Dst != nil {
+			ones, _ := route.Dst.Mask.Size()
+			if ones != 0 {
+				continue
+			}
 		}
 
-		link, err := netlink.LinkByIndex(route.LinkIndex)
-		if err != nil {
-			continue
-		}
-		attrs := link.Attrs()
-
-		if attrs.Flags&net.FlagUp == 0 {
-			continue
-		}
-		operState := attrs.OperState
-		if operState != netlink.OperUp && operState != netlink.OperUnknown {
-			continue
-		}
-
-		if route.Src == nil || route.Src.IsLoopback() || route.Src.IsLinkLocalUnicast() {
+		// Skip TUN and invalid routes
+		if route.LinkIndex == 0 || route.LinkIndex == tunIndex {
 			continue
 		}
 
@@ -277,8 +281,22 @@ func findOutboundInterface(tunIndex int, fixedName string) (*net.Interface, erro
 		if err != nil {
 			continue
 		}
-		return iface, nil
+
+		// Skip down or loopback interfaces
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		// Pick the route with the lowest metric
+		if selected == nil || route.Priority < selectedMetric {
+			selected = iface
+			selectedMetric = route.Priority
+		}
 	}
 
-	return nil, errors.New("no usable outbound interface found")
+	if selected == nil {
+		return nil, errors.New("no usable default interface found")
+	}
+
+	return selected, nil
 }
