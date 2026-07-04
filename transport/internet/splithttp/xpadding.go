@@ -317,6 +317,23 @@ var defaultRangeConfigXPaddingBytes = &RangeConfig{
 	To:   1000,
 }
 
+// AdaptivePaddingRange returns a padding range adjusted for the given payload size.
+// Small payloads get smaller padding to reduce bandwidth waste; large payloads
+// get proportionally larger padding to maintain traffic analysis resistance.
+func AdaptivePaddingRange(baseFrom, baseTo int32, payloadSize int) (from, to int32) {
+	switch {
+	case payloadSize < 256:
+		// Small packets (SSH, MQTT, RPC): reduce padding to ~20-50% of base
+		return max(10, baseFrom/5), max(50, baseTo/5)
+	case payloadSize < 1024:
+		// Medium packets: reduce padding to ~40-70% of base
+		return max(20, baseFrom*2/5), max(100, baseTo*7/10)
+	default:
+		// Large packets: use full base range
+		return baseFrom, baseTo
+	}
+}
+
 func (c *Config) GetNormalizedXPaddingBytes() *RangeConfig {
 	if c.XPaddingBytes == nil || c.XPaddingBytes.To == 0 {
 		return defaultRangeConfigXPaddingBytes

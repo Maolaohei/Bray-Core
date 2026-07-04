@@ -1048,6 +1048,14 @@ func scoreClient(c *XmuxClient) int64 {
 		rttMs = 999 // cap at 999ms to prevent score inversion
 	}
 
+	// Saturating arithmetic: cap inflight contribution to prevent overflow.
+	// Max intermediate = 100 * 50 * 15000 = 75,000,000 — fits in int64.
+	// But inflight*10000 could overflow if inflight > 2^53/10000 ≈ 900 trillion.
+	// In practice inflight is small, but cap defensively at 1M.
+	if inflight > 1_000_000 {
+		inflight = 1_000_000
+	}
+
 	score := inflight*10000 + rttMs*10
 
 	// V2.0: confidence-weighted penalties (fixed-point ×100)

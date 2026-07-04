@@ -74,11 +74,14 @@ func (h *uploadQueue) Push(p Packet) (retErr error) {
 		case h.pushedPackets <- p:
 			return nil
 		default:
-			// Channel full, fall through to locked path
+			// Channel full — fall through to locked path for validation + backpressure.
 		}
 	}
 
-	// Slow path: locked send with full validation
+	// Slow path: locked send with full validation.
+	// The channel send naturally blocks until space is available,
+	// providing gradient backpressure to the producer. No timeout error —
+	// the caller's context or connection close is the only way out.
 	h.writeCloseMutex.Lock()
 	defer h.writeCloseMutex.Unlock()
 

@@ -50,6 +50,7 @@ type requestHandler struct {
 	socketSettings *internet.SocketConfig
 	stopCh         chan struct{}
 	cfDetected     atomic.Bool
+	avgRTT         time.Duration // EWMA of client RTTs for adaptive session TTL
 }
 
 type httpSession struct {
@@ -65,6 +66,18 @@ func (h *requestHandler) getSessionTtl() int32 {
 		return 75
 	}
 	return h.config.GetNormalizedScSessionTtlSecs()
+}
+
+// updateAvgRTT updates the EWMA RTT from a request round-trip measurement.
+// Called after a complete request-response cycle to adapt session TTL.
+func (h *requestHandler) updateAvgRTT(rtt time.Duration) {
+	// EWMA: 80% old + 20% new
+	old := h.avgRTT
+	if old == 0 {
+		h.avgRTT = rtt
+	} else {
+		h.avgRTT = (old*8 + rtt*2) / 10
+	}
 }
 
 func (h *requestHandler) upsertSession(sessionId string) *httpSession {

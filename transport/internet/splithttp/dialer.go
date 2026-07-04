@@ -51,7 +51,10 @@ var (
 
 const (
 	// globalMapIdleTimeout is how long a manager can be idle before being removed.
-	globalMapIdleTimeout = 10 * time.Minute
+	// For small pools (<10 managers), 10 minutes is fine. For large pools,
+	// clean up faster to reduce memory pressure.
+	globalMapIdleTimeoutBase = 10 * time.Minute
+	globalMapIdleTimeoutMin  = 3 * time.Minute
 )
 
 func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
@@ -427,8 +430,20 @@ func globalDialerCleanup(done chan struct{}) {
 		select {
 		case <-ticker.C:
 			globalDialerAccess.Lock()
+			poolSize := len(globalDialerMap)
+			// Dynamic timeout: large pools get cleaned up faster.
+			// Linear interpolation from 10min (pool≤10) to 3min (pool≥100).
+			timeout := globalMapIdleTimeoutBase
+			if poolSize > 10 {
+				reduction := time.Duration(float64(globalMapIdleTimeoutBase-globalMapIdleTimeoutMin) *
+					float64(poolSize-10) / 90.0)
+				if reduction > globalMapIdleTimeoutBase-globalMapIdleTimeoutMin {
+					reduction = globalMapIdleTimeoutBase - globalMapIdleTimeoutMin
+				}
+				timeout = globalMapIdleTimeoutBase - reduction
+			}
 			for key, manager := range globalDialerMap {
-				if manager.IdleFor() > globalMapIdleTimeout {
+				if manager.IdleFor() > timeout {
 					delete(globalDialerMap, key)
 					go manager.Close()
 				}
