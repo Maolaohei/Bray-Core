@@ -97,8 +97,8 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 			errors.LogError(context.Background(),
 				"XHTTP session reuse across different connections rejected: ",
 				"sessionId=", sessionId,
-			", existing=", s.remoteAddr,
-			", new=", remoteAddr,
+				", existing=", s.remoteAddr,
+				", new=", remoteAddr,
 			)
 			// Fall through to slow path to create a new session.
 		} else {
