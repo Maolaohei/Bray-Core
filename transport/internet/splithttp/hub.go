@@ -57,6 +57,12 @@ type httpSession struct {
 	uploadQueue      *uploadQueue
 	isFullyConnected *done.Instance
 	timer            *time.Timer
+	remoteAddr       string // the remote address that created this session
+	closeOnce        sync.Once
+}
+
+func (s *httpSession) close() {
+	s.closeOnce.Do(func() { s.uploadQueue.Close() })
 }
 
 const maxSessionsPerHandler = 65536
@@ -80,17 +86,27 @@ func (h *requestHandler) updateAvgRTT(rtt time.Duration) {
 	}
 }
 
-func (h *requestHandler) upsertSession(sessionId string) *httpSession {
+func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *httpSession {
 	ttl := h.getSessionTtl()
 
 	// fast path
 	currentSessionAny, ok := h.sessions.Load(sessionId)
 	if ok {
 		s := currentSessionAny.(*httpSession)
-		if s.timer != nil {
-			s.timer.Reset(time.Duration(ttl) * time.Second)
+		if s.remoteAddr != remoteAddr {
+			errors.LogError(context.Background(),
+				"XHTTP session reuse across different connections rejected: ",
+				"sessionId=", sessionId,
+			", existing=", s.remoteAddr,
+			", new=", remoteAddr,
+			)
+			// Fall through to slow path to create a new session.
+		} else {
+			if s.timer != nil {
+				s.timer.Reset(time.Duration(ttl) * time.Second)
+			}
+			return s
 		}
-		return s
 	}
 
 	// slow path
@@ -100,16 +116,29 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 	currentSessionAny, ok = h.sessions.Load(sessionId)
 	if ok {
 		s := currentSessionAny.(*httpSession)
-		if s.timer != nil {
-			s.timer.Reset(time.Duration(ttl) * time.Second)
+		if s.remoteAddr != remoteAddr {
+			errors.LogError(context.Background(),
+				"XHTTP session reuse across different connections rejected (slow path): ",
+				"sessionId=", sessionId,
+				", existing=", s.remoteAddr,
+				", new=", remoteAddr,
+			)
+			// Old session is stale or belongs to a different connection.
+			// Close its uploadQueue and replace with a fresh session.
+			s.close()
+		} else {
+			if s.timer != nil {
+				s.timer.Reset(time.Duration(ttl) * time.Second)
+			}
+			return s
 		}
-		return s
 	}
 
 	s := &httpSession{
 		uploadQueue:      NewUploadQueue(h.ln.config.GetNormalizedScMaxBufferedPosts()),
 		isFullyConnected: done.New(),
 		timer:            time.NewTimer(time.Duration(ttl) * time.Second),
+		remoteAddr:       remoteAddr,
 	}
 
 	h.sessions.Store(sessionId, s)
@@ -118,12 +147,12 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 		defer s.timer.Stop()
 		select {
 		case <-s.timer.C:
-			h.sessions.Delete(sessionId)
-			s.uploadQueue.Close()
+			h.sessions.CompareAndDelete(sessionId, s)
+			s.close()
 		case <-s.isFullyConnected.Wait():
 		case <-h.stopCh:
-			h.sessions.Delete(sessionId)
-			s.uploadQueue.Close()
+			h.sessions.CompareAndDelete(sessionId, s)
+			s.close()
 		}
 	}()
 
@@ -233,7 +262,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	var currentSession *httpSession
 	if sessionId != "" {
-		currentSession = h.upsertSession(sessionId)
+		currentSession = h.upsertSession(sessionId, remoteAddr.String())
 	}
 	scMaxEachPostBytes := int(h.ln.config.GetNormalizedScMaxEachPostBytes().To)
 	isUplinkRequest := false
@@ -407,8 +436,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 
+		// Clone payload to avoid Use-After-Return on bodyPayloadPool buffers.
+		// The pool buffer is returned to the pool when this handler returns,
+		// but uploadQueue may still hold a reference via partial-read remainder.
+		ownedPayload := make([]byte, len(payload))
+		copy(ownedPayload, payload)
+
 		err = currentSession.uploadQueue.Push(Packet{
-			Payload: payload,
+			Payload: ownedPayload,
 			Seq:     seq,
 		})
 		if err != nil {
@@ -428,7 +463,10 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			// after GET is done, the connection is finished. disable automatic
 			// session reaping, and handle it in defer
 			currentSession.isFullyConnected.Close()
-			defer h.sessions.Delete(sessionId)
+			defer func() {
+				currentSession.close()
+				h.sessions.CompareAndDelete(sessionId, currentSession)
+			}()
 		}
 
 		// magic header instructs nginx + apache to not buffer response body
