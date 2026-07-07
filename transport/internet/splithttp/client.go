@@ -17,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/signal/done"
+	"golang.org/x/net/http2"
 )
 
 const maxBufferPoolCap = 64 * 1024
@@ -96,7 +97,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 	}
 	c.transportConfig.FillStreamRequest(req, sessionId, "")
 
-	wrc = &WaitReadCloser{Wait: make(chan struct{})}
+	wrc = &WaitReadCloser{wait: make(chan struct{})}
 	go func() {
 		resp, err := c.client.Do(req)
 		if err != nil {
@@ -218,52 +219,69 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 	return nil
 }
 
-// HTTP/1.1 and HTTP/2 will close itself, we only handle HTTP/3 here
+// Close shuts down the underlying HTTP transport.
+// For HTTP/2: sends GOAWAY on idle connections, waits for active streams to finish.
+// For HTTP/1.1: closes idle connections.
+// For HTTP/3: closes immediately (QUIC handles graceful shutdown internally).
+// For Happy Eyeballs: closes both H3 and H2 transports.
 func (c *DefaultDialerClient) Close() error {
 	transport := c.client.Transport
-	if h3Transport, ok := transport.(*http3.Transport); ok {
-		h3Transport.Close()
+	switch t := transport.(type) {
+	case *happyEyeballsTransport:
+		t.Close()
+	case *http3.Transport:
+		t.Close()
+	case *http2.Transport:
+		t.CloseIdleConnections()
+	case *http.Transport:
+		t.CloseIdleConnections()
 	}
 	return nil
 }
 
 type WaitReadCloser struct {
-	Wait chan struct{}
-	rc   atomic.Value // stores io.ReadCloser
+	wait      chan struct{}
+	rc        atomic.Value // stores io.ReadCloser
+	mu        sync.Mutex
+	closed    bool
+	closeOnce sync.Once
 }
 
 func (w *WaitReadCloser) Set(rc io.ReadCloser) {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		rc.Close()
+		return
+	}
 	w.rc.Store(rc)
-	defer func() {
-		if recover() != nil {
-			rc.Close()
-		}
-	}()
-	close(w.Wait)
+	close(w.wait)
+	w.mu.Unlock()
 }
 
-func (w *WaitReadCloser) Read(b []byte) (int, error) {
+func (w *WaitReadCloser) Read(p []byte) (int, error) {
 	if v := w.rc.Load(); v != nil {
-		return v.(io.ReadCloser).Read(b)
+		return v.(io.ReadCloser).Read(p)
 	}
-	<-w.Wait
-	if v := w.rc.Load(); v != nil {
-		return v.(io.ReadCloser).Read(b)
+	select {
+	case <-w.wait:
+		if v := w.rc.Load(); v != nil {
+			return v.(io.ReadCloser).Read(p)
+		}
+		return 0, io.ErrClosedPipe
 	}
-	return 0, io.ErrClosedPipe
 }
 
 func (w *WaitReadCloser) Close() error {
-	if v := w.rc.Load(); v != nil {
-		return v.(io.ReadCloser).Close()
+	w.mu.Lock()
+	w.closed = true
+	v := w.rc.Load()
+	w.mu.Unlock()
+
+	if v != nil {
+		w.closeOnce.Do(func() {
+			v.(io.ReadCloser).Close()
+		})
 	}
-	defer func() {
-		if recover() != nil {
-			if v := w.rc.Load(); v != nil {
-				v.(io.ReadCloser).Close()
-			}
-		}
-	}()
-	close(w.Wait)
 	return nil
 }

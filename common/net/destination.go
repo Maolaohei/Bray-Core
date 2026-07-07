@@ -7,9 +7,20 @@ import (
 
 // Destination represents a network destination including address and protocol (tcp / udp).
 type Destination struct {
-	Address Address
-	Port    Port
-	Network Network
+	Address        Address
+	Port           Port
+	Network        Network
+	OriginalDomain string // preserved domain when UseIPv4/UseIPv6 replaces Address with IP
+}
+
+// ServerName returns the domain name for TLS SNI.
+// When UseIPv4/UseIPv6 resolves a domain to an IP, the original domain is
+// preserved in OriginalDomain so TLS can still set the correct SNI.
+func (d Destination) ServerName() string {
+	if d.OriginalDomain != "" {
+		return d.OriginalDomain
+	}
+	return d.Address.String()
 }
 
 // DestinationFromAddr generates a Destination from a net address.

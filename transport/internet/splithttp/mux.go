@@ -22,6 +22,13 @@ type XmuxConn interface {
 	IsClosed() bool
 }
 
+// Connection lifecycle states.
+const (
+	StateActive   int32 = 0 // accepting new streams
+	StateDraining int32 = 1 // refusing new streams, waiting for active streams to finish
+	StateClosed   int32 = 2 // TCP connection closed
+)
+
 // XmuxClientPool is a read-write separated connection pool.
 // Reads (Len, Snapshot) use RLock for concurrent access.
 // Writes (Remove, Append, CloseAll) use exclusive Lock.
@@ -66,15 +73,15 @@ func (p *XmuxClientPool) CloseAll() {
 }
 
 type XmuxClient struct {
-	XmuxConn     XmuxConn
-	Running      atomic.Int32
-	leftUsage    atomic.Int32
-	LeftRequests atomic.Int32
-	UnreusableAt time.Time
-	NotUsed      atomic.Bool
-	createdAt    time.Time
-	lastRTT      atomic.Int64 // nanoseconds, for RTT-aware scheduling
-	cachedScore  atomic.Int64 // pre-computed scheduling score, updated on state change
+	XmuxConn      XmuxConn
+	state         atomic.Int32 // StateActive / StateDraining / StateClosed
+	activeStreams atomic.Int32 // number of active HTTP/2 streams using this connection
+	leftUsage     atomic.Int32
+	LeftRequests  atomic.Int32
+	UnreusableAt  time.Time
+	createdAt     time.Time
+	lastRTT       atomic.Int64 // nanoseconds, for RTT-aware scheduling
+	cachedScore   atomic.Int64 // pre-computed scheduling score, updated on state change
 
 	// V2.0: link-quality metrics for smarter scheduling
 	lastRetrans  atomic.Int32 // cumulative retransmit count from TCP_INFO
@@ -91,35 +98,52 @@ type XmuxClient struct {
 	profile   interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
 }
 
-func (c *XmuxClient) AddRunning() {
-	// Atomically check that we are not in closing state (-1)
+// Borrow atomically attempts to reserve a stream slot on this connection.
+// Returns true only if state is Active and the increment took effect while still Active.
+// This prevents the race: GetXmuxClient returns client → Draining fires → stream added to retired connection.
+func (c *XmuxClient) Borrow() bool {
 	for {
-		old := c.Running.Load()
-		if old < 0 {
-			return // connection is being closed, reject
+		if c.state.Load() != StateActive {
+			return false
 		}
-		if c.Running.CompareAndSwap(old, old+1) {
-			c.recomputeScore()
-			return
+		old := c.activeStreams.Load()
+		if !c.activeStreams.CompareAndSwap(old, old+1) {
+			continue // CAS failed, retry
 		}
+		// Verify state didn't change between our read and the CAS.
+		// If it did, roll back and fail.
+		if c.state.Load() != StateActive {
+			c.activeStreams.Add(-1)
+			return false
+		}
+		c.recomputeScore()
+		return true
 	}
 }
 
-func (c *XmuxClient) DoneRunning() {
-	c.Running.Add(-1)
+// Release marks one active stream as finished and tries to close if draining.
+func (c *XmuxClient) Release() {
+	c.activeStreams.Add(-1)
 	c.recomputeScore()
-	c.maybeClose()
+	c.tryClose()
 }
 
-// maybeClose closes the XmuxConn if it is not used and has no running requests.
-// Uses CAS to atomically transition Running from 0 to -1 (closing state),
-// preventing new requests from starting on this connection.
-func (c *XmuxClient) maybeClose() {
-	if !c.NotUsed.Load() {
+// maybeDrain transitions from Active to Draining.
+func (c *XmuxClient) maybeDrain() {
+	c.state.CompareAndSwap(StateActive, StateDraining)
+	c.tryClose()
+}
+
+// tryClose is the single entry point for closing the TCP connection.
+// Only succeeds when state is Draining, activeStreams is 0, and CAS to Closed wins.
+func (c *XmuxClient) tryClose() {
+	if c.state.Load() != StateDraining {
 		return
 	}
-	// Try to atomically transition from 0 to -1 (closing state)
-	if c.Running.CompareAndSwap(0, -1) {
+	if c.activeStreams.Load() > 0 {
+		return
+	}
+	if c.state.CompareAndSwap(StateDraining, StateClosed) {
 		c.StopProfiling()
 		common.Close(c.XmuxConn)
 	}
@@ -510,14 +534,35 @@ func (m *XmuxManager) healthCheckTick() {
 	now := time.Now()
 	for i := 0; i < len(m.pool.clients); {
 		c := m.pool.clients[i]
+		st := c.state.Load()
 
-		if c.XmuxConn.IsClosed() {
-			errors.LogDebug(context.Background(), "XMUX: health-check removing closed xmuxClient")
-			c.StopProfiling()
+		// Draining: try to close, then remove if closed
+		if st == StateDraining {
+			c.tryClose()
+			if c.state.Load() == StateClosed {
+				errors.LogDebug(context.Background(), "XMUX: health-check removing drained xmuxClient")
+				m.pool.RemoveAt(i)
+				continue
+			}
+			// Still draining with active streams — skip
+			i++
+			continue
+		}
+
+		// Already closed (shouldn't be in pool, but handle defensively)
+		if st == StateClosed {
 			m.pool.RemoveAt(i)
 			continue
 		}
-		if c.Running.Load() > 0 {
+
+		// Active state — check if should be retired
+		if c.XmuxConn.IsClosed() {
+			errors.LogDebug(context.Background(), "XMUX: health-check removing closed xmuxClient")
+			c.maybeDrain()
+			m.pool.RemoveAt(i)
+			continue
+		}
+		if c.activeStreams.Load() > 0 {
 			i++
 			continue
 		}
@@ -527,14 +572,14 @@ func (m *XmuxManager) healthCheckTick() {
 		}
 		if c.ShouldDrain() && c.confidence.Load() >= 30 {
 			errors.LogDebug(context.Background(), "XMUX: health-check draining quality-degraded xmuxClient, consecutiveDrops=", c.consecDrops.Load())
-			c.StopProfiling()
+			c.maybeDrain()
 			m.pool.RemoveAt(i)
 			continue
 		}
 		rttMs := c.GetRTT().Milliseconds()
 		if rttMs >= maxRTTBeforeRemove && c.GetRTT() > 0 {
 			errors.LogDebug(context.Background(), "XMUX: health-check removing high-RTT xmuxClient, rtt=", rttMs, "ms")
-			c.StopProfiling()
+			c.maybeDrain()
 			m.pool.RemoveAt(i)
 			continue
 		}
@@ -899,11 +944,34 @@ func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
 }
 
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
+	// Bypass: always create new connection (for debugging XMUX issues)
+	if forceNewConnection {
+		conn := m.newConnFunc()
+		if conn != nil {
+			m.lastActivity.Store(time.Now().UnixNano())
+			return m.initNewClient(conn)
+		}
+		return nil
+	}
+
 	// Phase 1: Read lock — prune stale clients and find best candidate
 	m.pool.mu.RLock()
 
 	for i := 0; i < len(m.pool.clients); {
 		c := m.pool.clients[i]
+
+		// Skip clients not in Active state
+		if c.state.Load() != StateActive {
+			m.pool.mu.RUnlock()
+			m.pool.mu.Lock()
+			if i < len(m.pool.clients) && m.pool.clients[i] == c {
+				m.pool.RemoveAt(i)
+			}
+			m.pool.mu.Unlock()
+			m.pool.mu.RLock()
+			continue
+		}
+
 		if c.XmuxConn.IsClosed() ||
 			c.leftUsage.Load() == 0 ||
 			c.LeftRequests.Load() <= 0 ||
@@ -914,12 +982,12 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 			// Re-check after acquiring write lock (another goroutine may have removed it)
 			if i < len(m.pool.clients) && m.pool.clients[i] == c {
 				errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", c.XmuxConn.IsClosed(),
-					", Running = ", c.Running.Load(),
+					", state = ", c.state.Load(),
+					", activeStreams = ", c.activeStreams.Load(),
 					", leftUsage = ", c.leftUsage.Load(),
 					", LeftRequests = ", c.LeftRequests.Load(),
 					", UnreusableAt = ", c.UnreusableAt)
-				c.NotUsed.Store(true)
-				c.maybeClose()
+				c.maybeDrain()
 				m.pool.RemoveAt(i)
 			}
 			m.pool.mu.Unlock()
@@ -949,7 +1017,10 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 		var best *XmuxClient
 		bestScore := int64(math.MaxInt64)
 		for _, c := range snap {
-			if effectiveConc > 0 && c.Running.Load() >= effectiveConc {
+			if c.state.Load() != StateActive {
+				continue
+			}
+			if effectiveConc > 0 && c.activeStreams.Load() >= effectiveConc {
 				continue
 			}
 			if s := c.cachedScore.Load(); s < bestScore {
@@ -966,17 +1037,16 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 			for {
 				old := best.leftUsage.Load()
 				if old == 0 {
-					best.NotUsed.Store(true)
-					best.maybeClose()
+					best.maybeDrain()
 					// Re-snapshot and find next best
 					snap = m.pool.Snapshot()
 					best = nil
 					bestScore = int64(math.MaxInt64)
 					for _, c := range snap {
-						if c.NotUsed.Load() {
+						if c.state.Load() != StateActive {
 							continue
 						}
-						if effectiveConc > 0 && c.Running.Load() >= effectiveConc {
+						if effectiveConc > 0 && c.activeStreams.Load() >= effectiveConc {
 							continue
 						}
 						if s := c.cachedScore.Load(); s < bestScore {
@@ -1040,7 +1110,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 // Max combinedFixed = 100 * 150 = 15000. Max retrans = 100.
 // Max intermediate = 100 * 50 * 15000 = 75,000,000 — fits in int64.
 func scoreClient(c *XmuxClient) int64 {
-	inflight := int64(c.Running.Load())
+	inflight := int64(c.activeStreams.Load())
 	rttMs := c.GetRTT().Milliseconds()
 	if rttMs == 0 {
 		rttMs = 100 // default 100ms for unsampled connections

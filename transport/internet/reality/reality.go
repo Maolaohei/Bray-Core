@@ -142,7 +142,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		KeyLogWriter:           KeyLogWriterFromConfig(config),
 	}
 	if utlsConfig.ServerName == "" {
-		utlsConfig.ServerName = dest.Address.String()
+		utlsConfig.ServerName = dest.ServerName()
 	}
 	uConn.ServerName = utlsConfig.ServerName
 	fingerprint := tls.GetFingerprint(config.Fingerprint)

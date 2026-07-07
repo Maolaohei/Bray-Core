@@ -106,7 +106,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 			probeHost = realityCfg.ServerName
 		}
 		if probeHost == "" {
-			probeHost = dest.Address.String()
+			probeHost = dest.ServerName()
 		}
 		if browser_dialer.HasBrowserDialer() && realityCfg == nil {
 			if !(probeScheme == "http" && dest.Port == 80) && !(probeScheme == "https" && dest.Port == 443) {
@@ -301,7 +301,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			quicConfig.MaxIncomingStreams = -1
 		}
 
-		transport = &http3.Transport{
+		h3Transport := &http3.Transport{
 			QUICConfig:      quicConfig,
 			TLSClientConfig: gotlsConfig,
 			Dial: func(ctx context.Context, addr string, tlsCfg *gotls.Config, cfg *quic.Config) (*quic.Conn, error) {
@@ -382,6 +382,27 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 				return conn, nil
 			},
 		}
+
+		// Happy Eyeballs: build an H2 fallback transport for racing.
+		h2KeepAlive := keepAlivePeriod
+		if h2KeepAlive == 0 {
+			h2KeepAlive = net.ChromeH2KeepAlivePeriod
+		}
+		if h2KeepAlive < 0 {
+			h2KeepAlive = 0
+		}
+		h2Transport := &http2.Transport{
+			DialTLSContext: func(ctxInner context.Context, network string, addr string, cfg *gotls.Config) (net.Conn, error) {
+				return dialContext(ctxInner)
+			},
+			IdleConnTimeout: net.ConnIdleTimeout,
+			ReadIdleTimeout: h2KeepAlive,
+		}
+
+		transport = newHappyEyeballsTransport(h3Transport, h2Transport)
+
+		// PostPacket uses HTTP/2 POST semantics (H3 POST is equivalent).
+		dc.httpVersion = "2"
 	} else if httpVersion == "2" {
 		if keepAlivePeriod == 0 {
 			keepAlivePeriod = net.ChromeH2KeepAlivePeriod
@@ -591,10 +612,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}
 
 	if xmuxClient != nil {
-		xmuxClient.AddRunning()
+		xmuxClient.Borrow()
 	}
 	if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-		xmuxClient2.AddRunning()
+		xmuxClient2.Borrow()
 	}
 	var closed atomic.Int32
 
@@ -606,10 +627,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				return
 			}
 			if xmuxClient != nil {
-				xmuxClient.DoneRunning()
+				xmuxClient.Release()
 			}
 			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-				xmuxClient2.DoneRunning()
+				xmuxClient2.Release()
 			}
 		},
 	}

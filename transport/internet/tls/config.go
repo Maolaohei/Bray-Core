@@ -516,7 +516,7 @@ type Option func(*tls.Config)
 func WithDestination(dest net.Destination) Option {
 	return func(config *tls.Config) {
 		if config.ServerName == "" {
-			config.ServerName = dest.Address.String()
+			config.ServerName = dest.ServerName()
 		}
 	}
 }

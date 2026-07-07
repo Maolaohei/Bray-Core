@@ -84,7 +84,7 @@ func TestMaxConcurrency(t *testing.T) {
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {
 		xmuxClient := xmuxManager.GetXmuxClient(context.Background())
-		xmuxClient.AddRunning()
+		xmuxClient.Borrow()
 		xmuxClients[xmuxClient] = struct{}{}
 	}
 
@@ -104,7 +104,7 @@ func TestDefault(t *testing.T) {
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {
 		xmuxClient := xmuxManager.GetXmuxClient(context.Background())
-		xmuxClient.AddRunning()
+		xmuxClient.Borrow()
 		xmuxClients[xmuxClient] = struct{}{}
 	}
 
@@ -139,9 +139,9 @@ func TestConcurrentPoolAccess(t *testing.T) {
 					errCount.Add(1)
 					return
 				}
-				client.Running.Add(1)
+				client.Borrow()
 				time.Sleep(time.Microsecond) // brief hold
-				client.Running.Add(-1)
+				client.Release()
 			}
 		}()
 	}

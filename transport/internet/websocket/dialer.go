@@ -118,7 +118,7 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 			host = tConfig.ServerName
 		}
 		if host == "" {
-			host = dest.Address.String()
+			host = dest.ServerName()
 		}
 		if !(protocol == "ws" && dest.Port == 80) && !(protocol == "wss" && dest.Port == 443) {
 			host += ":" + dest.Port.String()
@@ -133,7 +133,7 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 		return NewConnection(conn, conn.RemoteAddr(), nil, wsSettings.HeartbeatPeriod), nil
 	}
 
-	host := dest.Address.String()
+	host := dest.ServerName()
 	if !(protocol == "ws" && dest.Port == 80) && !(protocol == "wss" && dest.Port == 443) {
 		host += ":" + dest.Port.String()
 	}
@@ -146,7 +146,7 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 		header.Set("Host", tConfig.ServerName)
 	}
 	if header.Get("Host") == "" {
-		header.Set("Host", dest.Address.String())
+		header.Set("Host", dest.ServerName())
 	}
 	if ed != nil {
 		// RawURLEncoding is support by both V2Ray/V2Fly and XRay.

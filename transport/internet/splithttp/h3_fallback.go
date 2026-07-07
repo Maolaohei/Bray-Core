@@ -188,3 +188,13 @@ func (t *happyEyeballsTransport) setH3Failed() {
 	defer t.mu.Unlock()
 	t.h3FailedAt = time.Now()
 }
+
+// Close shuts down both H3 and H2 transports.
+func (t *happyEyeballsTransport) Close() {
+	if closer, ok := t.h3.(interface{ Close() }); ok {
+		closer.Close()
+	}
+	if closer, ok := t.h2.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}

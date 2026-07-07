@@ -47,10 +47,10 @@ func clampRTT(rtt int64) int64 {
 // V2.0 formula:
 //
 //	base = priority * 1e9
-//	rttTerm = rttNs * (1 + failRate*10 + lossPenalty)
+//	rttTerm = rttNs * (1 + failRate*10 + lossPenalty*5)
 //
 // failRate comes from EWMA (0.0-1.0), no counters needed.
-// lossPenalty comes from external quality data (TCP_INFO).
+// lossPenalty comes from external quality data (TCP_INFO), weighted 5x.
 func (s *HappyIPScore) score() float64 {
 	rttScore := float64(clampRTT(s.RTT))
 
@@ -60,7 +60,7 @@ func (s *HappyIPScore) score() float64 {
 		lossPenalty = float64(s.LastLoss) / 10000.0
 	}
 
-	rttTerm := rttScore * (1 + s.FailRate*10 + lossPenalty)
+	rttTerm := rttScore * (1 + s.FailRate*10 + lossPenalty*5)
 	return float64(s.Priority)*1e9 + rttTerm
 }
 
@@ -85,26 +85,6 @@ const ewmaFailWeight = 500 // (1-0.95) × 10000
 
 func (r *HappyIPRecord) getFailureRate() float64 {
 	return float64(r.failureRate.Load()) / 10000.0
-}
-
-// getFails/getSuccesses kept for backward compatibility with score().
-// Returns approximated values from EWMA.
-func (r *HappyIPRecord) getFails() int {
-	rate := r.failureRate.Load()
-	if rate == 0 {
-		return 0
-	}
-	// Approximate: if rate=0.1 (1000/10000), and we've had some observations
-	// We return a pseudo-count that makes score() behave similarly
-	return int(rate / 100) // scale to reasonable range
-}
-
-func (r *HappyIPRecord) getSuccesses() int {
-	rate := r.failureRate.Load()
-	if rate == 0 {
-		return 10 // new connection with no failures → high success
-	}
-	return int((10000 - rate) / 100)
 }
 
 func (r *HappyIPRecord) getSmoothedRTT() int64 { return r.smoothedRTT.Load() }
@@ -300,27 +280,37 @@ func (tc *TryController) GetDelay() time.Duration {
 }
 
 func (tc *TryController) OnSuccess(rtt time.Duration) {
-	current := time.Duration(tc.currentDelay.Load())
-	if rtt < 100*time.Millisecond {
-		newDelay := current * 8 / 10
-		if newDelay < 10*time.Millisecond {
-			newDelay = 10 * time.Millisecond
+	for {
+		current := time.Duration(tc.currentDelay.Load())
+		var newDelay time.Duration
+		if rtt < 100*time.Millisecond {
+			newDelay = current * 8 / 10
+			if newDelay < 10*time.Millisecond {
+				newDelay = 10 * time.Millisecond
+			}
+		} else if rtt > 500*time.Millisecond {
+			newDelay = current * 12 / 10
+			if newDelay > 1*time.Second {
+				newDelay = 1 * time.Second
+			}
+		} else {
+			return // RTT in 100-500ms range, no adjustment needed
 		}
-		tc.currentDelay.Store(int64(newDelay))
-	} else if rtt > 500*time.Millisecond {
-		newDelay := current * 12 / 10
-		if newDelay > 1*time.Second {
-			newDelay = 1 * time.Second
+		if tc.currentDelay.CompareAndSwap(int64(current), int64(newDelay)) {
+			return
 		}
-		tc.currentDelay.Store(int64(newDelay))
 	}
 }
 
 func (tc *TryController) OnFail() {
-	current := time.Duration(tc.currentDelay.Load())
-	newDelay := current * 11 / 10
-	if newDelay > 1*time.Second {
-		newDelay = 1 * time.Second
+	for {
+		current := time.Duration(tc.currentDelay.Load())
+		newDelay := current * 11 / 10
+		if newDelay > 1*time.Second {
+			newDelay = 1 * time.Second
+		}
+		if tc.currentDelay.CompareAndSwap(int64(current), int64(newDelay)) {
+			return
+		}
 	}
-	tc.currentDelay.Store(int64(newDelay))
 }

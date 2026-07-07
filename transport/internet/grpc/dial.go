@@ -167,7 +167,7 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
 	} else if tlsConfig != nil && tlsConfig.ServerName != "" {
 		authority = tlsConfig.ServerName
 	} else if realityConfig == nil && dest.Address.Family().IsDomain() {
-		authority = dest.Address.Domain()
+		authority = dest.ServerName()
 	}
 	dialOptions = append(dialOptions, grpc.WithAuthority(authority))
 
@@ -185,7 +185,7 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	var grpcDestHost string
 	if dest.Address.Family().IsDomain() {
-		grpcDestHost = dest.Address.Domain()
+		grpcDestHost = dest.ServerName()
 	} else {
 		grpcDestHost = dest.Address.IP().String()
 	}

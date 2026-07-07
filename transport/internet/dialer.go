@@ -262,13 +262,15 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 		if outboundName == "freedom" && dest.Network == net.Network_UDP && origTargetAddr != nil && src == nil {
 			finalStrategy = finalStrategy.GetDynamicStrategy(origTargetAddr.Family())
 		}
-		ips, err := LookupForIP(dest.Address.Domain(), finalStrategy, src)
+		originalDomain := dest.Address.Domain()
+		ips, err := LookupForIP(originalDomain, finalStrategy, src)
 		if err != nil {
 			errors.LogErrorInner(ctx, err, "failed to resolve ip")
 			if sockopt.DomainStrategy.ForceIP() {
 				return nil, err
 			}
 		} else if sockopt.HappyEyeballs == nil || (!sockopt.HappyEyeballs.GetV3Enabled() && (sockopt.HappyEyeballs.TryDelayMs == 0 || sockopt.HappyEyeballs.MaxConcurrentTry == 0)) || len(ips) < 2 || len(sockopt.DialerProxy) > 0 || dest.Network != net.Network_TCP {
+			dest.OriginalDomain = originalDomain
 			dest.Address = net.IPAddress(ips[dice.Roll(len(ips))])
 			errors.LogInfo(ctx, "replace destination with "+dest.String())
 		} else {

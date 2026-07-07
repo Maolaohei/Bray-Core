@@ -41,9 +41,9 @@ func BenchmarkXMUXGetXmuxClientParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			c := m.GetXmuxClient(context.Background())
-			c.Running.Add(1)
+			c.Borrow()
 			time.Sleep(time.Microsecond)
-			c.Running.Add(-1)
+			c.Release()
 		}
 	})
 }
@@ -71,8 +71,8 @@ func BenchmarkXMUXPoolScheduling(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				c := m.GetXmuxClient(context.Background())
-				c.Running.Add(1)
-				c.Running.Add(-1)
+				c.Borrow()
+				c.Release()
 			}
 		})
 	}
@@ -110,10 +110,10 @@ func BenchmarkXMUXConcurrentReadWrite(b *testing.B) {
 					defer wg.Done()
 					for i := 0; i < b.N/workers+1; i++ {
 						c := m.GetXmuxClient(context.Background())
-						c.Running.Add(1)
+						c.Borrow()
 						c.UpdateRTT(time.Duration(i%100) * time.Millisecond)
 						time.Sleep(time.Microsecond)
-						c.Running.Add(-1)
+						c.Release()
 					}
 				}()
 			}
@@ -174,12 +174,12 @@ func TestCachedScoreStaleness(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
 				c := m.GetXmuxClient(context.Background())
-				c.AddRunning()
+				c.Borrow()
 				mu.Lock()
 				allSelectionCount[c]++
 				mu.Unlock()
 				time.Sleep(500 * time.Microsecond)
-				c.DoneRunning()
+				c.Release()
 			}
 		}()
 	}

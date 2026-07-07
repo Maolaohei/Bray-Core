@@ -85,7 +85,7 @@ func dialhttpUpgrade(ctx context.Context, dest net.Destination, streamSettings *
 		requestURL.Host = tConfig.ServerName
 	}
 	if requestURL.Host == "" {
-		requestURL.Host = dest.Address.String()
+		requestURL.Host = dest.ServerName()
 	}
 	requestURL.Path = transportConfiguration.GetNormalizedPath()
 	req := &http.Request{
