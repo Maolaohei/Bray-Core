@@ -482,7 +482,7 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 
 	if len(c.CipherSuites) > 0 {
 		id := getCipherSuiteIDs()
-		for _, n := range strings.Split(c.CipherSuites, ":") {
+		for n := range strings.SplitSeq(c.CipherSuites, ":") {
 			if id[n] != 0 {
 				config.CipherSuites = append(config.CipherSuites, id[n])
 			}
