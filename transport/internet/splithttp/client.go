@@ -3,13 +3,17 @@ package splithttp
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	stderrors "errors"
 	"fmt"
 	"io"
+	stdnet "net"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/apernet/quic-go/http3"
@@ -83,21 +87,47 @@ func (c *DefaultDialerClient) SetOnFatalError(fn func(err error)) {
 }
 
 // isFatalConnError checks if an error indicates the connection is dead and should be evicted.
+// Only "connection-level" faults trigger eviction. "Stream-level" faults and "dial failures"
+// are handled by their own retry logic.
 func isFatalConnError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Check for connection-level fatal errors
-	errStr := err.Error()
-	return strings.Contains(errStr, "EOF") ||
-		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "use of closed connection") ||
-		strings.Contains(errStr, "GOAWAY") ||
-		strings.Contains(errStr, "RST_STREAM") ||
-		strings.Contains(errStr, "transport closed") ||
-		strings.Contains(errStr, "unexpected EOF") ||
-		strings.Contains(errStr, "RemoteCertificateNameMismatch")
+
+	// Fast path: most common TCP errors (branch-predictor friendly)
+	if stderrors.Is(err, io.EOF) ||
+		stderrors.Is(err, io.ErrUnexpectedEOF) ||
+		stderrors.Is(err, stdnet.ErrClosed) ||
+		stderrors.Is(err, syscall.EPIPE) ||
+		stderrors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+
+	// Slow path: TLS, HTTP/2, and third-party errors
+	return isFatalConnErrorSlow(err)
+}
+
+// isFatalConnErrorSlow handles less common errors that still indicate connection death.
+func isFatalConnErrorSlow(err error) bool {
+	// TLS record-level error
+	var tlsErr tls.RecordHeaderError
+	if stderrors.As(err, &tlsErr) {
+		return true
+	}
+
+	// String-based matching for TLS/x509/HTTP2 errors
+	s := err.Error()
+	return strings.Contains(s, "tls:") ||
+		strings.Contains(s, "x509:") ||
+		strings.Contains(s, "cipher suite") ||
+		strings.Contains(s, "SSL_VERSION_OR_CIPHER_MISMATCH") ||
+		strings.Contains(s, "RemoteCertificateNameMismatch") ||
+		strings.Contains(s, "GOAWAY") ||
+		strings.Contains(s, "connection shutdown") ||
+		strings.Contains(s, "transport closed") ||
+		strings.Contains(s, "server sent disconnect") ||
+		strings.Contains(s, "client connection force closed") ||
+		strings.Contains(s, "http2: Transport closing idle connection")
 }
 
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {

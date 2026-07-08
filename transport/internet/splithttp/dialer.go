@@ -2,6 +2,7 @@ package splithttp
 
 import (
 	"context"
+	"crypto/sha256"
 	gotls "crypto/tls"
 	"io"
 	"math/rand"
@@ -37,13 +38,80 @@ import (
 	"golang.org/x/net/http2"
 )
 
-type dialerConf struct {
-	net.Destination
-	*internet.MemoryStreamConfig
+// MuxKey is a structured connection pool key that uniquely identifies
+// a connection pool by: destination + SNI + protocol + security + config fingerprint.
+// This prevents cross-domain reuse and ensures correct TLS SNI binding.
+type MuxKey struct {
+	dest       net.Destination
+	sni        string // explicit SNI (TLS ServerName > OriginalDomain > Domain)
+	protocol   string // "xhttp", "grpc", "tcp", etc.
+	security   string // "tls", "reality", "none"
+	configHash [32]byte // SHA256 of security config
+}
+
+// newMuxKey builds a MuxKey from destination and stream settings.
+func newMuxKey(dest net.Destination, streamSettings *internet.MemoryStreamConfig) MuxKey {
+	tlsCfg := tls.ConfigFromStreamSettings(streamSettings)
+	realityCfg := reality.ConfigFromStreamSettings(streamSettings)
+	transportCfg, _ := streamSettings.ProtocolSettings.(*Config)
+
+	// SNI priority: TLS ServerName > Reality ServerName > OriginalDomain > Domain
+	sni := dest.OriginalDomain
+	if tlsCfg != nil && tlsCfg.ServerName != "" {
+		sni = tlsCfg.ServerName
+	} else if realityCfg != nil && realityCfg.ServerName != "" {
+		sni = realityCfg.ServerName
+	} else if sni == "" {
+		sni = dest.Address.Domain()
+	}
+
+	// Security type
+	security := "none"
+	if realityCfg != nil {
+		security = "reality"
+	} else if tlsCfg != nil {
+		security = "tls"
+	}
+
+	// Config fingerprint hash
+	var configHash [32]byte
+	h := sha256.New()
+	if realityCfg != nil {
+		h.Write([]byte("reality"))
+		h.Write([]byte(realityCfg.ServerName))
+		h.Write(realityCfg.PublicKey)
+		h.Write(realityCfg.ShortId)
+		h.Write([]byte(realityCfg.Fingerprint))
+	} else if tlsCfg != nil {
+		h.Write([]byte("tls"))
+		h.Write([]byte(tlsCfg.ServerName))
+		h.Write([]byte(tlsCfg.CipherSuites))
+		h.Write([]byte(tlsCfg.Fingerprint))
+		// ALPN: h2 vs http/1.1 have different connection semantics
+		for _, alpn := range tlsCfg.NextProtocol {
+			h.Write([]byte(alpn))
+		}
+	}
+	if transportCfg != nil {
+		h.Write([]byte(transportCfg.Mode))
+		h.Write([]byte(transportCfg.Path))
+	}
+	copy(configHash[:], h.Sum(nil))
+
+	// Protocol
+	protocol := streamSettings.ProtocolName
+
+	return MuxKey{
+		dest:       net.Destination{Address: dest.Address, Port: dest.Port, Network: dest.Network},
+		sni:        sni,
+		protocol:   protocol,
+		security:   security,
+		configHash: configHash,
+	}
 }
 
 var (
-	globalDialerMap    map[dialerConf]*XmuxManager
+	globalDialerMap    map[MuxKey]*XmuxManager
 	globalDialerAccess sync.Mutex
 	globalDialerQuit   chan struct{}
 	globalDialerDone   chan struct{} // closed when cleanup goroutine exits
@@ -68,13 +136,14 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 	defer globalDialerAccess.Unlock()
 
 	if globalDialerMap == nil {
-		globalDialerMap = make(map[dialerConf]*XmuxManager)
+		globalDialerMap = make(map[MuxKey]*XmuxManager)
 		globalDialerQuit = make(chan struct{})
 		globalDialerDone = make(chan struct{})
 		go globalDialerCleanup(globalDialerDone)
 	}
 
-	key := dialerConf{dest, streamSettings}
+	// Build structured MuxKey for connection pool
+	key := newMuxKey(dest, streamSettings)
 
 	xmuxManager, found := globalDialerMap[key]
 
