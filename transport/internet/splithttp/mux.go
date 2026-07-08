@@ -92,7 +92,7 @@ type XmuxClient struct {
 
 	// Ready Promise: blocks concurrent traffic until probe completes
 	ready    chan struct{} // closed when probe finishes (success or failure)
-	probeErr error        // set if probe failed
+	probeErr error         // set if probe failed
 
 	// V2.0: link-quality metrics for smarter scheduling
 	lastRetrans  atomic.Int32 // cumulative retransmit count from TCP_INFO
