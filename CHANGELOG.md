@@ -213,9 +213,9 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v3 go build -o xray.exe -trimpat
 
 ---
 
-## 上游同步记录 (2026-06-24)
+## 上游同步记录 (2026-07-08)
 
-同步至 Xray-core v26.6.22，合入以下上游修复：
+同步至 Xray-core v26.6.22+，合入以下上游修复：
 
 | Commit | 说明 | 状态 |
 |--------|------|------|
@@ -224,11 +224,27 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v3 go build -o xray.exe -trimpat
 | `fab4bcc1` | Bump cloudflare/circl 1.6.3→1.6.4 (#6362) | 已合入 |
 | `5aefcb41` | Bump pion/stun/v3 3.1.5→3.1.6 (#6357) | 已合入 |
 | `b99c3e56` | 版本号对齐 v26.6.22 | 已合入 |
+| `18b85adb` | XHTTP: default maxConnections=6 for anti-RKN | 已合入 |
+| `567500c4` | Fragment: lengths + delays 配置 (#6334) | 已 cherry-pick |
+| `583bb4a6` | XHTTP: fix scStreamUpServerSecs (#6343) | 已 cherry-pick |
+| `241aa38a` | TUN: autoSystemRoutingTable Linux/macOS (#6366) | 已 cherry-pick |
+| `dda2b10c` | TUN: traffic counters + Metrics (#6349) | 已 cherry-pick |
+| `7e7e8207` | Geodata: uTLS Chrome fingerprint (#6371) | 已 cherry-pick |
+| `f9eb1597` | Bump actions/cache v5→v6 (#6368) | 已 cherry-pick |
+| `987290ba` | Routing: process 支持 macOS (#6447) | 已 cherry-pick |
+| `3dc8bf3d` | Hysteria: fix dynamic UUID (#6395) | 已 cherry-pick (合并 map-based Validator) |
+| `452b7195` | Hysteria: vlessRoute 支持 (#6375) | 已 cherry-pick (合并 map-based Validator) |
+| `e4e7614c` | TLS ECH: 配置解析增强 (#6441) | 已 cherry-pick (保留 getCipherSuiteIDs 缓存) |
 
-跳过的上游 commit（与自定义特性冲突）：
-- `583bb4a6` XHTTP scStreamUpServerSecs — 与我们的 padding 优化冲突
+跳过的上游 commit（与自定义特性冲突或暂不需要）：
+- `d7fa2076` 禁止 VLESS/Trojan 未加密出站 — 破坏性变更，影响配置兼容性
+- `fb548f54` transport_internet.go 拆分重构 — 与大量自定义修改冲突
+- `65f6f0a4` TUN Linux gateway 精细化 — tun_linux.go 已深度定制
+- `0495b176` TUN macOS gateway 精细化 — tun_darwin.go 已有改动
+- `3263ae92` TUN Linux autoOutboundsInterface 修复 — tun_linux.go 已深度定制
 - `9cd9382e` TUN XRAY_TUN_FD — 已通过 tun_android.go 独立实现
-- `567500c4` Fragment lengths/delays — proto 重编号与 HappyEyeballs v3 配置冲突
+- `345c76f9` WireGuard 动态 peer 管理 — server.go 已重构 + proto 变更
+- `f496437b` XHTTP upload_queue.go 重构 — 已有 GC 调优改动
 
 ---
 
