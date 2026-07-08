@@ -154,6 +154,12 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 			xmuxClient.StartProfiling(profile)
 			activeProfile.Store(profile)
 		})
+
+		// Fast Eviction: mark client as dead on fatal connection errors
+		dc.SetOnFatalError(func(err error) {
+			errors.LogInfo(ctx, "XMUX: Fast Eviction triggered, marking client dead: ", err)
+			xmuxClient.MarkDead()
+		})
 	}
 
 	return client, xmuxClient

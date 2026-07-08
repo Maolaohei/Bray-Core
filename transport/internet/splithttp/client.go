@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,6 +58,9 @@ type DefaultDialerClient struct {
 	// Used by TransportProfile to start TCP_INFO sampling.
 	// The conn argument is the raw TCP socket (before TLS/REALITY wrapping).
 	onNewConn func(conn net.Conn)
+	// onFatalError is called when a fatal connection error is detected.
+	// Used by Fast Eviction to immediately remove dead clients from the pool.
+	onFatalError func(err error)
 }
 
 func (c *DefaultDialerClient) IsClosed() bool {
@@ -73,11 +77,30 @@ func (c *DefaultDialerClient) SetOnNewConn(fn func(conn net.Conn)) {
 	c.onNewConn = fn
 }
 
-func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
-	return c.openStreamWithRetry(ctx, url, sessionId, body, uploadOnly, 0)
+// SetOnFatalError sets the callback for fatal connection errors (Fast Eviction).
+func (c *DefaultDialerClient) SetOnFatalError(fn func(err error)) {
+	c.onFatalError = fn
 }
 
-func (c *DefaultDialerClient) openStreamWithRetry(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool, retryCount int) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
+// isFatalConnError checks if an error indicates the connection is dead and should be evicted.
+func isFatalConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for connection-level fatal errors
+	errStr := err.Error()
+	return strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "use of closed connection") ||
+		strings.Contains(errStr, "GOAWAY") ||
+		strings.Contains(errStr, "RST_STREAM") ||
+		strings.Contains(errStr, "transport closed") ||
+		strings.Contains(errStr, "unexpected EOF") ||
+		strings.Contains(errStr, "RemoteCertificateNameMismatch")
+}
+
+func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
 	t0 := time.Now()
 	gotConn := done.New()
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
@@ -85,7 +108,7 @@ func (c *DefaultDialerClient) openStreamWithRetry(ctx context.Context, url strin
 			remoteAddr = connInfo.Conn.RemoteAddr()
 			localAddr = connInfo.Conn.LocalAddr()
 			errors.LogDebug(ctx, "XHTTP stream: GotConn in ", time.Since(t0).Round(time.Millisecond),
-				" (reused=", connInfo.Reused, ", retry=", retryCount, ")")
+				" (reused=", connInfo.Reused, ")")
 			gotConn.Close()
 		},
 	})
@@ -105,6 +128,10 @@ func (c *DefaultDialerClient) openStreamWithRetry(ctx context.Context, url strin
 	go func() {
 		resp, err := c.client.Do(req)
 		if err != nil {
+			// Fast Eviction: trigger callback on fatal connection errors
+			if c.onFatalError != nil && isFatalConnError(err) {
+				go c.onFatalError(err)
+			}
 			if !uploadOnly { // stream-down is enough
 				c.closed.Store(true)
 				errors.LogInfoInner(ctx, err, "failed to "+method+" "+url)
@@ -115,21 +142,6 @@ func (c *DefaultDialerClient) openStreamWithRetry(ctx context.Context, url strin
 			return
 		}
 		if resp.StatusCode != 200 && !uploadOnly {
-			// First collision retry: if first attempt gets unexpected response
-			// (e.g., Google GFE 404 from probe race), retry once with fresh connection
-			if retryCount < 1 {
-				resp.Body.Close()
-				gotConn.Close()
-				common.Close(body)
-				wrc.Close()
-				errors.LogInfo(ctx, "XHTTP stream: retry due to status ", resp.StatusCode, " (attempt ", retryCount+1, ")")
-				wrc2, remoteAddr2, localAddr2, err2 := c.openStreamWithRetry(ctx, url, sessionId, body, uploadOnly, retryCount+1)
-				if err2 == nil {
-					wrc, remoteAddr, localAddr = wrc2, remoteAddr2, localAddr2
-					return
-				}
-				errors.LogInfoInner(ctx, err2, "XHTTP stream: retry failed")
-			}
 			errors.LogInfo(ctx, "unexpected status ", resp.StatusCode)
 		}
 		if resp.StatusCode != 200 || uploadOnly { // stream-up

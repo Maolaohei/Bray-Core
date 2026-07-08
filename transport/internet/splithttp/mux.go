@@ -27,6 +27,12 @@ const (
 	StateActive   int32 = 0 // accepting new streams
 	StateDraining int32 = 1 // refusing new streams, waiting for active streams to finish
 	StateClosed   int32 = 2 // TCP connection closed
+
+	// clientIdleTimeout is the maximum time a client can remain unused (no active streams)
+	// before being evicted. This is a safety net, not the primary failure recovery mechanism.
+	// Primary mechanism: Fast Eviction (immediate eviction on fatal errors).
+	// 120s balances ISP NAT timeouts (30-300s) and Go's IdleConnTimeout (90s).
+	clientIdleTimeout = 120 * time.Second
 )
 
 // XmuxClientPool is a read-write separated connection pool.
@@ -80,8 +86,13 @@ type XmuxClient struct {
 	LeftRequests  atomic.Int32
 	UnreusableAt  time.Time
 	createdAt     time.Time
+	LastUsed      atomic.Int64 // unix nano: last time this client was borrowed
 	lastRTT       atomic.Int64 // nanoseconds, for RTT-aware scheduling
 	cachedScore   atomic.Int64 // pre-computed scheduling score, updated on state change
+
+	// Ready Promise: blocks concurrent traffic until probe completes
+	ready    chan struct{} // closed when probe finishes (success or failure)
+	probeErr error        // set if probe failed
 
 	// V2.0: link-quality metrics for smarter scheduling
 	lastRetrans  atomic.Int32 // cumulative retransmit count from TCP_INFO
@@ -96,6 +107,17 @@ type XmuxClient struct {
 	// TransportProfile for this connection. Created when TCP connection is established.
 	profileMu sync.Mutex          // protects profile field
 	profile   interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
+}
+
+// WaitForReady blocks until probe completes or context is cancelled.
+// Returns probeErr if probe failed.
+func (c *XmuxClient) WaitForReady(ctx context.Context) error {
+	select {
+	case <-c.ready:
+		return c.probeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Borrow atomically attempts to reserve a stream slot on this connection.
@@ -126,6 +148,13 @@ func (c *XmuxClient) Release() {
 	c.activeStreams.Add(-1)
 	c.recomputeScore()
 	c.tryClose()
+}
+
+// MarkDead immediately transitions to Closed state.
+// Called by Fast Eviction when fatal errors are detected (EOF, broken pipe, GOAWAY, etc.)
+func (c *XmuxClient) MarkDead() {
+	c.state.Store(StateClosed)
+	c.StopProfiling()
 }
 
 // maybeDrain transitions from Active to Draining.
@@ -566,6 +595,13 @@ func (m *XmuxManager) healthCheckTick() {
 			i++
 			continue
 		}
+		// Idle eviction: only evict if NO active streams AND idle for too long
+		if lastUsed := c.LastUsed.Load(); lastUsed > 0 && now.Sub(time.Unix(0, lastUsed)) > clientIdleTimeout {
+			errors.LogDebug(context.Background(), "XMUX: health-check removing idle xmuxClient, lastUsed=", time.Unix(0, lastUsed).Format(time.RFC3339))
+			c.maybeDrain()
+			m.pool.RemoveAt(i)
+			continue
+		}
 		if c.createdAt.After(now.Add(-coldStartProtectionMs * time.Millisecond)) {
 			i++
 			continue
@@ -859,8 +895,6 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 // newXmuxClientLocked creates a new client and appends to the pool.
 // Caller must hold m.pool.mu.
 func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
-	m.RecordNewConn()
-
 	conn := m.newConnFunc()
 	if conn == nil {
 		return nil
@@ -869,18 +903,21 @@ func (m *XmuxManager) newXmuxClientLocked() *XmuxClient {
 	m.pool.Append(xmuxClient)
 
 	// Probe: send HEAD request to trigger real TCP/TLS connection.
-	// Without this, http.Client/Transport is lazy — connection is only
-	// established on first Do(). The probe makes preConnect effective.
+	// If probeURL is empty, close ready immediately (no probe needed).
 	if m.probeURL != "" {
 		go m.probeConnection(conn, xmuxClient)
+	} else {
+		close(xmuxClient.ready) // no probe, mark as ready immediately
 	}
 
 	return xmuxClient
 }
 
 // probeConnection sends a HEAD request to trigger real dial through the transport.
-// Purely informational — logs errors but does not affect pool state.
+// Closes ready channel when done (success or failure) to unblock waiting traffic.
 func (m *XmuxManager) probeConnection(conn XmuxConn, xmuxClient *XmuxClient) {
+	defer close(xmuxClient.ready) // signal ready to waiting traffic
+
 	dc, ok := conn.(DialerClient)
 	if !ok {
 		return
@@ -892,16 +929,22 @@ func (m *XmuxManager) probeConnection(conn XmuxConn, xmuxClient *XmuxClient) {
 	u, err := url.Parse(m.probeURL)
 	if err != nil {
 		errors.LogDebug(context.Background(), "XMUX: probeConnection url.Parse failed: ", err)
+		xmuxClient.probeErr = err
+		xmuxClient.MarkDead() // Fast Eviction: probe failed, mark dead immediately
 		return
 	}
 	req, err := http.NewRequestWithContext(context.Background(), "HEAD", u.String(), nil)
 	if err != nil {
 		errors.LogDebug(context.Background(), "XMUX: probeConnection NewRequest failed: ", err)
+		xmuxClient.probeErr = err
+		xmuxClient.MarkDead() // Fast Eviction: probe failed, mark dead immediately
 		return
 	}
 	resp, err := bdc.client.Do(req)
 	if err != nil {
 		errors.LogDebug(context.Background(), "XMUX: probeConnection Do failed: ", err)
+		xmuxClient.probeErr = err
+		xmuxClient.MarkDead() // Fast Eviction: probe failed, mark dead immediately
 		return
 	}
 	resp.Body.Close()
@@ -918,7 +961,16 @@ func (m *XmuxManager) addToPool(conn XmuxConn) {
 // Caller must hold m.pool.mu.
 func (m *XmuxManager) addToPoolLocked(conn XmuxConn) {
 	m.RecordNewConn()
-	m.pool.Append(m.initNewClient(conn))
+	xmuxClient := m.initNewClient(conn)
+	m.pool.Append(xmuxClient)
+
+	// Probe: send HEAD request to trigger real TCP/TLS connection.
+	// If probeURL is empty, close ready immediately (no probe needed).
+	if m.probeURL != "" {
+		go m.probeConnection(conn, xmuxClient)
+	} else {
+		close(xmuxClient.ready) // no probe, mark as ready immediately
+	}
 }
 
 // initNewClient initializes a new XmuxClient with config-derived limits.
@@ -927,6 +979,7 @@ func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
 		XmuxConn:  conn,
 		createdAt: time.Now(),
 		learner:   quality.NewNetworkLearner(),
+		ready:     make(chan struct{}), // probe not yet completed
 	}
 	c.leftUsage.Store(-1)
 	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
@@ -949,7 +1002,13 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 		conn := m.newConnFunc()
 		if conn != nil {
 			m.lastActivity.Store(time.Now().UnixNano())
-			return m.initNewClient(conn)
+			c := m.initNewClient(conn)
+			// Wait for probe to complete before returning
+			if err := c.WaitForReady(ctx); err != nil {
+				errors.LogDebug(ctx, "XMUX: probe failed for new connection: ", err)
+				return nil
+			}
+			return c
 		}
 		return nil
 	}
@@ -1016,9 +1075,17 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 		snap := m.pool.Snapshot()
 		var best *XmuxClient
 		bestScore := int64(math.MaxInt64)
+		now := time.Now().UnixNano()
 		for _, c := range snap {
 			if c.state.Load() != StateActive {
 				continue
+			}
+			// Idle eviction: only evict if NO active streams AND idle for too long.
+			// This prevents killing WebSocket/gRPC connections that have long gaps between requests.
+			if c.activeStreams.Load() == 0 {
+				if lastUsed := c.LastUsed.Load(); lastUsed > 0 && now-lastUsed > int64(clientIdleTimeout) {
+					continue
+				}
 			}
 			if effectiveConc > 0 && c.activeStreams.Load() >= effectiveConc {
 				continue
@@ -1072,8 +1139,16 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 
 			if acquired {
 				m.lastActivity.Store(time.Now().UnixNano())
+				best.LastUsed.Store(time.Now().UnixNano())
 				m.RecordReuseHit()
-				return best
+				// Wait for probe to complete before returning existing connection
+				if err := best.WaitForReady(ctx); err != nil {
+					errors.LogDebug(ctx, "XMUX: probe failed for existing connection: ", err)
+					best.MarkDead()
+					// Fall through to Phase 2 to create new connection
+				} else {
+					return best
+				}
 			}
 		}
 	}
@@ -1089,6 +1164,11 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 		if len(m.pool.clients) > 0 {
 			c := m.pool.clients[len(m.pool.clients)-1]
 			m.pool.mu.RUnlock()
+			// Wait for probe to complete before returning new connection
+			if err := c.WaitForReady(ctx); err != nil {
+				errors.LogDebug(ctx, "XMUX: probe failed for new connection: ", err)
+				return nil
+			}
 			return c
 		}
 		m.pool.mu.RUnlock()
