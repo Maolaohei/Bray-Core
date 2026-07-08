@@ -235,14 +235,15 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v3 go build -o xray.exe -trimpat
 | `3dc8bf3d` | Hysteria: fix dynamic UUID (#6395) | 已 cherry-pick (合并 map-based Validator) |
 | `452b7195` | Hysteria: vlessRoute 支持 (#6375) | 已 cherry-pick (合并 map-based Validator) |
 | `e4e7614c` | TLS ECH: 配置解析增强 (#6441) | 已 cherry-pick (保留 getCipherSuiteIDs 缓存) |
+| `65f6f0a4` | TUN Linux: gateway 精细化 — setInterfaceAddresses (#6398) | 已 cherry-pick |
+| `0495b176` | TUN macOS: gateway 精细化 — selectDarwinGateway (#6434) | 已 cherry-pick |
+| `9cd9382e` | TUN Linux: XRAY_TUN_FD 环境变量 (#6338) | 已 cherry-pick (合并 ownsTun + gateway) |
+| `d7fa2076` | Geodata: 提取私有IP/域名匹配 + 传输安全校验 (#6303) | 选择性吸收 (跳过禁止明文策略) |
 
 跳过的上游 commit（与自定义特性冲突或暂不需要）：
-- `d7fa2076` 禁止 VLESS/Trojan 未加密出站 — 破坏性变更，影响配置兼容性
 - `fb548f54` transport_internet.go 拆分重构 — 与大量自定义修改冲突
-- `65f6f0a4` TUN Linux gateway 精细化 — tun_linux.go 已深度定制
-- `0495b176` TUN macOS gateway 精细化 — tun_darwin.go 已有改动
-- `3263ae92` TUN Linux autoOutboundsInterface 修复 — tun_linux.go 已深度定制
-- `9cd9382e` TUN XRAY_TUN_FD — 已通过 tun_android.go 独立实现
+- `345c76f9` WireGuard 动态 peer 管理 — proto + config + server 重构，冲突极高
+- `f496437b` XHTTP upload_queue.go 重构 — Bray-Core 已有更优实现
 - `345c76f9` WireGuard 动态 peer 管理 — server.go 已重构 + proto 变更
 - `f496437b` XHTTP upload_queue.go 重构 — 已有 GC 调优改动
 
