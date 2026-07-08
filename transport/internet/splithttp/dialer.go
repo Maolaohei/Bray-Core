@@ -531,7 +531,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		requestURL.Host = realityConfig.ServerName
 	}
 	if requestURL.Host == "" {
-		requestURL.Host = dest.Address.String()
+		requestURL.Host = dest.ServerName()
 	}
 	if browser_dialer.HasBrowserDialer() && realityConfig == nil {
 		// For Browser Dialer's optimized IP and non-standard port
@@ -598,7 +598,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			requestURL2.Host = realityConfig2.ServerName
 		}
 		if requestURL2.Host == "" {
-			requestURL2.Host = dest2.Address.String()
+			requestURL2.Host = dest2.ServerName()
 		}
 		if browser_dialer.HasBrowserDialer() && realityConfig2 == nil {
 			// For Browser Dialer's optimized IP and non-standard port

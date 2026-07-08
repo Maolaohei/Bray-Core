@@ -74,6 +74,10 @@ func (c *DefaultDialerClient) SetOnNewConn(fn func(conn net.Conn)) {
 }
 
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
+	return c.openStreamWithRetry(ctx, url, sessionId, body, uploadOnly, 0)
+}
+
+func (c *DefaultDialerClient) openStreamWithRetry(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool, retryCount int) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
 	t0 := time.Now()
 	gotConn := done.New()
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
@@ -81,7 +85,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 			remoteAddr = connInfo.Conn.RemoteAddr()
 			localAddr = connInfo.Conn.LocalAddr()
 			errors.LogDebug(ctx, "XHTTP stream: GotConn in ", time.Since(t0).Round(time.Millisecond),
-				" (reused=", connInfo.Reused, ")")
+				" (reused=", connInfo.Reused, ", retry=", retryCount, ")")
 			gotConn.Close()
 		},
 	})
@@ -111,6 +115,21 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 			return
 		}
 		if resp.StatusCode != 200 && !uploadOnly {
+			// First collision retry: if first attempt gets unexpected response
+			// (e.g., Google GFE 404 from probe race), retry once with fresh connection
+			if retryCount < 1 {
+				resp.Body.Close()
+				gotConn.Close()
+				common.Close(body)
+				wrc.Close()
+				errors.LogInfo(ctx, "XHTTP stream: retry due to status ", resp.StatusCode, " (attempt ", retryCount+1, ")")
+				wrc2, remoteAddr2, localAddr2, err2 := c.openStreamWithRetry(ctx, url, sessionId, body, uploadOnly, retryCount+1)
+				if err2 == nil {
+					wrc, remoteAddr, localAddr = wrc2, remoteAddr2, localAddr2
+					return
+				}
+				errors.LogInfoInner(ctx, err2, "XHTTP stream: retry failed")
+			}
 			errors.LogInfo(ctx, "unexpected status ", resp.StatusCode)
 		}
 		if resp.StatusCode != 200 || uploadOnly { // stream-up
