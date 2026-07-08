@@ -77,7 +77,7 @@ func (v *Validator) Add(u *protocol.MemoryUser) error {
 	return nil
 }
 
-func (v *Validator) Del(email string) error {
+func (v *Validator) DelByEmail(email string) error {
 	if email == "" {
 		return errors.New("Email must not be empty.")
 	}
@@ -169,4 +169,11 @@ func (v *Validator) GetCount() int64 {
 	defer v.mutex.Unlock()
 
 	return int64(len(v.users))
+}
+
+func (v *Validator) NotEmpty() bool {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	return len(v.users) > 0
 }
