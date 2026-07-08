@@ -43,9 +43,9 @@ import (
 // This prevents cross-domain reuse and ensures correct TLS SNI binding.
 type MuxKey struct {
 	dest       net.Destination
-	sni        string // explicit SNI (TLS ServerName > OriginalDomain > Domain)
-	protocol   string // "xhttp", "grpc", "tcp", etc.
-	security   string // "tls", "reality", "none"
+	sni        string   // explicit SNI (TLS ServerName > OriginalDomain > Domain)
+	protocol   string   // "xhttp", "grpc", "tcp", etc.
+	security   string   // "tls", "reality", "none"
 	configHash [32]byte // SHA256 of security config
 }
 
