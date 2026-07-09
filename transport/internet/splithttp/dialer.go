@@ -39,14 +39,16 @@ import (
 )
 
 // MuxKey is a structured connection pool key that uniquely identifies
-// a connection pool by: destination + SNI + protocol + security + config fingerprint.
-// This prevents cross-domain reuse and ensures correct TLS SNI binding.
+// a connection pool by: destination (actual target) + TLS identity + protocol + security + config fingerprint.
+// For Reality: dest.OriginalDomain is the actual target (github.com), realityServerName is the disguise (www.microsoft.com).
+// This prevents cross-domain reuse while maintaining correct TLS/REALITY handshake semantics.
 type MuxKey struct {
-	dest       net.Destination
-	sni        string   // explicit SNI (TLS ServerName > OriginalDomain > Domain)
-	protocol   string   // "xhttp", "grpc", "tcp", etc.
-	security   string   // "tls", "reality", "none"
-	configHash [32]byte // SHA256 of security config
+	dest              net.Destination // actual target destination (contains OriginalDomain)
+	tlsServerName     string          // TLS ServerName (for non-Reality)
+	realityServerName string          // REALITY disguise domain
+	protocol          string          // "xhttp", "grpc", "tcp", etc.
+	security          string          // "tls", "reality", "none"
+	configHash        [32]byte        // SHA256 of security config
 }
 
 // newMuxKey builds a MuxKey from destination and stream settings.
@@ -55,14 +57,16 @@ func newMuxKey(dest net.Destination, streamSettings *internet.MemoryStreamConfig
 	realityCfg := reality.ConfigFromStreamSettings(streamSettings)
 	transportCfg, _ := streamSettings.ProtocolSettings.(*Config)
 
-	// SNI priority: TLS ServerName > Reality ServerName > OriginalDomain > Domain
-	sni := dest.OriginalDomain
+	// TLS ServerName (for non-Reality)
+	tlsServerName := ""
 	if tlsCfg != nil && tlsCfg.ServerName != "" {
-		sni = tlsCfg.ServerName
-	} else if realityCfg != nil && realityCfg.ServerName != "" {
-		sni = realityCfg.ServerName
-	} else if sni == "" {
-		sni = dest.Address.Domain()
+		tlsServerName = tlsCfg.ServerName
+	}
+
+	// REALITY disguise domain
+	realityServerName := ""
+	if realityCfg != nil && realityCfg.ServerName != "" {
+		realityServerName = realityCfg.ServerName
 	}
 
 	// Security type
@@ -102,11 +106,12 @@ func newMuxKey(dest net.Destination, streamSettings *internet.MemoryStreamConfig
 	protocol := streamSettings.ProtocolName
 
 	return MuxKey{
-		dest:       net.Destination{Address: dest.Address, Port: dest.Port, Network: dest.Network},
-		sni:        sni,
-		protocol:   protocol,
-		security:   security,
-		configHash: configHash,
+		dest:              dest,
+		tlsServerName:     tlsServerName,
+		realityServerName: realityServerName,
+		protocol:          protocol,
+		security:          security,
+		configHash:        configHash,
 	}
 }
 

@@ -209,6 +209,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 
 		} else {
 			unchangedDomain := ob.Target.Address.Domain()
+			ob.Target.OriginalDomain = unchangedDomain
 			ob.Target.Address = net.IPAddress(ips[dice.Roll(len(ips))])
 			errors.LogInfo(ctx, "target: ", unchangedDomain, " resolved to: ", ob.Target.Address.String())
 		}
