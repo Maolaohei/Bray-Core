@@ -28,6 +28,9 @@ var getCipherSuiteIDs = sync.OnceValue(func() map[string]uint16 {
 	for _, s := range tls.CipherSuites() {
 		id[s.Name] = s.ID
 	}
+	for _, s := range tls.InsecureCipherSuites() {
+		id[s.Name] = s.ID
+	}
 	return id
 })
 
@@ -483,8 +486,9 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 	if len(c.CipherSuites) > 0 {
 		id := getCipherSuiteIDs()
 		for n := range strings.SplitSeq(c.CipherSuites, ":") {
-			if id[n] != 0 {
-				config.CipherSuites = append(config.CipherSuites, id[n])
+			n = strings.TrimSpace(n)
+			if v, ok := id[n]; ok {
+				config.CipherSuites = append(config.CipherSuites, v)
 			}
 		}
 	}
