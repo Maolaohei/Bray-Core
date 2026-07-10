@@ -101,13 +101,13 @@ func TestTLSIdentityHash_ReplacesOldCacheKey(t *testing.T) {
 	dest := net.TCPDestination(net.ParseAddress("142.250.191.14"), 443)
 
 	chatKey := h2CacheKey{
-		dest:         dest,
+		dest: dest,
 		identityHash: tlsIdentityHash(&internet.MemoryStreamConfig{
 			SecuritySettings: &tls.Config{ServerName: "chat.openai.com"},
 		}),
 	}
 	googleKey := h2CacheKey{
-		dest:         dest,
+		dest: dest,
 		identityHash: tlsIdentityHash(&internet.MemoryStreamConfig{
 			SecuritySettings: &tls.Config{ServerName: "google.com"},
 		}),
