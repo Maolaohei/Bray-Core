@@ -137,8 +137,8 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		return &BrowserDialerClient{transportConfig: streamSettings.ProtocolSettings.(*Config)}, nil
 	}
 
+	// Phase 1: Lookup or create XmuxManager under lock (no I/O)
 	globalDialerAccess.Lock()
-	defer globalDialerAccess.Unlock()
 
 	if globalDialerMap == nil {
 		globalDialerMap = make(map[MuxKey]*XmuxManager)
@@ -192,8 +192,18 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		globalDialerMap[key] = xmuxManager
 	}
 
+	globalDialerAccess.Unlock()
+
+	// Phase 2: Get client outside lock (may involve network I/O)
 	xmuxClient := xmuxManager.GetXmuxClient(ctx)
-	client := xmuxClient.XmuxConn.(DialerClient)
+	if xmuxClient == nil {
+		return nil, nil
+	}
+
+	client, ok := xmuxClient.XmuxConn.(DialerClient)
+	if !ok {
+		return nil, nil
+	}
 
 	// Set RTT callback on DefaultDialerClient for RTT-aware scheduling
 	if dc, ok := client.(*DefaultDialerClient); ok {

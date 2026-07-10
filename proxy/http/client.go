@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"io"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"golang.org/x/net/http2"
@@ -42,9 +44,50 @@ type h2Conn struct {
 	h2Conn  *http2.ClientConn
 }
 
+// h2CacheKey uniquely identifies an HTTP/2 connection pool by network destination
+// + TLS identity hash. This prevents cross-domain connection reuse when the same
+// IP:Port serves multiple TLS identities (e.g. CDN with SNI-based routing).
+type h2CacheKey struct {
+	dest         net.Destination
+	identityHash [32]byte // SHA256 of TLS identity (SNI, fingerprint, ALPN, REALITY)
+}
+
+// tlsIdentityHash computes a stable hash of the TLS identity from stream settings.
+// This allows cache-first lookup without dialing, since the identity is known from config.
+func tlsIdentityHash(streamSettings *internet.MemoryStreamConfig) [32]byte {
+	h := sha256.New()
+
+	if tlsCfg := tls.ConfigFromStreamSettings(streamSettings); tlsCfg != nil {
+		h.Write([]byte("tls"))
+		h.Write([]byte(tlsCfg.ServerName))
+		h.Write([]byte(tlsCfg.Fingerprint))
+		h.Write([]byte(tlsCfg.CipherSuites))
+		for _, alpn := range tlsCfg.NextProtocol {
+			h.Write([]byte(alpn))
+			h.Write([]byte{0})
+		}
+	}
+
+	if realityCfg := reality.ConfigFromStreamSettings(streamSettings); realityCfg != nil {
+		h.Write([]byte("reality"))
+		h.Write([]byte(realityCfg.ServerName))
+		for _, name := range realityCfg.ServerNames {
+			h.Write([]byte(name))
+			h.Write([]byte{0})
+		}
+		h.Write(realityCfg.PublicKey)
+		h.Write([]byte(realityCfg.ShortId))
+		h.Write([]byte(realityCfg.Fingerprint))
+	}
+
+	var hash [32]byte
+	copy(hash[:], h.Sum(nil))
+	return hash
+}
+
 var (
 	cachedH2Mutex sync.Mutex
-	cachedH2Conns map[net.Destination]h2Conn
+	cachedH2Conns map[h2CacheKey]h2Conn
 )
 
 // NewClient create a new http client based on the given config.
@@ -100,8 +143,15 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 		return errors.New("failed to fill out header").Base(err)
 	}
 
+	// Extract TLS identity from stream settings for cache key.
+	// This enables cache-first lookup without dialing.
+	var identityHash [32]byte
+	if ss, ok := session.StreamSettingsFromContext(ctx).(*internet.MemoryStreamConfig); ok && ss != nil {
+		identityHash = tlsIdentityHash(ss)
+	}
+
 	if err := retry.ExponentialBackoff(5, 100).On(func() error {
-		netConn, err := setUpHTTPTunnel(ctx, dest, targetAddr, user, dialer, header, firstPayload)
+		netConn, err := setUpHTTPTunnel(ctx, dest, targetAddr, user, dialer, header, firstPayload, identityHash)
 		if netConn != nil {
 			if _, ok := netConn.(*http2Conn); !ok {
 				if _, err := netConn.Write(firstPayload); err != nil {
@@ -202,8 +252,9 @@ func fillRequestHeader(ctx context.Context, header []*Header) ([]*Header, error)
 	return filled, nil
 }
 
-// setUpHTTPTunnel will create a socket tunnel via HTTP CONNECT method
-func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, user *protocol.MemoryUser, dialer internet.Dialer, header []*Header, firstPayload []byte) (net.Conn, error) {
+// setUpHTTPTunnel will create a socket tunnel via HTTP CONNECT method.
+// identityHash is the TLS identity hash from stream settings, used for cache-first lookup.
+func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, user *protocol.MemoryUser, dialer internet.Dialer, header []*Header, firstPayload []byte, identityHash [32]byte) (net.Conn, error) {
 	req := &http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Host: target},
@@ -277,8 +328,12 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 		return newHTTP2Conn(rawConn, pw, resp.Body), nil
 	}
 
+	// Cache-first lookup: check if we already have an HTTP/2 connection
+	// with the same TLS identity. No dial needed on hit.
+	cacheKey := h2CacheKey{dest: dest, identityHash: identityHash}
+
 	cachedH2Mutex.Lock()
-	cachedConn, cachedConnFound := cachedH2Conns[dest]
+	cachedConn, cachedConnFound := cachedH2Conns[cacheKey]
 	cachedH2Mutex.Unlock()
 
 	if cachedConnFound {
@@ -288,11 +343,17 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 			if err != nil {
 				return nil, err
 			}
-
 			return proxyConn, nil
 		}
+		// Cached connection is stale (GOAWAY received). Clean up and fall through.
+		cachedH2Mutex.Lock()
+		delete(cachedH2Conns, cacheKey)
+		cachedH2Mutex.Unlock()
+		cc.Close()
+		rc.Close()
 	}
 
+	// Cache miss or stale: establish new connection.
 	rawConn, err := dialer.Dial(ctx, dest)
 	if err != nil {
 		return nil, err
@@ -334,10 +395,16 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 
 		cachedH2Mutex.Lock()
 		if cachedH2Conns == nil {
-			cachedH2Conns = make(map[net.Destination]h2Conn)
+			cachedH2Conns = make(map[h2CacheKey]h2Conn)
 		}
 
-		cachedH2Conns[dest] = h2Conn{
+		// Close old connection before overwriting to prevent fd leak.
+		if old, ok := cachedH2Conns[cacheKey]; ok {
+			old.h2Conn.Close()
+			old.rawConn.Close()
+		}
+
+		cachedH2Conns[cacheKey] = h2Conn{
 			rawConn: rawConn,
 			h2Conn:  h2clientConn,
 		}

@@ -323,6 +323,10 @@ type XmuxManager struct {
 	netHash      string // current network hash for change detection
 	lastNetCheck time.Time
 
+	// Network change debouncing: require 2 consecutive observations to confirm
+	pendingNetChange      string // pending network hash change awaiting confirmation
+	pendingNetChangeCount int    // number of consecutive observations of the same change
+
 	// Metrics for quantifiable validation
 	metrics struct {
 		// Connection reuse vs new
@@ -422,7 +426,9 @@ func (m *XmuxManager) networkWatchLoop() {
 	}
 }
 
-// checkNetworkChange detects network interface changes.
+// checkNetworkChange detects network interface changes with debouncing.
+// Requires 2 consecutive matching changes (60s apart) to confirm a real network change,
+// preventing false positives from DHCP renewals, virtual interface flapping, etc.
 func (m *XmuxManager) checkNetworkChange() {
 	m.warmupMu.Lock()
 	defer m.warmupMu.Unlock()
@@ -445,23 +451,44 @@ func (m *XmuxManager) checkNetworkChange() {
 		return
 	}
 
-	if m.netHash != newHash {
-		// Network changed!
-		errors.LogInfo(context.Background(), "XMUX: network change detected, clearing DNS cache and re-warming up")
-		m.netHash = newHash
-
-		// Track network recovery event
-		m.metrics.netRecoveryCount.Add(1)
-
-		// Clear stale DNS cache to prevent serving IPs from the old network
-		internet.ClearDNSCache()
-
-		// Re-warmup DNS on the new network (async, non-blocking)
-		go internet.TriggerDNSWarmup()
-
-		// Clear stale connections
-		m.clearStaleConnections()
+	if m.netHash == newHash {
+		// No change, reset pending change tracking
+		m.pendingNetChange = ""
+		m.pendingNetChangeCount = 0
+		return
 	}
+
+	// Network hash changed — check if this is a new change or continuation
+	if m.pendingNetChange == newHash {
+		m.pendingNetChangeCount++
+	} else {
+		// Different change, start tracking
+		m.pendingNetChange = newHash
+		m.pendingNetChangeCount = 1
+	}
+
+	// Require 2 consecutive observations of the same new hash to confirm
+	if m.pendingNetChangeCount < 2 {
+		return
+	}
+
+	// Confirmed network change
+	errors.LogInfo(context.Background(), "XMUX: network change confirmed, clearing DNS cache and re-warming up")
+	m.netHash = newHash
+	m.pendingNetChange = ""
+	m.pendingNetChangeCount = 0
+
+	// Track network recovery event
+	m.metrics.netRecoveryCount.Add(1)
+
+	// Clear stale DNS cache to prevent serving IPs from the old network
+	internet.ClearDNSCache()
+
+	// Re-warmup DNS on the new network (async, non-blocking)
+	go internet.TriggerDNSWarmup()
+
+	// Clear stale connections
+	m.clearStaleConnections()
 }
 
 // clearStaleConnections removes all stale connections after network change
@@ -534,6 +561,10 @@ const (
 	maxRTTBeforeRemove = 5000
 	// coldStartProtectionMs is the minimum age (in ms) before a connection can be removed by health check.
 	coldStartProtectionMs = 10000
+	// maxConnectionAge is the maximum lifetime of a connection before it is drained.
+	// Prevents stale state accumulation from NAT/LB changes, server rotation, and TLS session staleness.
+	// Connections with active streams will finish their work before closing.
+	maxConnectionAge = 30 * time.Minute
 )
 
 // healthCheckLoop periodically checks connection health and removes unhealthy ones.
@@ -604,6 +635,14 @@ func (m *XmuxManager) healthCheckTick() {
 		}
 		if c.createdAt.After(now.Add(-coldStartProtectionMs * time.Millisecond)) {
 			i++
+			continue
+		}
+		// Max connection age: drain connections that have lived too long.
+		// Handles NAT/LB changes, server rotation, TLS session refresh.
+		if now.Sub(c.createdAt) > maxConnectionAge {
+			errors.LogDebug(context.Background(), "XMUX: health-check draining aged xmuxClient, age=", now.Sub(c.createdAt).Round(time.Second))
+			c.maybeDrain()
+			m.pool.RemoveAt(i)
 			continue
 		}
 		if c.ShouldDrain() && c.confidence.Load() >= 30 {
@@ -1344,8 +1383,19 @@ func (m *XmuxManager) LogMetrics() {
 }
 
 // IdleFor returns how long since this manager last served a client request.
+// Returns 0 if there are active connections in the pool (preventing cleanup of busy managers).
 // Used by the global cleanup goroutine to detect idle managers.
 func (m *XmuxManager) IdleFor() time.Duration {
+	// If there are active connections, the manager is not idle
+	if m.pool.Len() > 0 {
+		snap := m.pool.Snapshot()
+		for _, c := range snap {
+			if c.activeStreams.Load() > 0 {
+				return 0 // Not idle — has active streams
+			}
+		}
+	}
+
 	ts := m.lastActivity.Load()
 	if ts == 0 {
 		return 0
