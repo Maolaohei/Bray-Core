@@ -252,10 +252,10 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 					resp, err := http.ReadResponse(h1UploadConn.RespBufReader, req)
 					if err != nil {
 						c.closed.Store(true)
-						return fmt.Errorf("error while reading response: %s", err.Error())
+						return fmt.Errorf("error while reading response: %w", err)
 					}
 					io.Copy(io.Discard, resp.Body)
-					defer resp.Body.Close()
+					resp.Body.Close()
 					if resp.StatusCode != 200 {
 						return fmt.Errorf("got non-200 error response code: %d", resp.StatusCode)
 					}
