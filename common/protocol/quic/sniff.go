@@ -143,7 +143,9 @@ func SniffQUIC(b []byte) (*SniffHeader, error) {
 		if err != nil {
 			return nil, err
 		}
-
+		if len(b) < hdrLen+4+block.BlockSize() {
+			return nil, errNotQuic
+		}
 		cache.Clear()
 		// Header-protection unmask needs at least hdrLen+4+blocksize bytes
 		// (packet number + one AES block). packetLen>=4 alone does not
