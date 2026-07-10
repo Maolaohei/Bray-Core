@@ -252,6 +252,20 @@ func fillRequestHeader(ctx context.Context, header []*Header) ([]*Header, error)
 	return filled, nil
 }
 
+// tlsNegotiatedProtocol performs TLS handshake if the connection is TLS
+// and returns the negotiated ALPN protocol. Returns "" for non-TLS connections.
+func tlsNegotiatedProtocol(conn net.Conn, ctx context.Context) string {
+	iConn := stat.TryUnwrapStatsConn(conn)
+	if tlsIf, ok := iConn.(tls.Interface); ok {
+		if err := tlsIf.HandshakeContext(ctx); err != nil {
+			conn.Close()
+			return ""
+		}
+		return tlsIf.NegotiatedProtocol()
+	}
+	return ""
+}
+
 // setUpHTTPTunnel will create a socket tunnel via HTTP CONNECT method.
 // identityHash is the TLS identity hash from stream settings, used for cache-first lookup.
 func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, user *protocol.MemoryUser, dialer internet.Dialer, header []*Header, firstPayload []byte, identityHash [32]byte) (net.Conn, error) {
@@ -359,22 +373,7 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 		return nil, err
 	}
 
-	iConn := stat.TryUnwrapStatsConn(rawConn)
-
-	nextProto := ""
-	if tlsConn, ok := iConn.(*tls.Conn); ok {
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			rawConn.Close()
-			return nil, err
-		}
-		nextProto = tlsConn.ConnectionState().NegotiatedProtocol
-	} else if tlsConn, ok := iConn.(*tls.UConn); ok {
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			rawConn.Close()
-			return nil, err
-		}
-		nextProto = tlsConn.ConnectionState().NegotiatedProtocol
-	}
+	nextProto := tlsNegotiatedProtocol(rawConn, ctx)
 
 	switch nextProto {
 	case "", "http/1.1":
