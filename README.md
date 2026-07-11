@@ -1,123 +1,98 @@
 # Bray-Core
 
-<p align="left">由
-  <a href="https://github.com/Maolaohei/Bray-Core">
-    <img src="https://img.shields.io/badge/BRAY--CORE-FF6B35?style=for-the-badge&logo=go&logoColor=white" alt="BRAY-CORE">
-  </a>
-  &nbsp;
-  <a href="https://github.com/Maolaohei/REALITY">
-    <img src="https://img.shields.io/badge/BRAY--REALITY%20v3-4A90D9?style=for-the-badge&logo=shield&logoColor=white" alt="BRAY-REALITY">
-  </a>强力驱动
-</p>
+Bray-Core 是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的兼容增强分支，面向复杂网络环境下的传输层稳定性、连接调度与 REALITY 握手开销优化。协议与配置面保持与上游一致，可直接替换客户端/服务端内核二进制使用。
 
-> 基于 [Xray-core](https://github.com/XTLS/Xray-core) v26.6.1 的高性能增强分支，专注于 TCP 优化、连接调度与智能网络决策，在保持 100% 协议兼容性的前提下提升复杂网络环境下的稳定性与连接成功率。
-
-### 魔改 REALITY 特有特性
-
-| 特性 | 说明 | 上游 REALITY |
-|------|------|:------------:|
-| TLS 1.3 握手伪造 | 从目标服务器实时捕获 ServerHello + record 长度，构建与目标一致的握手指纹 | ✅ |
-| 持久化缓存 | profiles.json 原子写入，服务重启后秒级恢复，无需等待首次握手 | ❌ |
-| HotSwap 热替换 | 目标 CipherSuite 变更时新旧 profile 无缝切换，已有连接不受影响 | ❌ |
-| Stale-While-Revalidate | 过期 profile 仍可用于握手，后台异步刷新，不阻塞新连接 | ❌ |
-| 负缓存退避 | 探测失败后指数退避（1/2/4/8min），避免对目标产生无效请求 | ❌ |
-| 证书链扩容 | 支持 64KB 证书链（原 8KB），兼容更多目标站点 | ❌ |
-| RefreshManager | 单调度器统一管理所有目标探测，替代 per-target goroutine | ❌ |
-
-### 缓存实测数据（i5-13600KF, Go 1.24）
-
-| 指标 | 结果 |
-|------|------|
-| 缓存命中查询 | 13 ns/op，0 B/op，单核吞吐 77M ops/s |
-| 缓存未命中 | 6 ns/op，0 B/op，单核吞吐 167M ops/s |
-| Fingerprint 计算 | 3.8 ns/op，0 B/op |
-| Soak 2000 次握手 | 内存增长 0.14 MB（15.78%），GC 仅 1 次 |
-| 单元测试 | 37/37 全通过，0 data races |
-
-### 魔改解决的问题
-
-| 原版问题 | 魔改方案 | 实际效果 |
-|----------|----------|----------|
-| 重启后需重新握手，首次连接慢 | 持久化缓存 | 重启后秒级恢复，用户无感知 |
-| 目标换证书后所有连接断开 | HotSwap + Stale-While-Revalidate | 已有连接不受影响，新连接自动切换 |
-| 探测失败后反复重试 | 负缓存退避 | 指数冷却，减少无效请求 |
-| 正在用的 profile 可能被清理 | Pin/Unpin 引用计数 | 连接级保护，杜绝误删 |
-| 证书链超 8KB 的站点无法使用 | 证书链扩容至 64KB | 兼容更多目标站点 |
-| 多目标探测各自为战 | RefreshManager 单调度器 | 资源统一管理，降低开销 |
+| 项目 | 当前状态 |
+|------|----------|
+| 基线版本 | Xray-core **26.6.22** |
+| 语言版本 | Go **1.26.4** |
+| 模块路径 | `github.com/xtls/xray-core` |
+| REALITY | [Maolaohei/REALITY](https://github.com/Maolaohei/REALITY) **v0.5.5**（子模块 `./REALITY`） |
+| 默认 REALITY 摊销 | **L2**（证据充分后 zero-dial；不满足条件时回退 L1/L0） |
 
 ---
 
-### REALITY v3 — TLS 指纹伪装与缓存体系 ✅
+## 定位
 
-| 特性 | 说明 | 状态 |
-|------|------|------|
-| 持久化缓存 | 重启后秒级恢复，profiles.json 原子写入 | ✅ |
-| 后台刷新 | RefreshManager 定期探测目标，CipherSuite 变更自动热替换 | ✅ |
-| HotSwap | 新旧 profile 无缝切换，正在使用的连接不受影响 | ✅ |
-| Stale-While-Revalidate | 过期 profile 仍可使用，后台异步刷新 | ✅ |
-| 负缓存 | 探测失败指数退避，避免无效重试 | ✅ |
-| Pin/Unpin | 连接级引用计数，防止正在使用的 profile 被误删 | ✅ |
-| EventBus | Observer 模式解耦缓存/持久化/刷新逻辑 | ✅ |
-| 证书限制解除 | 支持 64KB 证书链（原 8KB 限制） | ✅ |
-| TLS 1.3 握手伪造 | 从目标服务器捕获记录长度，构建假握手 | ✅ |
-| Soak 测试 | 2000 次连接，GC 仅 1 次，内存增长 15.79% | ✅ |
-| Race-free | 0 data races，37/37 测试全通过 | ✅ |
+- **兼容优先**：VLESS / XHTTP / REALITY 等与上游配置互通；客户端与服务端可混用（增强能力在本端生效）。
+- **传输智能**：在 TCP 观测、XMUX 连接池、Happy Eyeballs、DNS 缓存等路径上做调度与容错，而不是改写应用层协议语义。
+- **REALITY 摊销**：服务端在安全约束下复用目标指纹观测结果，降低对伪装站点（RA）的重复拨号与握手成本。
 
-### V2.2 — 代码质量与性能优化 ✅
-
-| 模块 | 优化 | 状态 |
-|------|------|------|
-| XMUX mux.go | defer Unlock 防死锁、nil 检查、CAS 替代竞态 | ✅ |
-| XMUX mux.go | leftUsage atomic 化、Close 清理连接池 | ✅ |
-| VLESS encoding | Sentinel Errors 消除热路径分配 | ✅ |
-| VLESS encoding | In-place Modification 零拷贝解码 | ✅ |
-| VLESS encoding | flowString 预分配常量、copySeed pool 复用 | ✅ |
-| VLESS encoding | Decode 33x 性能提升（零分配解码） | ✅ |
-| tcpinfo | computeQuality 跨平台去重 | ✅ |
-| xpadding.go | parsedURLCache 有界 LRU 替代 sync.Map | ✅ |
-| connection.go | onClose 顺序修复、Deadline 返回 error | ✅ |
-| collector_fallback.go | FeedRTT 零值保护 | ✅ |
-| mux.go | healthCheckLoop 提取 helper + defer Unlock | ✅ |
-| mux.go | getNetworkHash strings.Builder 优化 | ✅ |
-| mux.go | behaviorCounts 固定数组替代 map | ✅ |
-
-### V2.3 — 安全加固与协议扩展 ✅
-
-| 模块 | 优化 | 状态 |
-|------|------|------|
-| NetBridge | 新增 inbound 代理协议（ProxyBridgeCore 流量接入） | ✅ |
-| XHTTP/WS/HU/gRPC | 服务端强制 `trustedXForwardedFor` 校验 | ✅ |
-| WireGuard | 大规模重构，优化代码质量与可维护性 | ✅ |
-| Loopback | 新增 sniffing 支持 | ✅ |
-| XMUX | 死锁修复、QUIC/UDP 主动关闭 | ✅ |
-| XHTTP/3 | 客户端主动关闭 QUIC & UDP 资源 | ✅ |
-| Benchmark CI | 建立系统化性能基准测试流水线 | ✅ |
+推荐组合：**VLESS + XHTTP（stream-one / stream-up / packet-up）+ REALITY**。
 
 ---
 
-## 快速开始
+## 主要能力
 
-### 下载
+### REALITY（v0.5.5）
 
-| 平台 | 下载 |
+| 能力 | 说明 |
 |------|------|
-| **Windows** | [V2rayN (个人修改版本)](https://github.com/Maolaohei/v2rayN) | 
-| **Android** | [V2rayNG (Bray-Core 内核)](https://github.com/Maolaohei/v2rayNG/releases) |
+| TLS 1.3 指纹伪装 | 基于目标站点实时/缓存观测构造与目标一致的握手记录形态 |
+| Profile 缓存 | 内存缓存 + 持久化（`profiles.json` 原子写入），重启后可快速恢复 |
+| HotSwap / SWR | CipherSuite 或证书变更时热切换；过期 profile 可边用边刷 |
+| 负缓存退避 | 探测失败指数退避，避免对目标站点无效重试 |
+| 证书链容量 | 支持更大证书链，兼容更多目标站点 |
+| 摊销模式 L0/L1/L2 | L0 全量实拨；L1 可复用 R1–R6；**L2（默认）**在证据门槛满足后 zero-dial |
+| L2 安全边界 | 不缓存不可安全复用的 R0；证据不足、失败窗口触发时自动降级，避免客户端/服务端状态错位 |
 
-Windows版本需要自己在bin/xray下替换内核
+相关发布说明：[REALITY v0.5.5](https://github.com/Maolaohei/REALITY/releases/tag/v0.5.5)
 
+### XHTTP / XMUX
 
-### 编译
+| 能力 | 说明 |
+|------|------|
+| 连接池调度 | Min-inflight、RTT / 质量评分、行为感知惩罚、AIMD 池规模 |
+| 生命周期 | Active → Draining → Closed；致命错误快速驱逐，非致命失败不误杀整池 |
+| 身份隔离 | `MuxKey` 含 `OriginalDomain` 等目的地身份，避免同 IP 多域名串池 |
+| H1 上传池 | 有界 idle 池；写后跟踪未读响应并在复用前排空，失败连接不回池 |
+| HTTP/2 身份 | 缓存连接按 TLS/主机身份隔离，降低串站风险 |
+
+### 出站拨号与 DNS
+
+| 能力 | 说明 |
+|------|------|
+| 域名保留 | DNS / Happy Eyeballs 将地址替换为 IP 时保留 `OriginalDomain`，供 SNI 与 VLESS 目标使用 |
+| Happy Eyeballs v3 | 基于历史失败率与质量评分的并行拨号与选路 |
+| DNS 缓存 | 正常命中、过期策略与并发查询路径加固；避免缓存对象错误复用 |
+| TCP 默认策略 | 在支持平台上默认更积极的 socket 参数（如 BBR、NODELAY 等，依 OS 能力） |
+
+### 其他
+
+- **NetBridge**：面向配套客户端的入站桥接（需修改版 v2rayN 等配合）。
+- **架构说明**：连接池与生命周期细节见 [`docs/architecture-connection-lifecycle.md`](docs/architecture-connection-lifecycle.md)。
+
+---
+
+## 客户端与替换内核
+
+| 平台 | 说明 |
+|------|------|
+| Windows | [v2rayN（配套修改版）](https://github.com/Maolaohei/v2rayN) — 将编译产物替换到客户端 `bin/xray`（或对应内核目录） |
+| Android | [v2rayNG（Bray-Core 内核发布）](https://github.com/Maolaohei/v2rayNG/releases) |
+| 通用 | 任意兼容 Xray 配置的客户端，均可替换为 Bray-Core 二进制 |
+
+服务端与客户端均可独立升级；仅当使用本仓库 REALITY 摊销等增强时，对应端需使用本内核及配套 REALITY 子模块版本。
+
+---
+
+## 构建
+
+要求：Go **1.26.4+**，并初始化子模块。
 
 ```bash
-# Linux amd64 (推荐 v3 指令集)
+git submodule update --init --recursive
+
+# Linux amd64（推荐 GOAMD64=v3）
 CGO_ENABLED=0 GOAMD64=v3 go build -o xray -trimpath -ldflags="-s -w -buildid=" ./main
 
 # Windows amd64
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v3 go build -o xray.exe -trimpath -ldflags="-s -w -buildid=" ./main
 ```
 
-### Linux 服务端优化
+`go.mod` 通过 `replace github.com/Maolaohei/REALITY => ./REALITY` 固定本地子模块，请勿在未对齐子模块提交时单独改写该依赖。
+
+### Linux 服务端参考（可选）
 
 ```bash
 sysctl -w net.core.default_qdisc=fq
@@ -129,279 +104,55 @@ sysctl -w net.core.wmem_max=16777216
 
 ---
 
-## Roadmap
-
-### V1.x — Performance & Stability ✅
-
-- TCP 网络栈优化 — BBR / TCP_NOTSENT_LOWAT / DEFER_ACCEPT / NODELAY / QUICKACK
-- XHTTP / VLESS 优化 — Vision Fast Path、手写 protobuf、AddonsPool
-- XMUX v3 — Min-Inflight Scheduling、RTT-aware Scheduling、Connection Reuse Metrics
-- Happy Eyeballs v3 — Dynamic Parallelism、Historical Learning、Score-based IP Selection
-- Warmup Pipeline — 连接预热 + DNS 预热 + 健康检查
-
-### V2.0 — Transport Intelligence Layer ✅
-
-核心原则：Observe → Decide → Control
-
-| 模块 | 状态 |
-|------|------|
-| TransportProfile — RTT / Loss / Retrans / Confidence / Source / Timestamp | ✅ |
-| Quality Model — Overall / Latency / Loss / Stability 多维评分 | ✅ |
-| XMUX V2.0 — QualityScore / Trend / Graceful Drain | ✅ |
-| HEv3 V2.0 — EWMA Failure Tracking / Quality-aware Scoring | ✅ |
-| Debug API — Snapshot / Reason / History (64-sample ring buffer) | ✅ |
-| NetworkLearner — Behavior Classification (6 types) | ✅ |
-| Pipeline Integration — Profile → UpdateQuality → scoreClient | ✅ |
-| Windows Fallback — HTTP RTT → estimated quality | ✅ |
-
-### V2.1 — Adaptive Transport ✅
-
-| 功能 | 状态 |
-|------|------|
-| Adaptive XMUX — behavior-aware penalty scaling | ✅ |
-| Dynamic Connection Scaling — AIMD pool sizing | ✅ |
-| Oscillation Prevention — debounce (3 observations) | ✅ |
-| Connection Migration — proactive pool refill | ✅ |
-
-### V2.3 — Security & Protocol Extensions ✅
-
-| 功能 | 状态 |
-|------|------|
-| NetBridge — inbound 代理协议（ProxyBridgeCore 流量接入） | ✅ |
-| trustedXForwardedFor — XHTTP/WS/HU/gRPC 服务端强制校验 | ✅ |
-| WireGuard — 大规模重构 | ✅ |
-| Loopback Sniffing — 出站嗅探支持 | ✅ |
-| Benchmark CI — 系统化性能基准测试流水线 | ✅ |
-
-### V3.x — Network Learning (研究阶段)
-
-- IPv4/IPv6 行为学习
-- 运营商行为识别
-- 链路退化趋势预测
-
----
-
-## 核心架构
-
-### TCP 网络栈（默认即最优）
-
-| 优化 | 效果 | 上游行为 |
-|------|------|----------|
-| BBR 拥塞控制 | 出站/入站自动设置 | 需手动配置 |
-| TCP_NOTSENT_LOWAT | 按内存自动选择 8K/16K/32K | 需手动配置 |
-| TCP_DEFER_ACCEPT (3s) | 省一次上下文切换 | 未启用 |
-| TCP_NODELAY | 禁用 Nagle，延迟降低 | 未启用 |
-| TCP_QUICKACK | 禁用延迟 ACK，TLS 加速 | 未启用 |
-
-### XMUX 连接池
-
-| 特性 | 说明 |
-|------|------|
-| Min-Inflight Scheduling | 选择最少在途请求的连接 |
-| RTT-aware Scheduling | 基于 EWMA 平滑 RTT 调度 |
-| QualityScore V2.1 | inflight×10000 + rttMs×10 + (retrans×50 + loss/20) × behaviorScale × confidenceScale |
-| Behavior-aware Scaling | LowLatency 0.5x / Lossy 1.5x / Aggressive 1.2x 惩罚系数 |
-| Dynamic Connection Scaling | AIMD: 改善 +1, 恶化 ×0.5, 平滑过渡 |
-| Connection Migration | 断线/质量下降时主动创建替代连接 |
-| Graceful Drain | 连续 5 次质量下降 + confidence≥30 时优雅移除 |
-| Oscillation Prevention | 连续 3 次观察到同一行为才切换，防止反复横跳 |
-| Pre-connect | 后台每 5s 检查池，空池自动创建 |
-| Health Check | 5s 周期，主动迁移低于 effectiveConnections 的池 |
-
-### Happy Eyeballs v3
-
-| 特性 | 说明 |
-|------|------|
-| Score-based Selection | priority×1e9 + rttTerm×(1 + failRate×10 + lossPenalty) |
-| EWMA Failure Tracking | 0.95 衰减，无双计数器，无清理协程 |
-| Quality-aware Scoring | Loss penalty 来自 TransportProfile |
-| Dynamic Parallelism | 自适应并行连接数 |
-
-### NetBridge 协议
-用于替代Socks5，需要使用魔改的[V2rayN (个人修改版本)](https://github.com/Maolaohei/v2rayN)搭配，才能使用内核直连功能
-
-| 特性 | 说明 |
-|------|------|
-| 流量接入 | 接收来自 ProxyBridgeCore 的代理流量 |
-| 协议支持 | TCP + UDP 双协议 |
-| 认证机制 | Token 认证，防止未授权访问 |
-| 配置格式 | Protobuf 定义 + JSON 配置解析 |
-| 测试覆盖 | 完整单元测试（344 行） |
-
-### Transport Intelligence
-
-```
-TCP socket → Profile.Collect(TCP_INFO) → Snapshot
-    ↓ (Linux: getsockopt, Windows: HTTP RTT estimation)
-Quality Score (Overall/Latency/Loss/Stability)
-    ↓
-NetworkLearner.Record() → ClassifyBehavior (6 types)
-    ↓
-scoreClient() × behaviorScale × confidenceScale → scheduling decision
-    ↓
-Dynamic Connection Scaling (AIMD) → pool sizing
-    ↓
-Connection Migration → proactive pool refill
-```
-
-### REALITY v3 缓存架构
-
-```
-ClientHello → Handshake Engine → MirrorConn (client↔target)
-                    ↓
-            EventBus (Observer 模式)
-            ├─ CacheHandler → CacheManager (sync.Map)
-            ├─ PersistHandler → profiles.json (原子写入)
-            └─ RefreshHandler → RefreshManager (20-30min 探测)
-                    ↓
-            HotSwap: 新 profile Store → 旧 profile PendingDelete
-                    ↓
-            Pin/Unpin: 连接级引用计数 → refCount=0 自动清理
-```
-
----
-
-## 性能数据
-
-**测试环境**: i5-13600KF, Windows, amd64, Go 1.26
-
-### Bray vs 上游 Xray-core
-
-| Benchmark | 上游 (ns/op) | Bray (ns/op) | Delta |
-|-----------|-------------|-------------|-------|
-| NewBuffer | 47.15 | 39.15 | **-16.9%** |
-| NewBufferStack | 30.06 | 24.05 | **-20.0%** |
-| Copy | 98.13 | 89.02 | **-9.3%** |
-| SplitBytes | 159.4 | 143.8 | **-9.8%** |
-
-### XMUX Hot Paths
-
-| Benchmark | ns/op | allocs |
-|-----------|-------|--------|
-| RTTEWMA | 8 | 0 |
-| WarmupEnqueue | 11 | 0 |
-| Metrics | 11 | 0 |
-| PoolScheduling (pool_1) | 109 | 0 |
-| PoolScheduling (pool_4) | 153 | 0 |
-| PoolScheduling (pool_8) | 207 | 0 |
-| PoolScheduling (pool_16) | 307 | 0 |
-| PoolScheduling (pool_32) | 494 | 0 |
-| ConcurrentR/W (workers_16) | 35 us | 0 |
-
-### VLESS Decode (优化后)
-
-| Benchmark | ns/op | B/op | allocs |
-|-----------|-------|------|--------|
-| DecodeHeaderAddons | 28 | 32 | 1 |
-| DecodeHeaderAddonsParallel | 23 | 104 | 3 |
-| MarshalAddons Vision | 14.4 | 24 | 1 |
-
-### Happy Eyeballs v3
-
-| Benchmark | ns/op | allocs |
-|-----------|-------|--------|
-| Score | 0.19 | 0 |
-| ClampRTT | 0.10 | 0 |
-
----
-
-
 ## 兼容性
 
-| 场景 | 兼容性 |
-|------|--------|
-| Xray上游客户端 → Bray 服务器 | ✅ 理论上100% |
-| Bray 客户端 → Xray上游服务器 | ✅ 理论上100% |
-| 配置格式 | ✅ 向后兼容 |
-| 跨平台编译 | ✅ Linux/Windows/macOS/Android/FreeBSD/OpenBSD |
+| 场景 | 预期 |
+|------|------|
+| 上游 Xray 客户端 → Bray 服务端 | 协议兼容 |
+| Bray 客户端 → 上游 Xray 服务端 | 协议兼容 |
+| 配置 JSON / 分享链接 | 与上游字段兼容；未识别字段按实现忽略或报错策略与上游一致 |
+| 平台 | Linux / Windows / macOS / Android 等 Go 支持的目标 |
+
+说明：传输层增强（XMUX 策略、REALITY L2 等）只影响本端行为；对端为上游实现时，连接仍按标准 REALITY / XHTTP 语义工作，但不会获得本端独有摊销或调度收益。
 
 ---
 
-## 测试
+## 近期可靠性相关变更（摘要）
 
-### REALITY 密码学层测试（纯 TLS，无 Xray 栈）
+下列项已合入主干，详细条目见 [CHANGELOG.md](CHANGELOG.md)：
 
-```bash
-# 运行全量 REALITY 测试（L1-L6 + E2E + pprof）
-cd REALITY && go test -v -timeout=120s
+1. **HTTPS 证书串站（内核路径）**  
+   VLESS 保留 `OriginalDomain`；XMUX / H2 缓存按目的地身份隔离；MultiBuffer 所有权与 DNS 缓存记录生命周期修复，避免随机出现错误对端证书。
+2. **XHTTP H1 上传连接池**  
+   响应排空、致命错误判定、有界池，降低半死连接与上传抖动。
+3. **DNS**  
+   取消上下文噪声与缓存 UAF 类问题处理；双栈查询路径改进。
+4. **REALITY L2**  
+   子模块升级至 v0.5.5 摊销实现；默认 L2，证据与失败窗口约束下的 zero-dial。
 
-# 运行特定级别
-go test -v -tags l1 -run "TestL1" -timeout=60s      # 单元测试
-go test -v -tags l2 -run "TestL2" -timeout=60s      # 握手测试
-go test -v -tags l3 -run "TestL3" -timeout=120s     # E2E 测试
-go test -v -tags l4 -run "TestL4" -timeout=60s      # TLS 兼容性
-go test -v -tags l5 -run "TestL5" -timeout=300s     # Soak 测试
-go test -v -tags l6 -run "TestL6" -timeout=60s      # 回归门禁
-
-# CPU/Memory profiling
-go test -v -tags pprof -run TestL6_PProfBenchmark -timeout=60s
-```
-
-### Xray 栈集成测试（REALITY + splithttp + XMUX + proxy）
-
-```bash
-# 运行全量集成测试
-go test -v -tags l3 -timeout=300s ./testing/scenarios/ -run "TestREALITY"
-
-# 运行 pprof Top10 分析 + Show:true vs Show:false 对比
-go test -v -tags l3 -timeout=180s ./testing/scenarios/ -run "TestREALITYFullSuiteWithPprof|TestREALITYShowFalseBenchmark"
-
-# 运行 XHTTP/XMUX 测试
-go test -v -tags l3 -timeout=300s ./testing/scenarios/ -run "TestVlessXHTTPReality"
-```
-
-### 测试目录结构
-
-```
-REALITY/                              ← 纯密码学层（TLS 握手、缓存、指纹）
-├── prebuild_test.go                  ← Profile 缓存 CRUD、持久化、后台刷新
-├── gate_l1_unit_test.go              ← Profile 存取、过期、隔离、指纹
-├── gate_l2_handshake_test.go         ← TLS 握手、数据传输、并发
-├── gate_l3_e2e_test.go               ← Echo/HTTP 回环、空闲恢复、大数据
-├── gate_l3_production_test.go        ← 分流、降级、长连接、端口扫描
-├── gate_l4_tls_compat_test.go        ← TLS 1.3、ALPN、密码套件
-├── gate_l5_soak_test.go              ← 内存泄漏、长时间 soak
-├── gate_l6_regression_test.go        ← 发版门禁、回归、序列号
-├── e2e_gate_test.go                  ← 完整 E2E 管道
-└── pprof_benchmark_test.go           ← CPU/内存 profiling
-
-testing/scenarios/                    ← Xray 栈集成（REALITY + splithttp + XMUX）
-├── reality_production_test.go        ← 握手、并发、缓存复用/隔离
-├── reality_stress_test.go            ← 高并发、XHTTP、pprof Top10、Show:false
-└── reality_xhttp_xmux_test.go       ← XHTTP、XMUX、冷启动、混合包大小
-```
-
-### 其他测试
-
-```bash
-# XMUX benchmarks
-go test -bench "^BenchmarkXMUX" -run "^$" -timeout 30s ./transport/internet/splithttp/
-
-# VLESS Decode benchmarks
-go test -bench "BenchmarkDecode|BenchmarkMarshal" -run "^$" -timeout 30s ./proxy/vless/encoding/
-
-# Happy Eyeballs benchmarks
-go test -bench "BenchmarkScore|BenchmarkClampRTT" -run "^$" -timeout 30s ./transport/internet/
-
-# 全量 benchmarks
-go test -bench "BenchmarkNewBuffer|BenchmarkCopy|BenchmarkSplitBytes" -run "^$" -timeout 60s ./common/buf/
-
-# NetBridge 单元测试
-go test -short -timeout 30s ./proxy/netbridge/
-```
+本地 HTTPS 代理若叠加系统/浏览器 MITM（例如部分 DNS/广告拦截的 HTTPS 解密），会表现为独立 CA 签发的证书，属于链路外侧因素，与上述内核串站修复无关。
 
 ---
 
-## 许可证
+## 文档与仓库
 
-[Mozilla Public License Version 2.0](https://github.com/XTLS/Xray-core/blob/main/LICENSE)
+| 文档 | 内容 |
+|------|------|
+| [CHANGELOG.md](CHANGELOG.md) | 版本与变更记录 |
+| [docs/architecture-connection-lifecycle.md](docs/architecture-connection-lifecycle.md) | XMUX / 连接生命周期架构 |
+| [SECURITY.md](SECURITY.md) | 安全策略 |
+| [REALITY](https://github.com/Maolaohei/REALITY) | 独立 REALITY 实现与发布 |
+
+问题反馈与讨论请使用本仓库 GitHub Issues。提交缺陷时请尽量附带：客户端/内核版本、传输组合（如 VLESS+XHTTP+REALITY）、XHTTP mode、是否可稳定复现、以及证书 CN/SAN 或服务端日志片段。
+
+---
 
 ## 友情链接
 
-[Linux DO](https://linux.do/)
+- [Linux DO](https://linux.do/)
 
----
+## 致谢与许可
 
-*上游同步基准：Xray-core [v26.6.1](https://github.com/XTLS/Xray-core/releases/tag/v26.6.1)*
+Bray-Core 建立在 [XTLS/Xray-core](https://github.com/XTLS/Xray-core) 及社区生态之上，并集成 [Maolaohei/REALITY](https://github.com/Maolaohei/REALITY)。
 
-*最后更新：2026-06-26*
+许可协议与上游保持一致，详见仓库内 LICENSE。
