@@ -55,8 +55,10 @@ func (c *scriptedConn) Close() error {
 	return nil
 }
 
-func (c *scriptedConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1} }
-func (c *scriptedConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2} }
+func (c *scriptedConn) LocalAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1} }
+func (c *scriptedConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2}
+}
 func (c *scriptedConn) SetDeadline(t time.Time) error      { return nil }
 func (c *scriptedConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *scriptedConn) SetWriteDeadline(t time.Time) error { return nil }

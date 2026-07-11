@@ -2,8 +2,8 @@ package dns
 
 import (
 	"context"
-	stderrors "errors"
 	"encoding/binary"
+	stderrors "errors"
 	"math"
 	"strings"
 	"sync"
@@ -27,6 +27,7 @@ func Fqdn(domain string) string {
 	}
 	return domain + "."
 }
+
 // isContextDoneErr reports cancel/deadline errors expected when a DNS query is
 // abandoned early (sibling dual-stack answer, outer QueryIP timeout, etc.).
 func isContextDoneErr(err error) bool {

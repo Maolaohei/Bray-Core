@@ -49,7 +49,7 @@ func TestAllowServeStale_Semantics(t *testing.T) {
 
 func TestGetIPs_TTLSignForExpired(t *testing.T) {
 	rec := &IPRecord{
-		IP:     []net.IP{net.IP{1, 2, 3, 4}},
+		IP:     []net.IP{{1, 2, 3, 4}},
 		Expire: time.Now().Add(-10 * time.Second),
 		RCode:  dnsmessage.RCodeSuccess,
 	}
