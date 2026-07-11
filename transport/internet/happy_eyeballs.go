@@ -93,7 +93,7 @@ func tcpRaceDialV2(ctx context.Context, src net.Address, ips []net.IP, port net.
 			if nextTryIndex == len(ips) || activeNum == maxConcurrentTry {
 				panic("impossible situation")
 			}
-			go tcpTryDial(newCtx, src, sockopt, ips[nextTryIndex], port, nextTryIndex, resultCh)
+			go tcpTryDial(newCtx, src, sockopt, ips[nextTryIndex], port, nextTryIndex, resultCh, domain)
 			activeNum++
 			nextTryIndex++
 			if nextTryIndex == len(ips) || activeNum == maxConcurrentTry {
@@ -142,7 +142,7 @@ func tcpRaceDialV3(ctx context.Context, src net.Address, ips []net.IP, port net.
 	if len(ipScores) > 0 && tryController.CanTry() {
 		tryController.OnStart()
 		activeNum++
-		go tcpTryDialV3(newCtx, src, sockopt, ipScores[0].IP, port, 0, resultCh)
+		go tcpTryDialV3(newCtx, src, sockopt, ipScores[0].IP, port, 0, resultCh, domain)
 		nextTryIndex = 1
 	}
 
@@ -207,7 +207,7 @@ func tcpRaceDialV3(ctx context.Context, src net.Address, ips []net.IP, port net.
 				for nextTryIndex < len(ipScores) && tryController.CanTry() {
 					tryController.OnStart()
 					activeNum++
-					go tcpTryDialV3(newCtx, src, sockopt, ipScores[nextTryIndex].IP, port, nextTryIndex, resultCh)
+					go tcpTryDialV3(newCtx, src, sockopt, ipScores[nextTryIndex].IP, port, nextTryIndex, resultCh, domain)
 					nextTryIndex++
 				}
 				if winConn == nil && nextTryIndex >= len(ipScores) && activeNum == 0 {
@@ -225,7 +225,7 @@ func tcpRaceDialV3(ctx context.Context, src net.Address, ips []net.IP, port net.
 			if nextTryIndex < len(ipScores) && tryController.CanTry() {
 				tryController.OnStart()
 				activeNum++
-				go tcpTryDialV3(newCtx, src, sockopt, ipScores[nextTryIndex].IP, port, nextTryIndex, resultCh)
+				go tcpTryDialV3(newCtx, src, sockopt, ipScores[nextTryIndex].IP, port, nextTryIndex, resultCh, domain)
 				nextTryIndex++
 			}
 			if nextTryIndex < len(ipScores) {
@@ -295,8 +295,8 @@ func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
 	return newIPs
 }
 
-func tcpTryDial(ctx context.Context, src net.Address, sockopt *SocketConfig, ip net.IP, port net.Port, index int, resultCh chan<- *result) {
-	conn, err := effectiveSystemDialer.Dial(ctx, src, net.Destination{Address: net.IPAddress(ip), Network: net.Network_TCP, Port: port}, sockopt)
+func tcpTryDial(ctx context.Context, src net.Address, sockopt *SocketConfig, ip net.IP, port net.Port, index int, resultCh chan<- *result, originalDomain string) {
+	conn, err := effectiveSystemDialer.Dial(ctx, src, net.Destination{Address: net.IPAddress(ip), Network: net.Network_TCP, Port: port, OriginalDomain: originalDomain}, sockopt)
 	select {
 	case <-ctx.Done():
 		if conn != nil {
@@ -314,9 +314,9 @@ func tcpTryDial(ctx context.Context, src net.Address, sockopt *SocketConfig, ip 
 	}
 }
 
-func tcpTryDialV3(ctx context.Context, src net.Address, sockopt *SocketConfig, ip net.IP, port net.Port, index int, resultCh chan<- *result) {
+func tcpTryDialV3(ctx context.Context, src net.Address, sockopt *SocketConfig, ip net.IP, port net.Port, index int, resultCh chan<- *result, originalDomain string) {
 	start := time.Now()
-	conn, err := effectiveSystemDialer.Dial(ctx, src, net.Destination{Address: net.IPAddress(ip), Network: net.Network_TCP, Port: port}, sockopt)
+	conn, err := effectiveSystemDialer.Dial(ctx, src, net.Destination{Address: net.IPAddress(ip), Network: net.Network_TCP, Port: port, OriginalDomain: originalDomain}, sockopt)
 	rtt := time.Since(start)
 	select {
 	case <-ctx.Done():

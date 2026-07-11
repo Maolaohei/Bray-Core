@@ -1,4 +1,4 @@
-package dns
+﻿package dns
 
 import (
 	"testing"
@@ -82,18 +82,19 @@ func BenchmarkFqdn(b *testing.B) {
 	}
 }
 
-func BenchmarkRecordPool(b *testing.B) {
+func BenchmarkRecordAlloc(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		r := recordObjPool.get()
-		r.A = &IPRecord{
-			IP:     []net.IP{net.ParseIP("8.8.8.8")},
-			Expire: time.Now().Add(time.Hour),
+		r := &record{
+			A: &IPRecord{
+				IP:     []net.IP{net.ParseIP("8.8.8.8")},
+				Expire: time.Now().Add(time.Hour),
+			},
+			AAAA: &IPRecord{
+				IP:     []net.IP{net.ParseIP("2001:4860:4860::8888")},
+				Expire: time.Now().Add(time.Hour),
+			},
 		}
-		r.AAAA = &IPRecord{
-			IP:     []net.IP{net.ParseIP("2001:4860:4860::8888")},
-			Expire: time.Now().Add(time.Hour),
-		}
-		recordObjPool.put(r)
+		_ = r
 	}
 }
