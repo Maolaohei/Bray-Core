@@ -335,8 +335,17 @@ func (w *WaitReadCloser) Read(p []byte) (int, error) {
 
 func (w *WaitReadCloser) Close() error {
 	w.mu.Lock()
+	alreadyClosed := w.closed
 	w.closed = true
 	v := w.rc.Load()
+	// Unblock any reader waiting on Set() when close races with dial failure.
+	if !alreadyClosed && v == nil {
+		select {
+		case <-w.wait:
+		default:
+			close(w.wait)
+		}
+	}
 	w.mu.Unlock()
 
 	if v != nil {

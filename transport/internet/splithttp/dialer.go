@@ -12,6 +12,7 @@ import (
 	reflect "reflect"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,17 +39,39 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// MuxKey is a structured connection pool key that uniquely identifies
-// a connection pool by: destination (actual target) + TLS identity + protocol + security + config fingerprint.
-// For Reality: dest.OriginalDomain is the actual target (github.com), realityServerName is the disguise (www.microsoft.com).
-// This prevents cross-domain reuse while maintaining correct TLS/REALITY handshake semantics.
+// MuxKey uniquely identifies an XMUX connection pool.
+// destIdentity is Network|Address|Port|OriginalDomain so two domains that
+// resolve to the same IP never share a pool entry (github.com vs githubassets.com).
 type MuxKey struct {
-	dest              net.Destination // actual target destination (contains OriginalDomain)
-	tlsServerName     string          // TLS ServerName (for non-Reality)
-	realityServerName string          // REALITY disguise domain
-	protocol          string          // "xhttp", "grpc", "tcp", etc.
-	security          string          // "tls", "reality", "none"
-	configHash        [32]byte        // SHA256 of security config
+	destIdentity      string   // Network + address + port + OriginalDomain
+	tlsServerName     string   // TLS ServerName (for non-Reality)
+	realityServerName string   // REALITY disguise domain
+	protocol          string   // "xhttp", "grpc", "tcp", etc.
+	security          string   // "tls", "reality", "none"
+	configHash        [32]byte // SHA256 of security config
+}
+
+func muxDestIdentity(dest net.Destination) string {
+	var b strings.Builder
+	b.Grow(64)
+	switch dest.Network {
+	case net.Network_TCP:
+		b.WriteString("tcp|")
+	case net.Network_UDP:
+		b.WriteString("udp|")
+	case net.Network_UNIX:
+		b.WriteString("unix|")
+	default:
+		b.WriteString("unknown|")
+	}
+	if dest.Address != nil {
+		b.WriteString(dest.Address.String())
+	}
+	b.WriteByte('|')
+	b.WriteString(dest.Port.String())
+	b.WriteByte('|')
+	b.WriteString(dest.OriginalDomain)
+	return b.String()
 }
 
 // newMuxKey builds a MuxKey from destination and stream settings.
@@ -106,7 +129,7 @@ func newMuxKey(dest net.Destination, streamSettings *internet.MemoryStreamConfig
 	protocol := streamSettings.ProtocolName
 
 	return MuxKey{
-		dest:              dest,
+		destIdentity:      muxDestIdentity(dest),
 		tlsServerName:     tlsServerName,
 		realityServerName: realityServerName,
 		protocol:          protocol,

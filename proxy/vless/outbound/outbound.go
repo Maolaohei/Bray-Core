@@ -235,12 +235,21 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		command = protocol.RequestCommandUDP
 	}
 
-	// P0: If the target is an IPv6 address but the system has no IPv6
-	// route, replace it with the original domain name so the server can
-	// resolve using its own domainStrategy (e.g. UseIPv4).
+	// Prefer the original domain name over a resolved IP when encoding the
+	// VLESS request. Client-side TargetStrategy / DNS may replace Address
+	// with an IP while preserving OriginalDomain / OriginalTarget. Sending
+	// the domain keeps server-side dial/SNI routing host-accurate and avoids
+	// random cross-host cert mismatches when many CDN domains share an IP.
 	if target.Address.Family().IsIPv6() {
 		_, hasV6 := utils.CheckRoutes()
 		if !hasV6 && ob.OriginalTarget.Address.Family().IsDomain() {
+			target.Address = ob.OriginalTarget.Address
+		}
+	}
+	if target.Address.Family().IsIP() {
+		if target.OriginalDomain != "" {
+			target.Address = net.DomainAddress(target.OriginalDomain)
+		} else if ob.OriginalTarget.Address != nil && ob.OriginalTarget.Address.Family().IsDomain() {
 			target.Address = ob.OriginalTarget.Address
 		}
 	}

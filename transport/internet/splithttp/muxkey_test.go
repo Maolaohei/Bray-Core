@@ -48,8 +48,8 @@ func TestMuxKeyDifferentDomainsSameIP(t *testing.T) {
 
 	if key1 == key2 {
 		t.Error("MuxKey should be different for different domains, even with same IP")
-		t.Logf("key1.dest.OriginalDomain: %s", key1.dest.OriginalDomain)
-		t.Logf("key2.dest.OriginalDomain: %s", key2.dest.OriginalDomain)
+		t.Logf("key1.destIdentity: %s", key1.destIdentity)
+		t.Logf("key2.destIdentity: %s", key2.destIdentity)
 	}
 
 	// Verify Reality ServerName is preserved
@@ -60,12 +60,15 @@ func TestMuxKeyDifferentDomainsSameIP(t *testing.T) {
 		t.Errorf("key2.realityServerName should be 'www.microsoft.com', got '%s'", key2.realityServerName)
 	}
 
-	// Verify OriginalDomain is preserved in dest
-	if key1.dest.OriginalDomain != "github.com" {
-		t.Errorf("key1.dest.OriginalDomain should be 'github.com', got '%s'", key1.dest.OriginalDomain)
+	// Verify destIdentity includes OriginalDomain and differs by domain
+	if key1.destIdentity != muxDestIdentity(dest1) {
+		t.Errorf("key1.destIdentity mismatch: %s", key1.destIdentity)
 	}
-	if key2.dest.OriginalDomain != "githubassets.com" {
-		t.Errorf("key2.dest.OriginalDomain should be 'githubassets.com', got '%s'", key2.dest.OriginalDomain)
+	if key2.destIdentity != muxDestIdentity(dest2) {
+		t.Errorf("key2.destIdentity mismatch: %s", key2.destIdentity)
+	}
+	if key1.destIdentity == key2.destIdentity {
+		t.Error("destIdentity should differ for github.com vs githubassets.com")
 	}
 }
 

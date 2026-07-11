@@ -50,24 +50,6 @@ func PutAddons(a *Addons) {
 	}
 }
 
-// mbSlicePool reuses MultiBuffer slices for UDP packet encoding/decoding.
-// buf.MultiBuffer is []*buf.Buffer, so we pool []*buf.Buffer slices.
-var mbSlicePool = sync.Pool{
-	New: func() any {
-		s := make([]*buf.Buffer, 0, 8)
-		return &s
-	},
-}
-
-func getMBSlice() *[]*buf.Buffer {
-	return mbSlicePool.Get().(*[]*buf.Buffer)
-}
-
-func putMBSlice(s *[]*buf.Buffer) {
-	*s = (*s)[:0]
-	mbSlicePool.Put(s)
-}
-
 // marshalAddons is a hand-optimized protobuf encoder for Addons.
 // Addons has two fields: Flow (string, field 1) and Seed (bytes, field 2).
 // Wire format: field_tag varint_length bytes
@@ -352,8 +334,9 @@ type MultiLengthPacketWriter struct {
 
 func (w *MultiLengthPacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	defer buf.ReleaseMulti(mb)
-	sp := getMBSlice()
-	mb2Write := (*sp)[:0]
+	// Fresh MultiBuffer ownership transfer: do not recycle a pooled slice after
+	// WriteMultiBuffer, or a retaining writer/pipe can observe corrupted frames.
+	mb2Write := make(buf.MultiBuffer, 0, len(mb))
 	for _, b := range mb {
 		length := b.Len()
 		if length == 0 || length+2 > buf.Size {
@@ -375,12 +358,9 @@ func (w *MultiLengthPacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 		mb2Write = append(mb2Write, eb)
 	}
 	if len(mb2Write) == 0 {
-		putMBSlice(sp)
 		return nil
 	}
-	err := w.Writer.WriteMultiBuffer(mb2Write)
-	putMBSlice(sp)
-	return err
+	return w.Writer.WriteMultiBuffer(mb2Write)
 }
 
 func NewLengthPacketWriter(writer io.Writer) *LengthPacketWriter {

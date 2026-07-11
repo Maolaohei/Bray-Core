@@ -1,8 +1,6 @@
 package mux
 
 import (
-	"sync"
-
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
@@ -10,23 +8,6 @@ import (
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/session"
 )
-
-// mbPool reuses MultiBuffer slices for mux frame construction.
-var mbPool = sync.Pool{
-	New: func() any {
-		s := make(buf.MultiBuffer, 0, 8)
-		return &s
-	},
-}
-
-func getMB() *buf.MultiBuffer {
-	return mbPool.Get().(*buf.MultiBuffer)
-}
-
-func putMB(s *buf.MultiBuffer) {
-	*s = (*s)[:0]
-	mbPool.Put(s)
-}
 
 type Writer struct {
 	dest         net.Destination
@@ -99,13 +80,14 @@ func writeMetaWithFrame(writer buf.Writer, meta FrameMetadata, data buf.MultiBuf
 		return err
 	}
 
-	sp := getMB()
-	mb2 := (*sp)[:0]
+	// Allocate a fresh MultiBuffer for ownership transfer. A pooled slice must
+	// not be reused after WriteMultiBuffer: pipe/writers may retain the slice
+	// header and underlying array, and recycling would corrupt in-flight frames
+	// (cross-session mixups, wrong destinations, random TLS cert errors).
+	mb2 := make(buf.MultiBuffer, 0, len(data)+1)
 	mb2 = append(mb2, frame)
 	mb2 = append(mb2, data...)
-	err := writer.WriteMultiBuffer(mb2)
-	putMB(sp)
-	return err
+	return writer.WriteMultiBuffer(mb2)
 }
 
 func (w *Writer) writeData(mb buf.MultiBuffer) error {
