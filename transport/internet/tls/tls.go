@@ -170,7 +170,10 @@ func copyConfig(c *tls.Config) *utls.Config {
 		NextProtos:                     c.NextProtos,
 		MinVersion:                     c.MinVersion,
 		MaxVersion:                     c.MaxVersion,
-		CurvePreferences:               convertCurvePreferences(c.CurvePreferences),
+		// CipherSuites: used by HelloGolang / custom specs; TLS 1.3 suites remain non-configurable in utls.
+		// Enables anti-NIN / restricted cipher lists when fingerprint is not pure browser presets.
+		CipherSuites:     append([]uint16(nil), c.CipherSuites...),
+		CurvePreferences: convertCurvePreferences(c.CurvePreferences),
 	}
 	return config
 }

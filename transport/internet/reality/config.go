@@ -40,6 +40,13 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
 	}
+	// Align with upstream Xray: when unset, require clients >= 26.3.27 so
+	// protocol-capability mismatches fail closed instead of half-working.
+	minClientVer := c.MinClientVer
+	if len(minClientVer) == 0 {
+		minClientVer = []byte{26, 3, 27}
+	}
+
 	config := &reality.Config{
 		DialContext: dialer.DialContext,
 
@@ -49,7 +56,7 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 		Xver: byte(c.Xver),
 
 		PrivateKey:   c.PrivateKey,
-		MinClientVer: c.MinClientVer,
+		MinClientVer: minClientVer,
 		MaxClientVer: c.MaxClientVer,
 		MaxTimeDiff:  time.Duration(c.MaxTimeDiff) * time.Millisecond,
 
