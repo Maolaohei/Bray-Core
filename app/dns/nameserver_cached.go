@@ -32,7 +32,12 @@ func queryIP(ctx context.Context, s CachedNameserver, domain string, option dns.
 					log.Record(&log.DNSLog{Server: cache.name, Domain: fqdn, Result: ips, Status: log.DNSCacheHit, Elapsed: 0, Error: err})
 					return ips, uint32(ttl), err
 				}
-				if cache.serveStale && (cache.serveExpiredTTL == 0 || cache.serveExpiredTTL < ttl) {
+				// serveExpiredTTL is stored as -graceSeconds (see NewCacheController).
+				// getIPs() returns remaining TTL as ceil(Until(Expire)); once expired this is
+				// negative (e.g. expired 10s ago => ttl≈-10). Grace 30s is stored as -30.
+				// Allow stale when unlimited (0) or still within grace: serveExpiredTTL < ttl
+				// (e.g. -30 < -10). Outside grace: -30 < -40 is false.
+				if cache.allowServeStale(ttl) {
 					errors.LogDebugInner(ctx, err, cache.name, " cache OPTIMISTE ", fqdn, " -> ", ips)
 					log.Record(&log.DNSLog{Server: cache.name, Domain: fqdn, Result: ips, Status: log.DNSCacheOptimiste, Elapsed: 0, Error: err})
 					go pull(ctx, s, fqdn, option)
@@ -45,6 +50,20 @@ func queryIP(ctx context.Context, s CachedNameserver, domain string, option dns.
 	}
 
 	return fetch(ctx, s, fqdn, option)
+}
+
+// allowServeStale reports whether an expired record with remainingTTL (from getIPs,
+// negative once past Expire) may still be served under serve-stale policy.
+func (c *CacheController) allowServeStale(remainingTTL int32) bool {
+	if !c.serveStale {
+		return false
+	}
+	// grace==0 is stored as 0 and means unlimited stale while entry is still present.
+	if c.serveExpiredTTL == 0 {
+		return true
+	}
+	// Within grace: stored -grace is still less than remainingTTL (e.g. -30 < -10).
+	return c.serveExpiredTTL < remainingTTL
 }
 
 func pull(ctx context.Context, s CachedNameserver, fqdn string, option dns.IPOption) {
@@ -102,8 +121,32 @@ func doFetch(ctx context.Context, s CachedNameserver, fqdn string, option dns.IP
 	start := time.Now()
 	s.sendQuery(ctx, noResponseErrCh, fqdn, option)
 
-	rec4, err4 := onEvent(sub4)
-	rec6, err6 := onEvent(sub6)
+	// Wait A and AAAA in parallel so dual-stack RTT is max(A,AAAA), not sum.
+	var rec4, rec6 *IPRecord
+	var err4, err6 error
+	if sub4 != nil && sub6 != nil {
+		type waitResult struct {
+			rec *IPRecord
+			err error
+		}
+		ch4 := make(chan waitResult, 1)
+		ch6 := make(chan waitResult, 1)
+		go func() {
+			r, e := onEvent(sub4)
+			ch4 <- waitResult{r, e}
+		}()
+		go func() {
+			r, e := onEvent(sub6)
+			ch6 <- waitResult{r, e}
+		}()
+		wr4 := <-ch4
+		wr6 := <-ch6
+		rec4, err4 = wr4.rec, wr4.err
+		rec6, err6 = wr6.rec, wr6.err
+	} else {
+		rec4, err4 = onEvent(sub4)
+		rec6, err6 = onEvent(sub6)
+	}
 
 	var errs []error
 	if err4 != nil {

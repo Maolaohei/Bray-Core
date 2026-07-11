@@ -2,6 +2,7 @@ package internet
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -265,7 +266,12 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 		originalDomain := dest.Address.Domain()
 		ips, err := LookupForIP(originalDomain, finalStrategy, src)
 		if err != nil {
-			errors.LogErrorInner(ctx, err, "failed to resolve ip")
+			// EmptyResponse is common (NXDOMAIN / filtered / family miss); keep Error for real faults.
+			if stderrors.Is(err, dns.ErrEmptyResponse) {
+				errors.LogInfoInner(ctx, err, "failed to resolve ip")
+			} else {
+				errors.LogErrorInner(ctx, err, "failed to resolve ip")
+			}
 			if sockopt.DomainStrategy.ForceIP() {
 				return nil, err
 			}

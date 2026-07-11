@@ -173,9 +173,10 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 
 	for _, req := range reqs {
 		go func(r *dnsRequest) {
-			// generate new context for each req, using same context
-			// may cause reqs all aborted if any one encounter an error
-			dnsCtx := ctx
+			// Detach from parent cancel so dual-stack sibling queries and early
+			// QueryIP returns do not abort in-flight DoH and spam "context canceled".
+			// Deadline is still enforced below.
+			dnsCtx := context.WithoutCancel(ctx)
 
 			// reserve internal dns server requested Inbound
 			if inbound := session.InboundFromContext(ctx); inbound != nil {
@@ -193,9 +194,10 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			var cancel context.CancelFunc
 			dnsCtx, cancel = context.WithDeadline(dnsCtx, deadline)
 			defer cancel()
+			// release only after updateRecord (or error) — early Put caused UAF on pool reuse
+			defer releaseDnsRequest(r)
 
 			b, err := dns.PackMessage(r.msg)
-			releaseDnsRequest(r)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to pack dns query for ", fqdn)
 				if noResponseErrCh != nil {
@@ -203,9 +205,19 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 				}
 				return
 			}
+			// free wire message early; metadata kept until defer releaseDnsRequest
+			if r.msg != nil {
+				releaseMessage(r.msg)
+				r.msg = nil
+			}
 			resp, err := s.dohHTTPSContext(dnsCtx, b.Bytes())
 			if err != nil {
-				errors.LogErrorInner(ctx, err, "failed to retrieve response for ", fqdn)
+				// Cancel/deadline are expected when callers finish early; not server faults.
+				if isContextDoneErr(err) {
+					errors.LogInfoInner(ctx, err, "DoH query aborted for ", fqdn)
+				} else {
+					errors.LogErrorInner(ctx, err, "failed to retrieve response for ", fqdn)
+				}
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}

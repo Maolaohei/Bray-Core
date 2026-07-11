@@ -101,9 +101,8 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- e
 
 	for _, req := range reqs {
 		go func(r *dnsRequest) {
-			// generate new context for each req, using same context
-			// may cause reqs all aborted if any one encounter an error
-			dnsCtx := ctx
+			// Detach from parent cancel; keep deadline only.
+			dnsCtx := context.WithoutCancel(ctx)
 
 			// reserve internal dns server requested Inbound
 			if inbound := session.InboundFromContext(ctx); inbound != nil {
@@ -118,15 +117,19 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- e
 			var cancel context.CancelFunc
 			dnsCtx, cancel = context.WithDeadline(dnsCtx, deadline)
 			defer cancel()
+			defer releaseDnsRequest(r)
 
 			b, err := dns.PackMessage(r.msg)
-			releaseDnsRequest(r)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to pack dns query")
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
 				return
+			}
+			if r.msg != nil {
+				releaseMessage(r.msg)
+				r.msg = nil
 			}
 
 			dnsReqBuf := buf.New()

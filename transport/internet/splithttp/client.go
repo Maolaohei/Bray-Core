@@ -130,6 +130,16 @@ func isFatalConnErrorSlow(err error) bool {
 		strings.Contains(s, "http2: Transport closing idle connection")
 }
 
+func (c *DefaultDialerClient) markFatal(err error) {
+	if !isFatalConnError(err) {
+		return
+	}
+	c.closed.Store(true)
+	if c.onFatalError != nil {
+		go c.onFatalError(err)
+	}
+}
+
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
 	t0 := time.Now()
 	gotConn := done.New()
@@ -158,12 +168,12 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 	go func() {
 		resp, err := c.client.Do(req)
 		if err != nil {
-			// Fast Eviction: trigger callback on fatal connection errors
-			if c.onFatalError != nil && isFatalConnError(err) {
-				go c.onFatalError(err)
-			}
-			if !uploadOnly { // stream-down is enough
-				c.closed.Store(true)
+			// Only mark dialer dead on connection-level faults.
+			// Context cancel / deadline / stream-level errors must not evict a healthy client.
+			if !uploadOnly {
+				if isFatalConnError(err) {
+					c.markFatal(err)
+				}
 				errors.LogInfoInner(ctx, err, "failed to "+method+" "+url)
 			}
 			gotConn.Close()
@@ -200,7 +210,7 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 		start := time.Now()
 		resp, err := c.client.Do(req)
 		if err != nil {
-			c.closed.Store(true)
+			c.markFatal(err)
 			return err
 		}
 
@@ -246,19 +256,28 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 			} else {
 				h1UploadConn = uploadConn.(*H1Conn)
 
-				// TODO: Replace 0 here with a config value later
-				// Or add some other condition for optimization purposes
-				if h1UploadConn.UnreadResponsesCount > 0 {
-					resp, err := http.ReadResponse(h1UploadConn.RespBufReader, req)
+				// Drain responses for previously pipelined requests before reuse.
+				// UnreadResponsesCount is incremented after each successful write.
+				drainFailed := false
+				for h1UploadConn.UnreadResponsesCount > 0 {
+					resp, err := http.ReadResponse(h1UploadConn.RespBufReader, nil)
 					if err != nil {
-						c.closed.Store(true)
-						return fmt.Errorf("error while reading response: %w", err)
+						_ = h1UploadConn.Close()
+						c.markFatal(err)
+						drainFailed = true
+						break
 					}
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
+					h1UploadConn.UnreadResponsesCount--
 					if resp.StatusCode != 200 {
+						_ = h1UploadConn.Close()
 						return fmt.Errorf("got non-200 error response code: %d", resp.StatusCode)
 					}
+				}
+				if drainFailed {
+					// Drop dead pooled conn; try another (or dial fresh).
+					continue
 				}
 			}
 
@@ -268,9 +287,14 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 			// failed writes to a pooled connection are normal when
 			// the connection has been closed in the meantime.
 			if err == nil {
+				h1UploadConn.UnreadResponsesCount++
 				break
 			} else if newConnection {
 				return err
+			} else {
+				// Do not return a broken pooled connection; close and retry.
+				_ = h1UploadConn.Close()
+				c.markFatal(err)
 			}
 		}
 

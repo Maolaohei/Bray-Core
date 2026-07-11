@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	stderrors "errors"
 	"encoding/binary"
 	"math"
 	"strings"
@@ -25,6 +26,19 @@ func Fqdn(domain string) string {
 		return domain
 	}
 	return domain + "."
+}
+// isContextDoneErr reports cancel/deadline errors expected when a DNS query is
+// abandoned early (sibling dual-stack answer, outer QueryIP timeout, etc.).
+func isContextDoneErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// net/http and url.Error often wrap cancel as "...: context canceled"
+	s := err.Error()
+	return strings.Contains(s, "context canceled") || strings.Contains(s, "context deadline exceeded")
 }
 
 type record struct {

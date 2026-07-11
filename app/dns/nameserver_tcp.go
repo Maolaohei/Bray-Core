@@ -162,7 +162,8 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 
 	for _, req := range reqs {
 		go func(r *dnsRequest) {
-			dnsCtx := ctx
+			// Detach from parent cancel; keep deadline only.
+			dnsCtx := context.WithoutCancel(ctx)
 
 			if inbound := session.InboundFromContext(ctx); inbound != nil {
 				dnsCtx = session.ContextWithInbound(dnsCtx, inbound)
@@ -176,15 +177,19 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			var cancel context.CancelFunc
 			dnsCtx, cancel = context.WithDeadline(dnsCtx, deadline)
 			defer cancel()
+			defer releaseDnsRequest(r)
 
 			b, err := dns.PackMessage(r.msg)
-			releaseDnsRequest(r)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to pack dns query")
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
 				return
+			}
+			if r.msg != nil {
+				releaseMessage(r.msg)
+				r.msg = nil
 			}
 
 			conn, err := s.getConn(dnsCtx)
