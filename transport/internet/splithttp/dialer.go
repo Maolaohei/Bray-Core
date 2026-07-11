@@ -724,13 +724,20 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		httpClient2, xmuxClient2 = getHTTPClient(ctx, dest2, memory2)
 	}
 
-	if xmuxClient != nil {
-		xmuxClient.Borrow()
+	if xmuxClient != nil && !xmuxClient.Borrow() {
+		return nil, errors.New("failed to borrow XMUX client for upload")
 	}
-	if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-		xmuxClient2.Borrow()
+	if xmuxClient2 != nil && xmuxClient2 != xmuxClient && !xmuxClient2.Borrow() {
+		if xmuxClient != nil {
+			xmuxClient.Release()
+		}
+		return nil, errors.New("failed to borrow XMUX client for download")
 	}
 	var closed atomic.Int32
+	// ownedUploadXmux is the XMUX slot currently charged to this logical conn's upload side.
+	// packet-up may rotate to a new client mid-session; onClose must Release the latest.
+	ownedUploadXmux := xmuxClient
+	var ownedUploadMu sync.Mutex
 
 	reader, writer := io.Pipe()
 	conn := splitConn{
@@ -739,8 +746,12 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			if closed.Add(1) > 1 {
 				return
 			}
-			if xmuxClient != nil {
-				xmuxClient.Release()
+			ownedUploadMu.Lock()
+			up := ownedUploadXmux
+			ownedUploadXmux = nil
+			ownedUploadMu.Unlock()
+			if up != nil {
+				up.Release()
 			}
 			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
 				xmuxClient2.Release()
@@ -755,8 +766,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			xmuxClient.LeftRequests.Add(-1)
 		}
 		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
-		if err != nil { // browser dialer only
+		if err != nil {
 			reader.Close()
+			conn.Close()
 			return nil, err
 		}
 		return stat.Connection(&conn), nil
@@ -765,8 +777,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			xmuxClient2.LeftRequests.Add(-1)
 		}
 		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
-		if err != nil { // browser dialer only
+		if err != nil {
 			reader.Close()
+			conn.Close()
 			return nil, err
 		}
 	}
@@ -775,7 +788,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			xmuxClient.LeftRequests.Add(-1)
 		}
 		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
-		if err != nil { // browser dialer only
+		if err != nil {
 			reader.Close()
 			conn.Close()
 			return nil, err
@@ -787,6 +800,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	scMinPostsIntervalMs := transportConfiguration.GetNormalizedScMinPostsIntervalMs()
 
 	if scMaxEachPostBytes.From <= 0 {
+		reader.Close()
+		conn.Close()
 		return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
 	}
 
@@ -862,9 +877,28 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Load() <= 0 ||
 					(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
 					oldClient := dynamicXmuxClient
-					dynamicHTTPClient, dynamicXmuxClient = getHTTPClient(ctx, dest, streamSettings)
-					if oldClient != nil && oldClient != dynamicXmuxClient {
-						oldClient.StopProfiling()
+					newHTTP, newXmux := getHTTPClient(ctx, dest, streamSettings)
+					if newXmux != nil && newXmux != oldClient {
+						if newXmux.Borrow() {
+							dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
+							// Atomically swap ownership so onClose Releases exactly one slot.
+							ownedUploadMu.Lock()
+							prev := ownedUploadXmux
+							if closed.Load() > 0 {
+								// Conn already closed: drop the newly borrowed slot.
+								ownedUploadMu.Unlock()
+								newXmux.Release()
+							} else {
+								ownedUploadXmux = newXmux
+								ownedUploadMu.Unlock()
+								if prev != nil {
+									prev.Release()
+								}
+							}
+						}
+						// Borrow failed: keep using oldClient.
+					} else if newHTTP != nil {
+						dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
 					}
 				}
 

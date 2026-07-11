@@ -21,7 +21,6 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/signal/done"
 	"golang.org/x/net/http2"
 )
 
@@ -142,60 +141,116 @@ func (c *DefaultDialerClient) markFatal(err error) {
 
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
 	t0 := time.Now()
-	gotConn := done.New()
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		GotConn: func(connInfo httptrace.GotConnInfo) {
-			remoteAddr = connInfo.Conn.RemoteAddr()
-			localAddr = connInfo.Conn.LocalAddr()
-			errors.LogDebug(ctx, "XHTTP stream: GotConn in ", time.Since(t0).Round(time.Millisecond),
-				" (reused=", connInfo.Reused, ")")
-			gotConn.Close()
-		},
-	})
-
+	var addrMu sync.Mutex
+	var gotRemote, gotLocal net.Addr
 	method := "GET" // stream-down
 	if body != nil {
 		method = c.transportConfig.GetNormalizedUplinkHTTPMethod() // stream-up/one
 	}
-	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), method, url, body)
+
+	// Wait for response headers (not merely GotConn). Returning on GotConn alone
+	// produced "dial succeeded then immediately EOF" when Do later failed or
+	// returned a non-200 status.
+	type streamResult struct {
+		rc     io.ReadCloser
+		remote net.Addr
+		local  net.Addr
+		err    error
+	}
+	resultCh := make(chan streamResult, 1)
+
+	reqCtx := context.WithoutCancel(ctx)
+	reqCtx = httptrace.WithClientTrace(reqCtx, &httptrace.ClientTrace{
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			addrMu.Lock()
+			gotRemote = connInfo.Conn.RemoteAddr()
+			gotLocal = connInfo.Conn.LocalAddr()
+			addrMu.Unlock()
+			errors.LogDebug(ctx, "XHTTP stream: GotConn in ", time.Since(t0).Round(time.Millisecond),
+				" (reused=", connInfo.Reused, ")")
+		},
+	})
+
+	req, err := http.NewRequestWithContext(reqCtx, method, url, body)
 	if err != nil {
 		errors.LogInfoInner(ctx, err, "failed to create HTTP request for "+url)
 		return nil, nil, nil, err
 	}
 	c.transportConfig.FillStreamRequest(req, sessionId, "")
 
-	wrc = &WaitReadCloser{wait: make(chan struct{})}
 	go func() {
-		resp, err := c.client.Do(req)
-		if err != nil {
-			// Only mark dialer dead on connection-level faults.
-			// Context cancel / deadline / stream-level errors must not evict a healthy client.
-			if !uploadOnly {
-				if isFatalConnError(err) {
-					c.markFatal(err)
-				}
-				errors.LogInfoInner(ctx, err, "failed to "+method+" "+url)
+		resp, doErr := c.client.Do(req)
+		if doErr != nil {
+			// Connection-level faults evict the dialer for both download and upload-only.
+			// Context cancel / deadline must not kill a healthy pooled client.
+			if isFatalConnError(doErr) {
+				c.markFatal(doErr)
 			}
-			gotConn.Close()
+			errors.LogInfoInner(ctx, doErr, "failed to "+method+" "+url)
 			common.Close(body)
-			wrc.Close()
+			addrMu.Lock()
+			r, l := gotRemote, gotLocal
+			addrMu.Unlock()
+			resultCh <- streamResult{remote: r, local: l, err: doErr}
 			return
 		}
-		if resp.StatusCode != 200 && !uploadOnly {
+		if resp.StatusCode != 200 {
 			errors.LogInfo(ctx, "unexpected status ", resp.StatusCode)
-		}
-		if resp.StatusCode != 200 || uploadOnly { // stream-up
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+			// Non-200: abort request body so the peer is not left half-open.
 			common.Close(body)
-			wrc.Close()
+			addrMu.Lock()
+			r, l := gotRemote, gotLocal
+			addrMu.Unlock()
+			resultCh <- streamResult{
+				remote: r,
+				local:  l,
+				err:    errors.New("unexpected status ", resp.StatusCode),
+			}
 			return
 		}
-		wrc.(*WaitReadCloser).Set(resp.Body)
+		if uploadOnly {
+			// stream-up: headers accepted; keep request body open for the pipe writer.
+			// Drain the (usually empty/idle) response in the background.
+			go func() {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}()
+			addrMu.Lock()
+			r, l := gotRemote, gotLocal
+			addrMu.Unlock()
+			resultCh <- streamResult{remote: r, local: l}
+			return
+		}
+		rc := &WaitReadCloser{wait: make(chan struct{})}
+		rc.Set(resp.Body)
+		addrMu.Lock()
+		rr, ll := gotRemote, gotLocal
+		addrMu.Unlock()
+		resultCh <- streamResult{rc: rc, remote: rr, local: ll}
 	}()
 
-	<-gotConn.Wait()
-	return
+	select {
+	case <-ctx.Done():
+		// Request uses WithoutCancel so the round-trip can finish cleanup; surface dial abort.
+		// Drain the result so a late success does not leak the response body.
+		go func() {
+			res := <-resultCh
+			if res.rc != nil {
+				res.rc.Close()
+			}
+		}()
+		addrMu.Lock()
+		r, l := gotRemote, gotLocal
+		addrMu.Unlock()
+		return nil, r, l, ctx.Err()
+	case res := <-resultCh:
+		if res.err != nil {
+			return nil, res.remote, res.local, res.err
+		}
+		return res.rc, res.remote, res.local, nil
+	}
 }
 
 func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, payload buf.MultiBuffer) error {

@@ -205,3 +205,31 @@ func TestSplitConnCloseSuccess(t *testing.T) {
 		t.Errorf("Close returned error: %v", err)
 	}
 }
+
+func TestSplitConnCloseNilReader(t *testing.T) {
+	r, w := io.Pipe()
+	_ = r
+	called := false
+	conn := &splitConn{
+		writer: w,
+		// reader intentionally nil (OpenStream failed before assignment)
+		onClose: func() { called = true },
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !called {
+		t.Fatal("onClose not called")
+	}
+}
+
+func TestSplitConnCloseNilWriterAndReader(t *testing.T) {
+	called := false
+	conn := &splitConn{onClose: func() { called = true }}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !called {
+		t.Fatal("onClose not called")
+	}
+}
