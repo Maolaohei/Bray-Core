@@ -52,8 +52,8 @@ type DefaultDialerClient struct {
 	client          *http.Client
 	closed          atomic.Bool
 	httpVersion     string
-	// pool of net.Conn, created using dialUploadConn
-	uploadRawPool  *sync.Pool
+	// pool of H1 upload conns, created using dialUploadConn (bounded)
+	uploadRawPool  *h1ConnPool
 	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
 	// onRTT is called after each request completes with the measured RTT.
 	// Used for RTT-aware scheduling in XmuxManager.
@@ -240,21 +240,18 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 			}
 		}()
 
-		var uploadConn any
 		var h1UploadConn *H1Conn
 
 		for {
-			uploadConn = c.uploadRawPool.Get()
-			newConnection := uploadConn == nil
+			h1UploadConn = c.uploadRawPool.Get()
+			newConnection := h1UploadConn == nil
 			if newConnection {
 				newConn, err := c.dialUploadConn(context.WithoutCancel(ctx))
 				if err != nil {
 					return err
 				}
 				h1UploadConn = NewH1Conn(newConn)
-				uploadConn = h1UploadConn
 			} else {
-				h1UploadConn = uploadConn.(*H1Conn)
 
 				// Drain responses for previously pipelined requests before reuse.
 				// UnreadResponsesCount is incremented after each successful write.
@@ -298,7 +295,7 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 			}
 		}
 
-		c.uploadRawPool.Put(uploadConn)
+		c.uploadRawPool.Put(h1UploadConn)
 	}
 
 	return nil
