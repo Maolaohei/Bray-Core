@@ -1,4 +1,4 @@
-﻿package reality_test
+package reality_test
 
 import (
 	"testing"

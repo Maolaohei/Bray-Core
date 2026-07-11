@@ -1,4 +1,4 @@
-﻿package tls
+package tls
 
 import (
 	gotls "crypto/tls"
