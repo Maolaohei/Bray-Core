@@ -9,6 +9,18 @@
 
 ## [Unreleased]
 
+### 修复
+
+#### XMUX 连接池 panic 修复（`GetXmuxClient` nil pointer dereference）
+
+- **根因**：`getHTTPClient()` / `GetXmuxClient()` 在 probe 失败或连接创建失败时返回 `(nil, nil)`，`Dial()` 未判空直接调用 `httpClient.OpenStream()` 导致 panic。
+- **接口改进**：`GetXmuxClient` 返回 `(*XmuxClient, error)`，`getHTTPClient` 返回 `(DialerClient, *XmuxClient, error)`，错误信息包含 probe 失败原因。
+- **快速淘汰**：probe 失败时立即从 pool 移除 broken client（`MarkDead` + `pool.Remove`），避免下次 `GetXmuxClient` 再次拿到并重试同一个坏连接。
+- **自动重试**：Phase 2 创建新连接 probe 失败后，移除坏连接并自动重试一次（`maxAttempts=2`），大多数 transient failure 在 XMUX 内部恢复，调用方无感知。
+- **probe 超时**：`probeConnection` 从 `context.Background()`（无超时）改为 `context.WithTimeout(ctx, 10s)`，避免服务器半开时 probe 挂死。
+- **资源清理**：`Dial()` 中多个 error return 路径统一用 `cleanup()` 函数处理 `reader.Close()` + `conn.Close()`，`conn.Close()` 的 `onClose` 回调负责 Release 已 Borrow 的 XMUX client。
+- **性能优化**：`addToPool` 直接返回 `*XmuxClient`，Phase 2 省掉一次 `pool.mu.RLock()` + pool 遍历。
+
 ### 文档
 
 - 重写项目 `README.md`：对齐当前基线、REALITY v0.5.5 / L2 默认摊销、客户端替换方式与构建说明；移除过时的 “REALITY v3” 版本矩阵与营销式路线图表述。
