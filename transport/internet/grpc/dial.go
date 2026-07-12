@@ -136,7 +136,7 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
 				}
 
 				if tlsConfig != nil {
-					config := tlsConfig.GetTLSConfig()
+					config := tlsConfig.GetTLSConfig(tls.WithDestination(dest))
 					if config.ServerName == "" && address.Family().IsDomain() {
 						config.ServerName = address.Domain()
 					}
