@@ -33,6 +33,11 @@ const (
 	// Primary mechanism: Fast Eviction (immediate eviction on fatal errors).
 	// 120s balances ISP NAT timeouts (30-300s) and Go's IdleConnTimeout (90s).
 	clientIdleTimeout = 120 * time.Second
+
+	// probeTimeout is the maximum time to wait for a connection probe (HEAD request)
+	// to complete. If the probe doesn't finish within this time, the connection is
+	// considered broken and removed from the pool.
+	probeTimeout = 10 * time.Second
 )
 
 // XmuxClientPool is a read-write separated connection pool.
@@ -76,6 +81,18 @@ func (p *XmuxClientPool) CloseAll() {
 		c.StopProfiling()
 	}
 	p.clients = nil
+}
+
+// Remove removes the first client matching target by reference. Caller must hold p.mu (write lock).
+// Returns true if removed, false if not found.
+func (p *XmuxClientPool) Remove(target *XmuxClient) bool {
+	for i, c := range p.clients {
+		if c == target {
+			p.RemoveAt(i)
+			return true
+		}
+	}
+	return false
 }
 
 type XmuxClient struct {
@@ -972,7 +989,9 @@ func (m *XmuxManager) probeConnection(conn XmuxConn, xmuxClient *XmuxClient) {
 		xmuxClient.MarkDead() // Fast Eviction: probe failed, mark dead immediately
 		return
 	}
-	req, err := http.NewRequestWithContext(context.Background(), "HEAD", u.String(), nil)
+	probeCtx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, "HEAD", u.String(), nil)
 	if err != nil {
 		errors.LogDebug(context.Background(), "XMUX: probeConnection NewRequest failed: ", err)
 		xmuxClient.probeErr = err
@@ -990,15 +1009,15 @@ func (m *XmuxManager) probeConnection(conn XmuxConn, xmuxClient *XmuxClient) {
 }
 
 // addToPool creates a new XmuxClient from an already-established conn and appends it to the pool.
-func (m *XmuxManager) addToPool(conn XmuxConn) {
+func (m *XmuxManager) addToPool(conn XmuxConn) *XmuxClient {
 	m.pool.mu.Lock()
 	defer m.pool.mu.Unlock()
-	m.addToPoolLocked(conn)
+	return m.addToPoolLocked(conn)
 }
 
 // addToPoolLocked creates a new XmuxClient and appends to the pool.
-// Caller must hold m.pool.mu.
-func (m *XmuxManager) addToPoolLocked(conn XmuxConn) {
+// Caller must hold m.pool.mu. Returns the newly created client.
+func (m *XmuxManager) addToPoolLocked(conn XmuxConn) *XmuxClient {
 	m.RecordNewConn()
 	xmuxClient := m.initNewClient(conn)
 	m.pool.Append(xmuxClient)
@@ -1010,6 +1029,7 @@ func (m *XmuxManager) addToPoolLocked(conn XmuxConn) {
 	} else {
 		close(xmuxClient.ready) // no probe, mark as ready immediately
 	}
+	return xmuxClient
 }
 
 // initNewClient initializes a new XmuxClient with config-derived limits.
@@ -1035,7 +1055,7 @@ func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
 	return c
 }
 
-func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
+func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 	// Bypass: always create new connection (for debugging XMUX issues)
 	if forceNewConnection {
 		conn := m.newConnFunc()
@@ -1045,11 +1065,11 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 			// Wait for probe to complete before returning
 			if err := c.WaitForReady(ctx); err != nil {
 				errors.LogDebug(ctx, "XMUX: probe failed for new connection: ", err)
-				return nil
+				return nil, fmt.Errorf("XMUX: probe failed: %w", err)
 			}
-			return c
+			return c, nil
 		}
-		return nil
+		return nil, errors.New("XMUX: newConnFunc returned nil")
 	}
 
 	// Phase 1: Read lock — prune stale clients and find best candidate
@@ -1182,37 +1202,49 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 				m.RecordReuseHit()
 				// Wait for probe to complete before returning existing connection
 				if err := best.WaitForReady(ctx); err != nil {
-					errors.LogDebug(ctx, "XMUX: probe failed for existing connection: ", err)
+					errors.LogInfo(ctx, "XMUX: probe failed for existing connection, removing: ", err)
 					best.MarkDead()
+					// Remove broken connection from pool immediately
+					m.pool.mu.Lock()
+					m.pool.Remove(best)
+					m.pool.mu.Unlock()
 					// Fall through to Phase 2 to create new connection
 				} else {
-					return best
+					return best, nil
 				}
 			}
 		}
 	}
 
 	// Phase 2: Create new connection (no lock held)
-	errors.LogDebug(ctx, "XMUX: creating xmuxClient (pool empty or under limit)")
+	// On probe failure, remove broken connection and retry once.
+	const maxAttempts = 2
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		errors.LogDebug(ctx, "XMUX: creating xmuxClient (attempt ", attempt+1, ")")
 
-	conn := m.newConnFunc()
-	if conn != nil {
-		m.addToPool(conn)
-		m.pool.mu.RLock()
-		m.lastActivity.Store(time.Now().UnixNano())
-		if len(m.pool.clients) > 0 {
-			c := m.pool.clients[len(m.pool.clients)-1]
-			m.pool.mu.RUnlock()
-			// Wait for probe to complete before returning new connection
-			if err := c.WaitForReady(ctx); err != nil {
-				errors.LogDebug(ctx, "XMUX: probe failed for new connection: ", err)
-				return nil
-			}
-			return c
+		conn := m.newConnFunc()
+		if conn == nil {
+			lastErr = errors.New("XMUX: newConnFunc returned nil")
+			continue
 		}
-		m.pool.mu.RUnlock()
+		c := m.addToPool(conn)
+		m.lastActivity.Store(time.Now().UnixNano())
+
+		// Wait for probe to complete before returning new connection
+		if err := c.WaitForReady(ctx); err != nil {
+			errors.LogInfo(ctx, "XMUX: probe failed for new connection (attempt ", attempt+1, "), removing: ", err)
+			c.MarkDead()
+			// Remove broken connection from pool immediately
+			m.pool.mu.Lock()
+			m.pool.Remove(c)
+			m.pool.mu.Unlock()
+			lastErr = fmt.Errorf("XMUX: probe failed: %w", err)
+			continue
+		}
+		return c, nil
 	}
-	return nil
+	return nil, lastErr
 }
 
 // scoreClient computes a scheduling score for a connection.

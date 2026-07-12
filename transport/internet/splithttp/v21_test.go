@@ -311,7 +311,7 @@ func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
 
 	// Fill pool to 3
 	for i := 0; i < 5; i++ {
-		c := m.GetXmuxClient(context.Background())
+		c, _ := m.GetXmuxClient(context.Background())
 		c.Borrow()
 	}
 	poolSize := m.pool.Len()
@@ -328,7 +328,7 @@ func TestV21_ConnectionMigration_ProactiveReplacement(t *testing.T) {
 	m.pool.mu.Unlock()
 
 	// GetXmuxClient should detect closed connections, remove them, and create new ones
-	c := m.GetXmuxClient(context.Background())
+	c, _ := m.GetXmuxClient(context.Background())
 	if c == nil {
 		t.Fatal("GetXmuxClient should return a new connection after all are closed")
 	}
@@ -346,9 +346,9 @@ func TestV21_ConnectionMigration_QualityDrain(t *testing.T) {
 	defer m.Close()
 
 	// Create 2 connections
-	c1 := m.GetXmuxClient(context.Background())
+	c1, _ := m.GetXmuxClient(context.Background())
 	c1.Borrow()
-	c2 := m.GetXmuxClient(context.Background())
+	c2, _ := m.GetXmuxClient(context.Background())
 	c2.Borrow()
 
 	// Simulate quality drain on c1 (set initial, then 5 consecutive drops)
@@ -368,7 +368,7 @@ func TestV21_ConnectionMigration_QualityDrain(t *testing.T) {
 	time.Sleep(6 * time.Second)
 
 	// Verify pool recovered: GetXmuxClient should return a fresh connection
-	c := m.GetXmuxClient(context.Background())
+	c, _ := m.GetXmuxClient(context.Background())
 	if c == nil {
 		t.Fatal("GetXmuxClient should return a connection after migration")
 	}

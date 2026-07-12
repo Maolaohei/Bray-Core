@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	gotls "crypto/tls"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
@@ -153,11 +154,11 @@ const (
 	globalMapIdleTimeoutMin  = 3 * time.Minute
 )
 
-func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
+func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient, error) {
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
 
 	if browser_dialer.HasBrowserDialer() && realityConfig == nil {
-		return &BrowserDialerClient{transportConfig: streamSettings.ProtocolSettings.(*Config)}, nil
+		return &BrowserDialerClient{transportConfig: streamSettings.ProtocolSettings.(*Config)}, nil, nil
 	}
 
 	// Phase 1: Lookup or create XmuxManager under lock (no I/O)
@@ -218,14 +219,14 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 	globalDialerAccess.Unlock()
 
 	// Phase 2: Get client outside lock (may involve network I/O)
-	xmuxClient := xmuxManager.GetXmuxClient(ctx)
-	if xmuxClient == nil {
-		return nil, nil
+	xmuxClient, err := xmuxManager.GetXmuxClient(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("XMUX: failed to get client: %w", err)
 	}
 
 	client, ok := xmuxClient.XmuxConn.(DialerClient)
 	if !ok {
-		return nil, nil
+		return nil, nil, errors.New("XMUX: XmuxConn does not implement DialerClient")
 	}
 
 	// Set RTT callback on DefaultDialerClient for RTT-aware scheduling
@@ -269,7 +270,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		})
 	}
 
-	return client, xmuxClient
+	return client, xmuxClient, nil
 }
 
 func decideHTTPVersion(tlsConfig *tls.Config, realityConfig *reality.Config) string {
@@ -656,7 +657,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	requestURL.Path = transportConfiguration.GetNormalizedPath()
 	requestURL.RawQuery = transportConfiguration.GetNormalizedQuery()
 
-	httpClient, xmuxClient := getHTTPClient(ctx, dest, streamSettings)
+	httpClient, xmuxClient, err := getHTTPClient(ctx, dest, streamSettings)
+	if err != nil {
+		return nil, err
+	}
 
 	mode := transportConfiguration.Mode
 	if mode == "" || mode == "auto" {
@@ -721,7 +725,11 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		requestURL2.Path = config2.GetNormalizedPath()
 		requestURL2.RawQuery = config2.GetNormalizedQuery()
-		httpClient2, xmuxClient2 = getHTTPClient(ctx, dest2, memory2)
+		var err error
+		httpClient2, xmuxClient2, err = getHTTPClient(ctx, dest2, memory2)
+		if err != nil {
+			return nil, fmt.Errorf("XMUX: failed to get download client: %w", err)
+		}
 	}
 
 	if xmuxClient != nil && !xmuxClient.Borrow() {
@@ -759,7 +767,13 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		},
 	}
 
-	var err error
+	// Unified cleanup: close reader + conn on any error after pipe creation.
+	// conn.Close() triggers onClose which Releases borrowed XMUX clients.
+	cleanup := func() {
+		reader.Close()
+		conn.Close()
+	}
+
 	if mode == "stream-one" {
 		requestURL.Path = transportConfiguration.GetNormalizedPath()
 		if xmuxClient != nil {
@@ -767,8 +781,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
 		if err != nil {
-			reader.Close()
-			conn.Close()
+			cleanup()
 			return nil, err
 		}
 		return stat.Connection(&conn), nil
@@ -778,8 +791,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
 		if err != nil {
-			reader.Close()
-			conn.Close()
+			cleanup()
 			return nil, err
 		}
 	}
@@ -789,8 +801,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
 		if err != nil {
-			reader.Close()
-			conn.Close()
+			cleanup()
 			return nil, err
 		}
 		return stat.Connection(&conn), nil
@@ -800,8 +811,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	scMinPostsIntervalMs := transportConfiguration.GetNormalizedScMinPostsIntervalMs()
 
 	if scMaxEachPostBytes.From <= 0 {
-		reader.Close()
-		conn.Close()
+		cleanup()
 		return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
 	}
 
@@ -877,8 +887,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Load() <= 0 ||
 					(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
 					oldClient := dynamicXmuxClient
-					newHTTP, newXmux := getHTTPClient(ctx, dest, streamSettings)
-					if newXmux != nil && newXmux != oldClient {
+					newHTTP, newXmux, err := getHTTPClient(ctx, dest, streamSettings)
+					if err != nil {
+						errors.LogInfo(ctx, "XMUX: failed to renew upload client, keeping old: ", err)
+					} else if newXmux != nil && newXmux != oldClient {
 						if newXmux.Borrow() {
 							dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
 							// Atomically swap ownership so onClose Releases exactly one slot.

@@ -40,7 +40,7 @@ func BenchmarkXMUXGetXmuxClientParallel(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			c := m.GetXmuxClient(context.Background())
+			c, _ := m.GetXmuxClient(context.Background())
 			c.Borrow()
 			time.Sleep(time.Microsecond)
 			c.Release()
@@ -70,7 +70,7 @@ func BenchmarkXMUXPoolScheduling(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				c := m.GetXmuxClient(context.Background())
+				c, _ := m.GetXmuxClient(context.Background())
 				c.Borrow()
 				c.Release()
 			}
@@ -109,7 +109,7 @@ func BenchmarkXMUXConcurrentReadWrite(b *testing.B) {
 				go func() {
 					defer wg.Done()
 					for i := 0; i < b.N/workers+1; i++ {
-						c := m.GetXmuxClient(context.Background())
+						c, _ := m.GetXmuxClient(context.Background())
 						c.Borrow()
 						c.UpdateRTT(time.Duration(i%100) * time.Millisecond)
 						time.Sleep(time.Microsecond)
@@ -152,7 +152,7 @@ func TestCachedScoreStaleness(t *testing.T) {
 	// Get 3 clients and set their RTT
 	clients := make([]*XmuxClient, 3)
 	for i := 0; i < 3; i++ {
-		c := m.GetXmuxClient(context.Background())
+		c, _ := m.GetXmuxClient(context.Background())
 		clients[i] = c
 	}
 
@@ -173,7 +173,7 @@ func TestCachedScoreStaleness(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
-				c := m.GetXmuxClient(context.Background())
+				c, _ := m.GetXmuxClient(context.Background())
 				c.Borrow()
 				mu.Lock()
 				allSelectionCount[c]++

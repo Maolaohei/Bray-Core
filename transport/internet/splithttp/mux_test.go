@@ -31,7 +31,8 @@ func TestMaxConnections(t *testing.T) {
 
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 8; i++ {
-		xmuxClients[xmuxManager.GetXmuxClient(context.Background())] = struct{}{}
+		c, _ := xmuxManager.GetXmuxClient(context.Background())
+		xmuxClients[c] = struct{}{}
 	}
 
 	// background goroutines (preConnectLoop, healthCheckTick) may create
@@ -59,7 +60,8 @@ func TestCMaxReuseTimes(t *testing.T) {
 
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {
-		xmuxClients[xmuxManager.GetXmuxClient(context.Background())] = struct{}{}
+		c, _ := xmuxManager.GetXmuxClient(context.Background())
+		xmuxClients[c] = struct{}{}
 	}
 
 	// preConnectLoop may create 1 extra client before Close takes effect.
@@ -83,7 +85,7 @@ func TestMaxConcurrency(t *testing.T) {
 
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {
-		xmuxClient := xmuxManager.GetXmuxClient(context.Background())
+		xmuxClient, _ := xmuxManager.GetXmuxClient(context.Background())
 		xmuxClient.Borrow()
 		xmuxClients[xmuxClient] = struct{}{}
 	}
@@ -103,7 +105,7 @@ func TestDefault(t *testing.T) {
 
 	xmuxClients := make(map[interface{}]struct{})
 	for i := 0; i < 64; i++ {
-		xmuxClient := xmuxManager.GetXmuxClient(context.Background())
+		xmuxClient, _ := xmuxManager.GetXmuxClient(context.Background())
 		xmuxClient.Borrow()
 		xmuxClients[xmuxClient] = struct{}{}
 	}
@@ -134,8 +136,8 @@ func TestConcurrentPoolAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
-				client := xmuxManager.GetXmuxClient(context.Background())
-				if client == nil {
+				client, err := xmuxManager.GetXmuxClient(context.Background())
+				if err != nil || client == nil {
 					errCount.Add(1)
 					return
 				}

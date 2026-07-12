@@ -27,7 +27,7 @@ func TestMetricsOutput(t *testing.T) {
 
 	// Get some clients (creates new connections)
 	for i := 0; i < 5; i++ {
-		client := m.GetXmuxClient(context.Background())
+		client, _ := m.GetXmuxClient(context.Background())
 		if client != nil {
 			fmt.Printf("Got client %d\n", i+1)
 		}
@@ -35,7 +35,7 @@ func TestMetricsOutput(t *testing.T) {
 
 	// Simulate reuse (get same clients again)
 	for i := 0; i < 10; i++ {
-		client := m.GetXmuxClient(context.Background())
+		client, _ := m.GetXmuxClient(context.Background())
 		if client != nil {
 			client.UpdateRTT(time.Duration(10+i*5) * time.Millisecond)
 		}
