@@ -334,6 +334,21 @@ func AdaptivePaddingRange(baseFrom, baseTo int32, payloadSize int) (from, to int
 	}
 }
 
+// AcceptedPaddingRange returns the full padding length window a server must accept.
+// Clients may shrink padding via AdaptivePaddingRange for small payloads, so the
+// accepted lower bound is the adaptive floor while the upper bound stays at base.To.
+func AcceptedPaddingRange(baseFrom, baseTo int32) (from, to int32) {
+	from, _ = AdaptivePaddingRange(baseFrom, baseTo, 0)
+	if baseFrom < from {
+		from = baseFrom
+	}
+	to = baseTo
+	if to < from {
+		to = from
+	}
+	return from, to
+}
+
 func (c *Config) GetNormalizedXPaddingBytes() *RangeConfig {
 	if c.XPaddingBytes == nil || c.XPaddingBytes.To == 0 {
 		return defaultRangeConfigXPaddingBytes

@@ -302,7 +302,9 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr 
 
 func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqStr string) {
 	request.Header = c.GetRequestHeader()
-	length := int(c.GetNormalizedXPaddingBytes().rand())
+	basePad := c.GetNormalizedXPaddingBytes()
+	// Stream open has no payload size yet; keep configured range.
+	length := int(basePad.rand())
 	config := XPaddingConfig{Length: length}
 
 	if c.XPaddingObfsMode {
@@ -332,6 +334,10 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 
 func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqStr string, payload buf.MultiBuffer) error {
 	dataPlacement := c.GetNormalizedUplinkDataPlacement()
+	payloadLen := 0
+	if payload != nil {
+		payloadLen = int(payload.Len())
+	}
 
 	if dataPlacement == PlacementBody || dataPlacement == PlacementAuto {
 		request.Header = c.GetRequestHeader()
@@ -355,7 +361,9 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		bytespool.Free(data)
 	}
 
-	length := int(c.GetNormalizedXPaddingBytes().rand())
+	basePad := c.GetNormalizedXPaddingBytes()
+	from, to := AdaptivePaddingRange(basePad.From, basePad.To, payloadLen)
+	length := int((&RangeConfig{From: from, To: to}).rand())
 	config := XPaddingConfig{Length: length}
 
 	if c.XPaddingObfsMode {

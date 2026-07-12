@@ -241,6 +241,10 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 				p.(interface{ FeedRTT(time.Duration) }).FeedRTT(rtt)
 			}
 		})
+		// Stream TTFB feeds manager-level pool health metrics (not per-client scheduling).
+		dc.SetOnTTFB(func(ttfb time.Duration) {
+			xmuxManager.RecordTTFB(ttfb)
+		})
 
 		// Wire up TransportProfile: raw TCP socket → Profile → UpdateQuality → scoreClient
 		dc.SetOnNewConn(func(rawConn net.Conn) {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -140,5 +141,66 @@ func TestOpenStream_UploadOnlyFatalMarksClosed(t *testing.T) {
 	}
 	if !c.IsClosed() {
 		t.Fatal("uploadOnly fatal must mark dialer closed")
+	}
+}
+
+func TestOpenStream_RecordsTTFBOnSuccess(t *testing.T) {
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		time.Sleep(15 * time.Millisecond)
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("payload")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	var samples atomic.Int32
+	var lastTTFB atomic.Int64
+	c := &DefaultDialerClient{
+		transportConfig: &Config{},
+		httpVersion:     "2",
+		client:          &http.Client{Transport: rt},
+	}
+	c.SetOnTTFB(func(d time.Duration) {
+		samples.Add(1)
+		lastTTFB.Store(int64(d))
+	})
+	rc, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer rc.Close()
+	if samples.Load() != 1 {
+		t.Fatalf("TTFB samples=%d want 1", samples.Load())
+	}
+	if lastTTFB.Load() < int64(10*time.Millisecond) {
+		t.Fatalf("TTFB too small: %v", time.Duration(lastTTFB.Load()))
+	}
+}
+
+func TestOpenStream_DoesNotRecordTTFBOnNon200(t *testing.T) {
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 503,
+			Body:       io.NopCloser(strings.NewReader("nope")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	var samples atomic.Int32
+	c := &DefaultDialerClient{
+		transportConfig: &Config{},
+		httpVersion:     "2",
+		client:          &http.Client{Transport: rt},
+	}
+	c.SetOnTTFB(func(d time.Duration) {
+		samples.Add(1)
+	})
+	_, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	if err == nil {
+		t.Fatal("expected non-200 error")
+	}
+	if samples.Load() != 0 {
+		t.Fatalf("TTFB must not record failures, samples=%d", samples.Load())
 	}
 }

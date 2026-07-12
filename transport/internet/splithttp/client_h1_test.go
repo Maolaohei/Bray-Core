@@ -63,7 +63,7 @@ func (c *scriptedConn) SetDeadline(t time.Time) error      { return nil }
 func (c *scriptedConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *scriptedConn) SetWriteDeadline(t time.Time) error { return nil }
 
-func TestH1PostPacket_IncrementsUnreadAndDrains(t *testing.T) {
+func TestH1PostPacket_ImmediateReadAndReuse(t *testing.T) {
 	respOK := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
 	pool := newH1ConnPool(defaultH1UploadPoolCap)
 
@@ -74,7 +74,7 @@ func TestH1PostPacket_IncrementsUnreadAndDrains(t *testing.T) {
 		uploadRawPool:   pool,
 		dialUploadConn: func(ctx context.Context) (net.Conn, error) {
 			dialed++
-			return &scriptedConn{reads: []string{respOK}}, nil
+			return &scriptedConn{reads: []string{respOK, respOK}}, nil
 		},
 	}
 
@@ -86,8 +86,8 @@ func TestH1PostPacket_IncrementsUnreadAndDrains(t *testing.T) {
 	if h1 == nil {
 		t.Fatal("expected pooled H1Conn after first write")
 	}
-	if h1.UnreadResponsesCount != 1 {
-		t.Fatalf("UnreadResponsesCount=%d want 1 after successful write", h1.UnreadResponsesCount)
+	if h1.UnreadResponsesCount != 0 {
+		t.Fatalf("UnreadResponsesCount=%d want 0 after immediate response drain", h1.UnreadResponsesCount)
 	}
 	pool.Put(h1)
 	mb2 := buf.MultiBuffer{buf.FromBytes([]byte("b"))}
@@ -98,8 +98,8 @@ func TestH1PostPacket_IncrementsUnreadAndDrains(t *testing.T) {
 	if h2 == nil {
 		t.Fatal("expected pooled conn after second write")
 	}
-	if h2.UnreadResponsesCount != 1 {
-		t.Fatalf("UnreadResponsesCount=%d want 1 after drain+write", h2.UnreadResponsesCount)
+	if h2.UnreadResponsesCount != 0 {
+		t.Fatalf("UnreadResponsesCount=%d want 0 after second immediate response drain", h2.UnreadResponsesCount)
 	}
 	if dialed != 1 {
 		t.Fatalf("dialed=%d want 1 (reuse pooled conn)", dialed)
@@ -120,7 +120,7 @@ func TestH1PostPacket_FailedPooledWriteIsNotReturned(t *testing.T) {
 		uploadRawPool:   pool,
 		dialUploadConn: func(ctx context.Context) (net.Conn, error) {
 			dialed++
-			return &scriptedConn{reads: nil}, nil
+			return &scriptedConn{reads: []string{"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"}}, nil
 		},
 	}
 	mb := buf.MultiBuffer{buf.FromBytes([]byte("x"))}
@@ -134,8 +134,8 @@ func TestH1PostPacket_FailedPooledWriteIsNotReturned(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected healthy conn in pool")
 	}
-	if got.UnreadResponsesCount != 1 {
-		t.Fatalf("count=%d", got.UnreadResponsesCount)
+	if got.UnreadResponsesCount != 0 {
+		t.Fatalf("count=%d want 0 after immediate response drain", got.UnreadResponsesCount)
 	}
 }
 
@@ -204,7 +204,8 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 func TestH1Drain_MultipleUnread(t *testing.T) {
 	r1 := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
 	r2 := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-	sc := &scriptedConn{reads: []string{r1 + r2}}
+	r3 := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+	sc := &scriptedConn{reads: []string{r1 + r2 + r3}}
 	h1 := NewH1Conn(sc)
 	h1.RespBufReader = bufio.NewReader(sc)
 	h1.UnreadResponsesCount = 2
@@ -227,8 +228,8 @@ func TestH1Drain_MultipleUnread(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected pooled conn")
 	}
-	if got.UnreadResponsesCount != 1 {
-		t.Fatalf("after drain 2 + write 1, count=%d", got.UnreadResponsesCount)
+	if got.UnreadResponsesCount != 0 {
+		t.Fatalf("after drain 2 + write+read 1, count=%d want 0", got.UnreadResponsesCount)
 	}
 }
 

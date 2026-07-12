@@ -5,6 +5,7 @@ import (
 	gotls "crypto/tls"
 	"encoding/base64"
 	"io"
+	stdnet "net"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -50,14 +51,14 @@ type requestHandler struct {
 	socketSettings *internet.SocketConfig
 	stopCh         chan struct{}
 	cfDetected     atomic.Bool
-	avgRTT         time.Duration // EWMA of client RTTs for adaptive session TTL
+	avgRTTNs       atomic.Int64 // EWMA of handler service time (ns) for adaptive session TTL
 }
 
 type httpSession struct {
 	uploadQueue      *uploadQueue
 	isFullyConnected *done.Instance
 	timer            *time.Timer
-	remoteAddr       string // the remote address that created this session
+	remoteIP         string // remote IP that created this session (port ignored)
 	closeOnce        sync.Once
 }
 
@@ -71,34 +72,79 @@ func (h *requestHandler) getSessionTtl() int32 {
 	if h.cfDetected.Load() {
 		return 75
 	}
-	return h.config.GetNormalizedScSessionTtlSecs()
+	base := h.config.GetNormalizedScSessionTtlSecs()
+	// Stretch TTL when reverse-proxy / client path is slow so half-open
+	// packet-up sessions are not reaped mid-burst.
+	avg := time.Duration(h.avgRTTNs.Load())
+	if avg >= 500*time.Millisecond {
+		base += 30
+	} else if avg >= 200*time.Millisecond {
+		base += 15
+	}
+	if base > 180 {
+		base = 180
+	}
+	return base
 }
 
-// updateAvgRTT updates the EWMA RTT from a request round-trip measurement.
-// Called after a complete request-response cycle to adapt session TTL.
+// updateAvgRTT updates the EWMA service-time estimate used for adaptive TTL.
 func (h *requestHandler) updateAvgRTT(rtt time.Duration) {
-	// EWMA: 80% old + 20% new
-	old := h.avgRTT
-	if old == 0 {
-		h.avgRTT = rtt
-	} else {
-		h.avgRTT = (old*8 + rtt*2) / 10
+	if rtt <= 0 {
+		return
 	}
+	newNs := int64(rtt)
+	for {
+		old := h.avgRTTNs.Load()
+		var smoothed int64
+		if old == 0 {
+			smoothed = newNs
+		} else {
+			// EWMA: 80% old + 20% new
+			smoothed = (old*8 + newNs*2) / 10
+		}
+		if h.avgRTTNs.CompareAndSwap(old, smoothed) {
+			return
+		}
+	}
+}
+
+// sessionRemoteIP extracts host/IP without port so NAT source-port changes
+// and XMUX multi-connection clients can keep the same logical session.
+func sessionRemoteIP(remoteAddr string) string {
+	if remoteAddr == "" {
+		return ""
+	}
+	if host, _, err := stdnet.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
+}
+
+func (h *requestHandler) sessionCount() int {
+	n := 0
+	h.sessions.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
 }
 
 func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *httpSession {
 	ttl := h.getSessionTtl()
+	remoteIP := sessionRemoteIP(remoteAddr)
 
 	// fast path
 	currentSessionAny, ok := h.sessions.Load(sessionId)
 	if ok {
 		s := currentSessionAny.(*httpSession)
-		if s.remoteAddr != remoteAddr {
+		// Bind by IP only. Port changes are normal under NAT / multi-conn XMUX.
+		// Different IPs still force a replace to avoid cross-client session hijack.
+		if s.remoteIP != "" && remoteIP != "" && s.remoteIP != remoteIP {
 			errors.LogError(context.Background(),
-				"XHTTP session reuse across different connections rejected: ",
+				"XHTTP session reuse across different source IPs rejected: ",
 				"sessionId=", sessionId,
-				", existing=", s.remoteAddr,
-				", new=", remoteAddr,
+				", existing=", s.remoteIP,
+				", new=", remoteIP,
 			)
 			// Fall through to slow path to create a new session.
 		} else {
@@ -116,15 +162,16 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 	currentSessionAny, ok = h.sessions.Load(sessionId)
 	if ok {
 		s := currentSessionAny.(*httpSession)
-		if s.remoteAddr != remoteAddr {
+		if s.remoteIP != "" && remoteIP != "" && s.remoteIP != remoteIP {
 			errors.LogError(context.Background(),
-				"XHTTP session reuse across different connections rejected (slow path): ",
+				"XHTTP session reuse across different source IPs rejected (slow path): ",
 				"sessionId=", sessionId,
-				", existing=", s.remoteAddr,
-				", new=", remoteAddr,
+				", existing=", s.remoteIP,
+				", new=", remoteIP,
 			)
-			// Old session is stale or belongs to a different connection.
+			// Old session belongs to a different client IP.
 			// Close its uploadQueue and replace with a fresh session.
+			h.sessions.CompareAndDelete(sessionId, s)
 			s.close()
 		} else {
 			if s.timer != nil {
@@ -134,11 +181,19 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 		}
 	}
 
+	if h.sessionCount() >= maxSessionsPerHandler {
+		errors.LogError(context.Background(),
+			"XHTTP session limit reached, rejecting sessionId=", sessionId,
+			", max=", maxSessionsPerHandler,
+		)
+		return nil
+	}
+
 	s := &httpSession{
 		uploadQueue:      NewUploadQueue(h.ln.config.GetNormalizedScMaxBufferedPosts()),
 		isFullyConnected: done.New(),
 		timer:            time.NewTimer(time.Duration(ttl) * time.Second),
-		remoteAddr:       remoteAddr,
+		remoteIP:         remoteIP,
 	}
 
 	h.sessions.Store(sessionId, s)
@@ -160,6 +215,7 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 }
 
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	reqStart := time.Now()
 	if len(h.host) > 0 && !internet.IsValidHTTPHost(request.Host, h.host) {
 		errors.LogInfo(context.Background(), "failed to validate host, request:", request.Host, ", config:", h.host)
 		writer.WriteHeader(http.StatusNotFound)
@@ -181,6 +237,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	}
 
 	h.config.WriteResponseHeader(writer, request.Method, request.Header)
+	// Response padding stays on the configured range; request-side adaptive
+	// padding is applied on the client. Keep server replies stable for CDN caches.
 	length := int(h.config.GetNormalizedXPaddingBytes().rand())
 	config := XPaddingConfig{Length: length}
 
@@ -213,10 +271,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 	*/
 
-	validRange := h.config.GetNormalizedXPaddingBytes()
+	basePad := h.config.GetNormalizedXPaddingBytes()
+	acceptFrom, acceptTo := AcceptedPaddingRange(basePad.From, basePad.To)
 	paddingValue, paddingPlacement := h.config.ExtractXPaddingFromRequest(request, h.config.XPaddingObfsMode)
 
-	if !h.config.IsPaddingValid(paddingValue, validRange.From, validRange.To, PaddingMethod(h.config.XPaddingMethod)) {
+	if !h.config.IsPaddingValid(paddingValue, acceptFrom, acceptTo, PaddingMethod(h.config.XPaddingMethod)) {
 		errors.LogInfo(context.Background(), "invalid padding ("+paddingPlacement+") length:", int32(len(paddingValue)))
 		writer.WriteHeader(http.StatusBadRequest)
 		return
@@ -263,6 +322,10 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	var currentSession *httpSession
 	if sessionId != "" {
 		currentSession = h.upsertSession(sessionId, remoteAddr.String())
+		if currentSession == nil {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 	}
 	scMaxEachPostBytes := int(h.ln.config.GetNormalizedScMaxEachPostBytes().To)
 	isUplinkRequest := false
@@ -457,6 +520,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			writer.Header().Set("Cache-Control", "no-store")
 		}
 
+		h.updateAvgRTT(time.Since(reqStart))
 		writer.WriteHeader(http.StatusOK)
 	} else if request.Method == "GET" || sessionId == "" { // stream-down, stream-one
 		if sessionId != "" {

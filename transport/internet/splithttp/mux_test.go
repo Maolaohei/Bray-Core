@@ -110,8 +110,10 @@ func TestDefault(t *testing.T) {
 		xmuxClients[xmuxClient] = struct{}{}
 	}
 
-	if len(xmuxClients) != 1 {
-		t.Error("did not get 1 distinct clients, got ", len(xmuxClients))
+	// preConnectLoop may keep up to 2 warm clients even with unlimited MaxConnections.
+	n := len(xmuxClients)
+	if n < 1 || n > 2 {
+		t.Error("expected 1-2 distinct clients with default unlimited config, got ", n)
 	}
 }
 

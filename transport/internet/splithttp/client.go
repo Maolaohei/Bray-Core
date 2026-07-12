@@ -57,6 +57,9 @@ type DefaultDialerClient struct {
 	// onRTT is called after each request completes with the measured RTT.
 	// Used for RTT-aware scheduling in XmuxManager.
 	onRTT func(rtt time.Duration)
+	// onTTFB is called once when the first response byte/headers arrive for a
+	// successful stream open. Used for XMUX pool health metrics (not scheduling).
+	onTTFB func(ttfb time.Duration)
 	// onNewConn is called when a new raw TCP connection is established.
 	// Used by TransportProfile to start TCP_INFO sampling.
 	// The conn argument is the raw TCP socket (before TLS/REALITY wrapping).
@@ -73,6 +76,11 @@ func (c *DefaultDialerClient) IsClosed() bool {
 // SetOnRTT sets the callback for RTT measurement.
 func (c *DefaultDialerClient) SetOnRTT(fn func(rtt time.Duration)) {
 	c.onRTT = fn
+}
+
+// SetOnTTFB sets the callback for Time-To-First-Byte measurement on stream open.
+func (c *DefaultDialerClient) SetOnTTFB(fn func(ttfb time.Duration)) {
+	c.onTTFB = fn
 }
 
 // SetOnNewConn sets the callback for new raw TCP connections.
@@ -143,6 +151,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 	t0 := time.Now()
 	var addrMu sync.Mutex
 	var gotRemote, gotLocal net.Addr
+	var ttfbOnce sync.Once
 	method := "GET" // stream-down
 	if body != nil {
 		method = c.transportConfig.GetNormalizedUplinkHTTPMethod() // stream-up/one
@@ -168,6 +177,14 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 			addrMu.Unlock()
 			errors.LogDebug(ctx, "XHTTP stream: GotConn in ", time.Since(t0).Round(time.Millisecond),
 				" (reused=", connInfo.Reused, ")")
+		},
+		GotFirstResponseByte: func() {
+			// Prefer true first-byte latency when the transport fires the hook.
+			ttfbOnce.Do(func() {
+				if c.onTTFB != nil {
+					c.onTTFB(time.Since(t0))
+				}
+			})
 		},
 	})
 
@@ -220,6 +237,13 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 			addrMu.Lock()
 			r, l := gotRemote, gotLocal
 			addrMu.Unlock()
+			// Fallback when httptrace.GotFirstResponseByte is unavailable
+			// (custom RoundTripper / some H3 paths): headers accepted == TTFB.
+			ttfbOnce.Do(func() {
+				if c.onTTFB != nil {
+					c.onTTFB(time.Since(t0))
+				}
+			})
 			resultCh <- streamResult{remote: r, local: l}
 			return
 		}
@@ -228,6 +252,11 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		addrMu.Lock()
 		rr, ll := gotRemote, gotLocal
 		addrMu.Unlock()
+		ttfbOnce.Do(func() {
+			if c.onTTFB != nil {
+				c.onTTFB(time.Since(t0))
+			}
+		})
 		resultCh <- streamResult{rc: rc, remote: rr, local: ll}
 	}()
 
@@ -296,6 +325,7 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 		}()
 
 		var h1UploadConn *H1Conn
+		start := time.Now()
 
 		for {
 			h1UploadConn = c.uploadRawPool.Get()
@@ -308,8 +338,7 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 				h1UploadConn = NewH1Conn(newConn)
 			} else {
 
-				// Drain responses for previously pipelined requests before reuse.
-				// UnreadResponsesCount is incremented after each successful write.
+				// Drain any leftover unread responses before reuse (legacy pipeline depth).
 				drainFailed := false
 				for h1UploadConn.UnreadResponsesCount > 0 {
 					resp, err := http.ReadResponse(h1UploadConn.RespBufReader, nil)
@@ -339,7 +368,28 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 			// failed writes to a pooled connection are normal when
 			// the connection has been closed in the meantime.
 			if err == nil {
-				h1UploadConn.UnreadResponsesCount++
+				// Confirm this upload response immediately so failures are not
+				// deferred until a later reuse that may never happen. Pipeline
+				// depth stays at most 1 for packet-up reliability.
+				resp, readErr := http.ReadResponse(h1UploadConn.RespBufReader, nil)
+				if readErr != nil {
+					_ = h1UploadConn.Close()
+					if newConnection {
+						c.markFatal(readErr)
+						return readErr
+					}
+					c.markFatal(readErr)
+					continue
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != 200 {
+					_ = h1UploadConn.Close()
+					return fmt.Errorf("got non-200 error response code: %d", resp.StatusCode)
+				}
+				if c.onRTT != nil {
+					c.onRTT(time.Since(start))
+				}
 				break
 			} else if newConnection {
 				return err

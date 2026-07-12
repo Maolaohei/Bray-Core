@@ -75,10 +75,11 @@ func (p *XmuxClientPool) Append(c *XmuxClient) {
 	p.clients = append(p.clients, c)
 }
 
-// CloseAll stops profilers and nils the slice. Caller must hold p.mu (write lock).
+// CloseAll force-closes every client (stop profilers + underlying transports) and nils the slice.
+// Caller must hold p.mu (write lock).
 func (p *XmuxClientPool) CloseAll() {
 	for _, c := range p.clients {
-		c.StopProfiling()
+		c.MarkDead()
 	}
 	p.clients = nil
 }
@@ -91,6 +92,16 @@ func (p *XmuxClientPool) Remove(target *XmuxClient) bool {
 			p.RemoveAt(i)
 			return true
 		}
+	}
+	return false
+}
+
+// RemoveAndClose removes the first matching client and force-closes it.
+// Caller must hold p.mu (write lock).
+func (p *XmuxClientPool) RemoveAndClose(target *XmuxClient) bool {
+	if p.Remove(target) {
+		target.MarkDead()
+		return true
 	}
 	return false
 }
@@ -124,6 +135,9 @@ type XmuxClient struct {
 	// TransportProfile for this connection. Created when TCP connection is established.
 	profileMu sync.Mutex          // protects profile field
 	profile   interface{ Stop() } // *tcpinfo.Profile, stored as interface to avoid import cycle
+
+	// closeOnce ensures the underlying XmuxConn is closed at most once.
+	closeOnce sync.Once
 }
 
 // WaitForReady blocks until probe completes or context is cancelled.
@@ -169,9 +183,19 @@ func (c *XmuxClient) Release() {
 
 // MarkDead immediately transitions to Closed state.
 // Called by Fast Eviction when fatal errors are detected (EOF, broken pipe, GOAWAY, etc.)
+// Unlike maybeDrain, this closes the underlying transport even if streams are still marked active
+// (those streams are already unusable after a connection-level fault).
 func (c *XmuxClient) MarkDead() {
 	c.state.Store(StateClosed)
-	c.StopProfiling()
+	c.closeConn()
+}
+
+// closeConn stops profiling and closes the underlying transport exactly once.
+func (c *XmuxClient) closeConn() {
+	c.closeOnce.Do(func() {
+		c.StopProfiling()
+		common.Close(c.XmuxConn)
+	})
 }
 
 // maybeDrain transitions from Active to Draining.
@@ -190,8 +214,7 @@ func (c *XmuxClient) tryClose() {
 		return
 	}
 	if c.state.CompareAndSwap(StateDraining, StateClosed) {
-		c.StopProfiling()
-		common.Close(c.XmuxConn)
+		c.closeConn()
 	}
 }
 
@@ -511,13 +534,13 @@ func (m *XmuxManager) checkNetworkChange() {
 // clearStaleConnections removes all stale connections after network change
 // and immediately creates replacement connections.
 func (m *XmuxManager) clearStaleConnections() {
-	// Phase 1: Remove all stale connections under write lock
+	// Phase 1: Remove and close all stale connections under write lock
 	m.pool.mu.Lock()
 	for i := 0; i < len(m.pool.clients); {
 		c := m.pool.clients[i]
 		errors.LogDebug(context.Background(), "XMUX: network-change removing stale xmuxClient, rtt=", c.GetRTT().Milliseconds(), "ms")
-		c.StopProfiling()
 		m.pool.RemoveAt(i)
+		c.MarkDead()
 	}
 	effectiveConns := m.effectiveConnections()
 	m.pool.mu.Unlock()
@@ -628,6 +651,7 @@ func (m *XmuxManager) healthCheckTick() {
 
 		// Already closed (shouldn't be in pool, but handle defensively)
 		if st == StateClosed {
+			c.closeConn()
 			m.pool.RemoveAt(i)
 			continue
 		}
@@ -635,7 +659,7 @@ func (m *XmuxManager) healthCheckTick() {
 		// Active state — check if should be retired
 		if c.XmuxConn.IsClosed() {
 			errors.LogDebug(context.Background(), "XMUX: health-check removing closed xmuxClient")
-			c.maybeDrain()
+			c.MarkDead()
 			m.pool.RemoveAt(i)
 			continue
 		}
@@ -1083,6 +1107,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 			m.pool.mu.RUnlock()
 			m.pool.mu.Lock()
 			if i < len(m.pool.clients) && m.pool.clients[i] == c {
+				c.closeConn()
 				m.pool.RemoveAt(i)
 			}
 			m.pool.mu.Unlock()
@@ -1105,7 +1130,11 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 					", leftUsage = ", c.leftUsage.Load(),
 					", LeftRequests = ", c.LeftRequests.Load(),
 					", UnreusableAt = ", c.UnreusableAt)
-				c.maybeDrain()
+				if c.XmuxConn.IsClosed() {
+					c.MarkDead()
+				} else {
+					c.maybeDrain()
+				}
 				m.pool.RemoveAt(i)
 			}
 			m.pool.mu.Unlock()
@@ -1203,10 +1232,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				// Wait for probe to complete before returning existing connection
 				if err := best.WaitForReady(ctx); err != nil {
 					errors.LogInfo(ctx, "XMUX: probe failed for existing connection, removing: ", err)
-					best.MarkDead()
-					// Remove broken connection from pool immediately
+					// Remove broken connection from pool and close transport
 					m.pool.mu.Lock()
-					m.pool.Remove(best)
+					m.pool.RemoveAndClose(best)
 					m.pool.mu.Unlock()
 					// Fall through to Phase 2 to create new connection
 				} else {
@@ -1234,10 +1262,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		// Wait for probe to complete before returning new connection
 		if err := c.WaitForReady(ctx); err != nil {
 			errors.LogInfo(ctx, "XMUX: probe failed for new connection (attempt ", attempt+1, "), removing: ", err)
-			c.MarkDead()
-			// Remove broken connection from pool immediately
+			// Remove broken connection from pool and close transport
 			m.pool.mu.Lock()
-			m.pool.Remove(c)
+			m.pool.RemoveAndClose(c)
 			m.pool.mu.Unlock()
 			lastErr = fmt.Errorf("XMUX: probe failed: %w", err)
 			continue

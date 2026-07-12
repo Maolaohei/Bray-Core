@@ -147,8 +147,12 @@ func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error)
 	}
 }
 
-// failover tries H3 first, then H2 if H3 fails.
-// Used when the request has a body (can't replay the reader).
+// failover tries H3 first, then H2 only when the body can be safely replayed.
+// Used when the request has a body (stream-one / stream-up).
+//
+// Important: a generic io.Reader body cannot be rewound after a partial H3
+// write. Replaying it on H2 would silently upload a truncated payload.
+// Only GetBody (or a nil body) allows a correct fallback.
 func (t *happyEyeballsTransport) failover(req *http.Request) (*http.Response, error) {
 	resp, err := t.h3.RoundTrip(req)
 	if err == nil {
@@ -156,8 +160,30 @@ func (t *happyEyeballsTransport) failover(req *http.Request) (*http.Response, er
 		return resp, nil
 	}
 
-	errors.LogInfoInner(context.Background(), err, "H3 request with body failed, falling back to H2")
 	t.setH3Failed()
+
+	// Prefer settled H2 for subsequent requests after an H3 body failure.
+	// For THIS request, only retry when the body is replayable.
+	if req.Body != nil && req.GetBody == nil {
+		errors.LogInfoInner(context.Background(), err,
+			"H3 request with non-replayable body failed; not falling back to H2")
+		t.settle(t.h2)
+		return nil, err
+	}
+
+	if req.GetBody != nil {
+		body, bodyErr := req.GetBody()
+		if bodyErr != nil {
+			errors.LogInfoInner(context.Background(), bodyErr,
+				"H3 failed and GetBody could not rebuild request body for H2 fallback")
+			t.settle(t.h2)
+			return nil, err
+		}
+		req = req.Clone(req.Context())
+		req.Body = body
+	}
+
+	errors.LogInfoInner(context.Background(), err, "H3 request with body failed, falling back to H2")
 	t.settle(t.h2)
 	return t.h2.RoundTrip(req)
 }
