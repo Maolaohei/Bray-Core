@@ -106,6 +106,7 @@ When edge rejects long bidirectional streams.
 | Multi-endpoint race (runtime) | header `x-bray-multi-endpoint: "true"` + `x-bray-endpoints: "a:443,b:443"` | TCP dial races extras; first success wins |
 | REALITY soft demotion | server default | L2 fail -> next handshake L1 (Suspect), not L0 |
 | Control header isolation | automatic | `x-bray-*` never sent on wire |
+| Sticky last-good mode | default on when cascade allowed; `x-bray-sticky-mode: "false"` to opt out | Prefer last successful mode (TTL) |
 
 CDN stream-one with explicit degrade opt-in example (headers are client-local):
 
@@ -125,7 +126,8 @@ CDN stream-one with explicit degrade opt-in example (headers are client-local):
     "headers": {
       "x-bray-mode-degrade": "true",
       "x-bray-multi-endpoint": "true",
-      "x-bray-endpoints": "1.2.3.4:443,5.6.7.8:443"
+      "x-bray-endpoints": "1.2.3.4:443,5.6.7.8:443",
+      "x-bray-sticky-mode": "true"
     },
     "xPaddingBytes": "100-500",
     "xmux": {
@@ -137,7 +139,7 @@ CDN stream-one with explicit degrade opt-in example (headers are client-local):
 }
 ```
 
-See `docs/bray-v2-wave2.md` and `docs/bray-v2-wave3.md`.
+See `docs/bray-v2-wave2.md`, `docs/bray-v2-wave3.md`, `docs/bray-v2-wave4.md`, and full-body `docs/bray-v2-full.md`.
 
 ## Compatibility
 
@@ -152,3 +154,4 @@ See `docs/bray-v2-wave2.md` and `docs/bray-v2-wave3.md`.
 - REALITY: `CacheReport()` includes L1/L2 hits, L2 fails, L1 fails, L2 soft demotions, quarantines, calibrations
 - XHTTP H3 race: `GetH3Metrics()` / `H3MetricsReport()`
 - XMUX: existing `XmuxManager.GetMetrics()` / `LogMetrics()`
+- Bray-V2 cascade/sticky/multi: `GetBrayV2Metrics()` / `BrayV2MetricsReport()`

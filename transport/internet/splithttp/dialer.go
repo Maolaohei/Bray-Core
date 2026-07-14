@@ -369,13 +369,18 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		var rawConn net.Conn
 		var err error
 		if len(multiEndpoints) > 1 {
-			rawConn, _, err = RaceDialEndpoints(ctxInner, multiEndpoints, func(ctx context.Context, endpoint string) (net.Conn, error) {
+			var winner string
+			rawConn, winner, err = RaceDialEndpoints(ctxInner, multiEndpoints, func(ctx context.Context, endpoint string) (net.Conn, error) {
 				d, perr := destinationFromEndpoint(endpoint, dest)
 				if perr != nil {
 					return nil, perr
 				}
 				return dialRawTCP(ctx, d)
 			})
+			if err == nil {
+				primaryEP := multiEndpoints[0]
+				recordMultiEndpointRace(winner != "" && winner != primaryEP)
+			}
 		} else {
 			rawConn, err = dialRawTCP(ctxInner, dest)
 		}
@@ -728,6 +733,20 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	allowModeDegrade := ShouldAttemptModeDegrade(transportConfiguration.Mode, transportConfiguration.Headers)
 	modeCascade := BuildModeCascade(initialMode, allowModeDegrade)
 
+	// Wave-4 sticky last-good mode: prefer previously successful mode on this dest.
+	stickyKey := stickyDestKey(dest.NetAddr(), requestURL.Host)
+	if allowModeDegrade && StickyModeEnabled(transportConfiguration.Headers) {
+		if sm, ok := LookupStickyMode(stickyKey); ok {
+			before := modeCascade
+			modeCascade = ApplyStickyMode(modeCascade, sm)
+			if len(modeCascade) > 0 && (len(before) != len(modeCascade) || before[0] != modeCascade[0]) {
+				recordStickyHit()
+				errors.LogDebug(ctx, "XHTTP sticky mode: prefer ", modeCascade[0], " for ", stickyKey)
+			}
+		}
+	}
+	recordModeAttempt()
+
 	// Prepare optional download leg once (shared across mode cascade attempts).
 	requestURL2 := requestURL
 	httpClient2 := httpClient
@@ -888,13 +907,23 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if openErr != nil {
 			cleanup()
 			lastErr = openErr
+			// Adaptive XMUX lite: drop broken sessions so next dial rotates.
+			MaybeEvictXmuxAfterOpenFailure(xmuxClient, openErr)
+			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
+				MaybeEvictXmuxAfterOpenFailure(xmuxClient2, openErr)
+			}
 			if mi+1 < len(modeCascade) && IsDegradeEligibleError(openErr) {
+				recordModeCascadeStep()
 				errors.LogInfoInner(ctx, openErr, "XHTTP mode ", mode, " open failed; cascading to ", modeCascade[mi+1])
 				continue
 			}
 			return nil, openErr
 		}
 		if established {
+			recordModeSuccess(mi > 0)
+			if allowModeDegrade && StickyModeEnabled(transportConfiguration.Headers) {
+				RememberStickyMode(stickyKey, mode)
+			}
 			return stat.Connection(&conn), nil
 		}
 		if !contPacket {
@@ -1029,6 +1058,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			}
 		}()
 
+		recordModeSuccess(mi > 0)
+		if allowModeDegrade && StickyModeEnabled(transportConfiguration.Headers) {
+			RememberStickyMode(stickyKey, mode)
+		}
 		return stat.Connection(&conn), nil
 	}
 
