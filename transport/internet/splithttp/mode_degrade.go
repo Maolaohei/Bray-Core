@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
+
+	"github.com/xtls/xray-core/common/crypto"
 )
 
 // XHTTP mode cascade for CDN / reverse-proxy degradation (Wave-2).
@@ -13,6 +16,39 @@ import (
 //	stream-one -> stream-up -> packet-up
 //
 // Explicit operator modes still win unless mode is "auto" or degrade is enabled.
+
+// CascadeStepJitterMax caps inter-mode wait on failed cascade steps only.
+// Happy-path (first mode success) pays zero; max keeps ladder fingerprint soft.
+const CascadeStepJitterMax = 200 * time.Millisecond
+
+// CascadeStepJitter returns a random delay in [0, CascadeStepJitterMax].
+// Used only between failed mode attempts before trying the next ladder step.
+func CascadeStepJitter() time.Duration {
+	maxNs := CascadeStepJitterMax.Nanoseconds()
+	if maxNs <= 0 {
+		return 0
+	}
+	// crypto.RandBetween is inclusive; map to [0, maxNs].
+	n := crypto.RandBetween(0, maxNs)
+	return time.Duration(n)
+}
+
+// WaitCascadeStepJitter sleeps for CascadeStepJitter unless ctx is done.
+// Returns ctx.Err() if cancelled during the wait.
+func WaitCascadeStepJitter(ctx context.Context) error {
+	d := CascadeStepJitter()
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
 
 // NormalizeXHTTPMode lowercases and trims mode tokens.
 func NormalizeXHTTPMode(mode string) string {

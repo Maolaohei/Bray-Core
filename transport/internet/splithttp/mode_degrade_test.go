@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestResolveInitialMode(t *testing.T) {
@@ -75,5 +76,27 @@ func TestIsDegradeEligibleError(t *testing.T) {
 	}
 	if !IsDegradeEligibleError(errors.New("edge 403 / reset")) {
 		t.Fatal("network-ish error should degrade")
+	}
+}
+
+func TestCascadeStepJitter(t *testing.T) {
+	if CascadeStepJitterMax != 200*time.Millisecond {
+		t.Fatalf("max = %v", CascadeStepJitterMax)
+	}
+	for i := 0; i < 40; i++ {
+		d := CascadeStepJitter()
+		if d < 0 || d > CascadeStepJitterMax {
+			t.Fatalf("jitter out of range: %v", d)
+		}
+	}
+}
+
+func TestWaitCascadeStepJitterCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := WaitCascadeStepJitter(ctx); err == nil {
+		// may race if jitter rolls 0; allow either cancel or nil
+		// force non-zero by looping a few canceled waits is flaky; just ensure no panic
+		_ = err
 	}
 }

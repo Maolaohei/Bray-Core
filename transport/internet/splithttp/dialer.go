@@ -1018,6 +1018,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			if hasMoreModes {
 				recordModeCascadeStep()
 				errors.LogInfoInner(ctx, openErr, "XHTTP mode ", mode, " open failed; cascading to ", modeCascade[mi+1])
+				// Green-zone: small inter-step jitter only on failed cascade path.
+				if werr := WaitCascadeStepJitter(ctx); werr != nil {
+					return nil, werr
+				}
 				continue
 			}
 			return nil, openErr

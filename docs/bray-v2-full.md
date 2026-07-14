@@ -125,6 +125,16 @@ Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
 | H3 blocked | Happy Eyeballs -> H2 + cooldown |
 | Single IP scrubbed | multi-endpoint race + sticky winner (opt-in) |
 
+## Green-zone hardening
+
+Low-cost anti-fingerprint defaults (compat + happy-path perf preserved):
+
+1. **Strip lock tests** — `x-bray-*` never on wire via `GetRequestHeader`.
+2. **Cascade step jitter** — only between failed mode steps, 0–200ms; first-mode success is free.
+3. **XMUX default jitter** — nil `xmux` fields get process-stable ±10% browser-band ranges; explicit config wins.
+4. **CDN presets** — recommend `packet-up`/`stream-up` first on hostile edges; no global auto policy change.
+5. **Multi-EP** — short list (2–3), no scan ranges; sticky preferred.
+
 ## What we deliberately do NOT do
 
 - Same-connection L2->L1 after bytes written (transcript mix).

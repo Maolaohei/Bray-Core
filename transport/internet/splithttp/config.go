@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -18,6 +19,7 @@ import (
 )
 
 // Pre-allocated default RangeConfig values to avoid per-request heap allocations.
+// XMUX nil fields use process-stable jittered copies (green-zone); explicit config wins.
 var (
 	defaultRangeConfigMaxPostBytes         = &RangeConfig{From: 1000000, To: 1000000}
 	defaultRangeConfigMinPostInterval      = &RangeConfig{From: 30, To: 30}
@@ -30,7 +32,114 @@ var (
 	defaultRangeConfigXmuxCMaxReuseTimes   = &RangeConfig{From: 64, To: 128} // rotate before endless reuse
 	defaultRangeConfigXmuxHMaxRequestTimes = &RangeConfig{From: 400, To: 800}
 	defaultRangeConfigXmuxHMaxReusableSecs = &RangeConfig{From: 600, To: 1200} // 10-20 min lifecycle
+
+	// Process-stable jittered XMUX defaults (green-zone anti-fleet fingerprint).
+	// Initialized once; getters return these when the operator left the field nil.
+	defaultXmuxJitteredMaxConcurrency   *RangeConfig
+	defaultXmuxJitteredMaxConnections   *RangeConfig
+	defaultXmuxJitteredCMaxReuseTimes   *RangeConfig
+	defaultXmuxJitteredHMaxRequestTimes *RangeConfig
+	defaultXmuxJitteredHMaxReusableSecs *RangeConfig
+	defaultXmuxJitterOnce               sync.Once
 )
+
+// Browser-band clamps for process-stable XMUX default jitter (±10% of base).
+const (
+	xmuxJitterPct = 10 // percent of base From/To applied as delta bound
+
+	xmuxClampConcurrencyFromMin = 4
+	xmuxClampConcurrencyToMax   = 32
+	xmuxClampConnectionsFromMin = 1
+	xmuxClampConnectionsToMax   = 8
+	xmuxClampReuseFromMin       = 32
+	xmuxClampReuseToMax         = 256
+	xmuxClampReqTimesFromMin    = 200
+	xmuxClampReqTimesToMax      = 1600
+	xmuxClampSecsFromMin        = 300
+	xmuxClampSecsToMax          = 1800
+)
+
+func ensureDefaultXmuxJittered() {
+	defaultXmuxJitterOnce.Do(func() {
+		seed := uint64(crypto.RandBetween(1, 1<<62))
+		defaultXmuxJitteredMaxConcurrency = jitterDefaultRange(
+			defaultRangeConfigXmuxMaxConcurrency, seed, 1,
+			xmuxClampConcurrencyFromMin, xmuxClampConcurrencyToMax)
+		defaultXmuxJitteredMaxConnections = jitterDefaultRange(
+			defaultRangeConfigXmuxMaxConnections, seed, 2,
+			xmuxClampConnectionsFromMin, xmuxClampConnectionsToMax)
+		defaultXmuxJitteredCMaxReuseTimes = jitterDefaultRange(
+			defaultRangeConfigXmuxCMaxReuseTimes, seed, 3,
+			xmuxClampReuseFromMin, xmuxClampReuseToMax)
+		defaultXmuxJitteredHMaxRequestTimes = jitterDefaultRange(
+			defaultRangeConfigXmuxHMaxRequestTimes, seed, 4,
+			xmuxClampReqTimesFromMin, xmuxClampReqTimesToMax)
+		defaultXmuxJitteredHMaxReusableSecs = jitterDefaultRange(
+			defaultRangeConfigXmuxHMaxReusableSecs, seed, 5,
+			xmuxClampSecsFromMin, xmuxClampSecsToMax)
+	})
+}
+
+// jitterDefaultRange returns a process-stable ±pct copy of base, clamped to [minV,maxV].
+// Explicit operator ranges are never routed here.
+func jitterDefaultRange(base *RangeConfig, seed uint64, paramID uint64, minV, maxV int32) *RangeConfig {
+	if base == nil {
+		return &RangeConfig{From: 0, To: 0}
+	}
+	r := rand.New(rand.NewPCG(seed^paramID, seed+paramID*0x9e3779b97f4a7c15))
+	from := jitterBound(base.From, r, minV, maxV)
+	to := jitterBound(base.To, r, minV, maxV)
+	if from > to {
+		from, to = to, from
+	}
+	baseSpan := base.To - base.From
+	if baseSpan < 0 {
+		baseSpan = -baseSpan
+	}
+	if to-from < baseSpan {
+		need := baseSpan - (to - from)
+		roomHi := maxV - to
+		if roomHi > need {
+			to += need
+			need = 0
+		} else {
+			to = maxV
+			need -= roomHi
+		}
+		if need > 0 {
+			roomLo := from - minV
+			if roomLo > need {
+				from -= need
+			} else {
+				from = minV
+			}
+		}
+		if from > to {
+			from, to = to, from
+		}
+	}
+	return &RangeConfig{From: from, To: to}
+}
+
+func jitterBound(v int32, r *rand.Rand, minV, maxV int32) int32 {
+	if v <= 0 {
+		return v
+	}
+	delta := v * xmuxJitterPct / 100
+	if delta < 1 {
+		delta = 1
+	}
+	span := int32(2*delta + 1)
+	off := r.Int32N(span) - delta
+	out := v + off
+	if out < minV {
+		out = minV
+	}
+	if out > maxV {
+		out = maxV
+	}
+	return out
+}
 
 func (c *Config) GetNormalizedPath() string {
 	pathAndQuery := strings.SplitN(c.Path, "?", 2)
@@ -453,7 +562,8 @@ func (c *Config) ExtractMetaFromRequest(req *http.Request, path string) (session
 
 func (m *XmuxConfig) GetNormalizedMaxConcurrency() *RangeConfig {
 	if m.MaxConcurrency == nil {
-		return defaultRangeConfigXmuxMaxConcurrency
+		ensureDefaultXmuxJittered()
+		return defaultXmuxJitteredMaxConcurrency
 	}
 
 	return m.MaxConcurrency
@@ -461,7 +571,8 @@ func (m *XmuxConfig) GetNormalizedMaxConcurrency() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedMaxConnections() *RangeConfig {
 	if m.MaxConnections == nil {
-		return defaultRangeConfigXmuxMaxConnections
+		ensureDefaultXmuxJittered()
+		return defaultXmuxJitteredMaxConnections
 	}
 
 	return m.MaxConnections
@@ -469,7 +580,8 @@ func (m *XmuxConfig) GetNormalizedMaxConnections() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedCMaxReuseTimes() *RangeConfig {
 	if m.CMaxReuseTimes == nil {
-		return defaultRangeConfigXmuxCMaxReuseTimes
+		ensureDefaultXmuxJittered()
+		return defaultXmuxJitteredCMaxReuseTimes
 	}
 
 	return m.CMaxReuseTimes
@@ -477,7 +589,8 @@ func (m *XmuxConfig) GetNormalizedCMaxReuseTimes() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedHMaxRequestTimes() *RangeConfig {
 	if m.HMaxRequestTimes == nil {
-		return defaultRangeConfigXmuxHMaxRequestTimes
+		ensureDefaultXmuxJittered()
+		return defaultXmuxJitteredHMaxRequestTimes
 	}
 
 	return m.HMaxRequestTimes
@@ -485,7 +598,8 @@ func (m *XmuxConfig) GetNormalizedHMaxRequestTimes() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedHMaxReusableSecs() *RangeConfig {
 	if m.HMaxReusableSecs == nil {
-		return defaultRangeConfigXmuxHMaxReusableSecs
+		ensureDefaultXmuxJittered()
+		return defaultXmuxJitteredHMaxReusableSecs
 	}
 
 	return m.HMaxReusableSecs

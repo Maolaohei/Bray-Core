@@ -112,7 +112,9 @@ When edge rejects long bidirectional streams.
 | Sticky TTL A/B | headers `x-bray-sticky-mode-ttl` / `x-bray-sticky-endpoint-ttl` | Override default 10m (max 24h) |
 | Rates report | `GetBrayV2Rates()` / `BrayV2RatesReport()` | Field A/B ratios (read-only) |
 
-CDN stream-one with explicit degrade opt-in example (headers are client-local):
+CDN example: on hostile edges prefer `mode: "packet-up"` or `"stream-up"` first.
+Use `stream-one` + `x-bray-mode-degrade` only if you accept the cascade ladder fingerprint
+(headers are client-local and never leave the process):
 
 ```json
 {
@@ -146,11 +148,26 @@ CDN stream-one with explicit degrade opt-in example (headers are client-local):
 
 See `docs/bray-v2-wave2.md` ... `docs/bray-v2-wave6.md`, and full-body `docs/bray-v2-full.md`.
 
+## Green-zone hardening (default-safe)
+
+| Item | Behavior | Perf / compat |
+|------|----------|---------------|
+| `x-bray-*` strip | Client-local only; never on wire | zero wire cost; locked by tests |
+| Cascade step jitter | On **failed** mode steps only, 0–200ms | happy path zero |
+| XMUX default jitter | Unconfigured `xmux` fields: process-stable ±10% in browser band | explicit ranges unchanged |
+| CDN first mode | Docs/preset: prefer `packet-up`/`stream-up` on hostile edges | **no** global auto→packet-up change |
+| Multi-endpoint | 2–3 endpoints max; no IP scan ranges; sticky on | opt-in headers |
+
+Multi-endpoint operator constraints:
+- Keep the list short (2–3 hosts/IPs). Do not put large scan ranges in `x-bray-endpoints`.
+- Prefer sticky endpoint so the race does not re-scan every dial.
+- Control headers stay process-local (stripped by `GetRequestHeader`).
+
 ## Compatibility
 
 | Field omitted | Bray-V2 default behavior |
 |---------------|--------------------------|
-| `xmux` entirely | concurrency 8-16, connections 2-4, reuse 64-128, reusable 600-1200s |
+| `xmux` entirely | browser-like bases (8-16 / 2-4 / 64-128 / 600-1200s) with process-stable ±10% jitter, clamped to browser band |
 | explicit `xmux.*` | user values win |
 | REALITY server | L2 when eligible; shape/age gated; fail -> quarantine -> calibrate |
 
