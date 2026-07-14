@@ -81,3 +81,10 @@ func TestRaceDialEndpoints_SingleNoRace(t *testing.T) {
 	}
 	_ = c.Close()
 }
+
+func TestBuildEndpointList(t *testing.T) {
+	got := BuildEndpointList("a:443", []string{"b:443", "a:443", " c:443 "})
+	if len(got) != 3 || got[0] != "a:443" || got[1] != "b:443" || got[2] != "c:443" {
+		t.Fatalf("%v", got)
+	}
+}

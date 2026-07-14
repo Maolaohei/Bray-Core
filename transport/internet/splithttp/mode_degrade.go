@@ -1,6 +1,10 @@
 package splithttp
 
-import "strings"
+import (
+	"context"
+	"errors"
+	"strings"
+)
 
 // XHTTP mode cascade for CDN / reverse-proxy degradation (Wave-2).
 // Prefer long-lived streams first; fall back toward packet-up when the edge
@@ -74,4 +78,38 @@ func ShouldAttemptModeDegrade(configuredMode string, headers map[string]string) 
 		return true
 	}
 	return ModeDegradeEnabled(headers)
+}
+
+// BuildModeCascade returns the ordered mode attempts for a dial.
+// When allowDegrade is false, only the initial mode is returned.
+func BuildModeCascade(initial string, allowDegrade bool) []string {
+	m := NormalizeXHTTPMode(initial)
+	if m == "" {
+		m = "packet-up"
+	}
+	out := []string{m}
+	if !allowDegrade {
+		return out
+	}
+	for next := NextDegradedMode(m); next != ""; next = NextDegradedMode(next) {
+		out = append(out, next)
+		m = next
+	}
+	return out
+}
+
+// IsDegradeEligibleError reports whether an open/dial error should trigger
+// mode cascade. Context cancellation is never retried with a different mode.
+func IsDegradeEligibleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return false
+	}
+	// std errors.Is for wrapped context errors
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return true
 }

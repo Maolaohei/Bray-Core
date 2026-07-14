@@ -296,6 +296,40 @@ func decideHTTPVersion(tlsConfig *tls.Config, realityConfig *reality.Config) str
 	return "2"
 }
 
+// destinationFromEndpoint parses host:port (or tcp:/udp: prefix) into a Destination
+// retaining the network of the primary dial target when unspecified.
+func destinationFromEndpoint(endpoint string, primary net.Destination) (net.Destination, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return net.Destination{}, errors.New("empty multi-endpoint")
+	}
+	// Bare hostname (no colon) inherits primary port so operators can list "cdn2.example.com".
+	if !strings.Contains(endpoint, ":") && primary.Port != 0 {
+		endpoint = endpoint + ":" + primary.Port.String()
+	}
+	d, err := net.ParseDestination(endpoint)
+	if err != nil {
+		// allow bare host:port without scheme
+		d, err = net.ParseDestination("tcp:" + endpoint)
+		if err != nil {
+			return net.Destination{}, err
+		}
+	}
+	if d.Network == net.Network_Unknown || d.Network == 0 {
+		d.Network = primary.Network
+	}
+	if primary.Network != 0 && d.Network == net.Network_TCP && primary.Network == net.Network_UDP {
+		// Keep primary network for H3/UDP when endpoint string omitted scheme.
+		if !strings.HasPrefix(strings.ToLower(endpoint), "udp:") && !strings.HasPrefix(strings.ToLower(endpoint), "tcp:") {
+			d.Network = primary.Network
+		}
+	}
+	if d.Port == 0 {
+		d.Port = primary.Port
+	}
+	return d, nil
+}
+
 func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStreamConfig) DialerClient {
 	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
@@ -318,9 +352,33 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		httpVersion:     httpVersion,
 	}
 
+	// Opt-in multi-endpoint race list (Wave-3). Default single dest unchanged.
+	var multiEndpoints []string
+	if transportCfg := streamSettings.ProtocolSettings.(*Config); transportCfg != nil {
+		if MultiEndpointEnabled(transportCfg.Headers) {
+			multiEndpoints = BuildEndpointList(dest.NetAddr(), ParseExtraEndpoints(transportCfg.Headers))
+		}
+	}
+
+	dialRawTCP := func(ctxInner context.Context, target net.Destination) (net.Conn, error) {
+		return internet.DialSystem(ctxInner, target, streamSettings.SocketSettings)
+	}
+
 	dialContext := func(ctxInner context.Context) (net.Conn, error) {
 		t0 := time.Now()
-		rawConn, err := internet.DialSystem(ctxInner, dest, streamSettings.SocketSettings)
+		var rawConn net.Conn
+		var err error
+		if len(multiEndpoints) > 1 {
+			rawConn, _, err = RaceDialEndpoints(ctxInner, multiEndpoints, func(ctx context.Context, endpoint string) (net.Conn, error) {
+				d, perr := destinationFromEndpoint(endpoint, dest)
+				if perr != nil {
+					return nil, perr
+				}
+				return dialRawTCP(ctx, d)
+			})
+		} else {
+			rawConn, err = dialRawTCP(ctxInner, dest)
+		}
 		tcpDur := time.Since(t0)
 		if err != nil {
 			errors.LogDebug(ctxInner, "XHTTP dial: TCP failed in ", tcpDur.Round(time.Millisecond), ": ", err)
@@ -666,17 +724,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		return nil, err
 	}
 
-	mode := ResolveInitialMode(transportConfiguration.Mode, realityConfig != nil, transportConfiguration.DownloadSettings != nil)
+	initialMode := ResolveInitialMode(transportConfiguration.Mode, realityConfig != nil, transportConfiguration.DownloadSettings != nil)
+	allowModeDegrade := ShouldAttemptModeDegrade(transportConfiguration.Mode, transportConfiguration.Headers)
+	modeCascade := BuildModeCascade(initialMode, allowModeDegrade)
 
-	sessionId := ""
-	if mode != "stream-one" {
-		sessionId = transportConfiguration.GenerateSessionID()
-	}
-
+	// Prepare optional download leg once (shared across mode cascade attempts).
 	requestURL2 := requestURL
 	httpClient2 := httpClient
 	xmuxClient2 := xmuxClient
-	if transportConfiguration.DownloadSettings != nil {
+	var dest2 net.Destination
+	hasDownload := transportConfiguration.DownloadSettings != nil
+	if hasDownload {
 		globalDialerAccess.Lock()
 		if streamSettings.DownloadSettings == nil {
 			streamSettings.DownloadSettings = common.Must2(internet.ToMemoryStreamConfig(transportConfiguration.DownloadSettings))
@@ -689,7 +747,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if memory2.Destination == nil {
 			return nil, errors.New("downloadSettings has nil Destination")
 		}
-		dest2 := *memory2.Destination
+		dest2 = *memory2.Destination
 		tlsConfig2 := tls.ConfigFromStreamSettings(memory2)
 		realityConfig2 := reality.ConfigFromStreamSettings(memory2)
 		httpVersion2 := decideHTTPVersion(tlsConfig2, realityConfig2)
@@ -720,219 +778,264 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		requestURL2.Path = config2.GetNormalizedPath()
 		requestURL2.RawQuery = config2.GetNormalizedQuery()
-		var err error
-		httpClient2, xmuxClient2, err = getHTTPClient(ctx, dest2, memory2)
-		if err != nil {
-			return nil, fmt.Errorf("XMUX: failed to get download client: %w", err)
+		var getErr error
+		httpClient2, xmuxClient2, getErr = getHTTPClient(ctx, dest2, memory2)
+		if getErr != nil {
+			return nil, fmt.Errorf("XMUX: failed to get download client: %w", getErr)
 		}
 	}
 
-	if xmuxClient != nil && !xmuxClient.Borrow() {
-		return nil, errors.New("failed to borrow XMUX client for upload")
-	}
-	if xmuxClient2 != nil && xmuxClient2 != xmuxClient && !xmuxClient2.Borrow() {
-		if xmuxClient != nil {
-			xmuxClient.Release()
+	// Wave-3: try mode cascade (stream-one -> stream-up -> packet-up) on open failure.
+	// Each attempt gets a fresh pipe so partial writes never cross modes.
+	var lastErr error
+	for mi, mode := range modeCascade {
+		sessionId := ""
+		if mode != "stream-one" {
+			sessionId = transportConfiguration.GenerateSessionID()
 		}
-		return nil, errors.New("failed to borrow XMUX client for download")
-	}
-	var closed atomic.Int32
-	// ownedUploadXmux is the XMUX slot currently charged to this logical conn's upload side.
-	// packet-up may rotate to a new client mid-session; onClose must Release the latest.
-	ownedUploadXmux := xmuxClient
-	var ownedUploadMu sync.Mutex
 
-	reader, writer := io.Pipe()
-	conn := splitConn{
-		writer: writer,
-		onClose: func() {
-			if closed.Add(1) > 1 {
-				return
+		if xmuxClient != nil && !xmuxClient.Borrow() {
+			return nil, errors.New("failed to borrow XMUX client for upload")
+		}
+		if xmuxClient2 != nil && xmuxClient2 != xmuxClient && !xmuxClient2.Borrow() {
+			if xmuxClient != nil {
+				xmuxClient.Release()
 			}
-			ownedUploadMu.Lock()
-			up := ownedUploadXmux
-			ownedUploadXmux = nil
-			ownedUploadMu.Unlock()
-			if up != nil {
-				up.Release()
-			}
-			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-				xmuxClient2.Release()
-			}
-		},
-	}
+			return nil, errors.New("failed to borrow XMUX client for download")
+		}
 
-	// Unified cleanup: close reader + conn on any error after pipe creation.
-	// conn.Close() triggers onClose which Releases borrowed XMUX clients.
-	cleanup := func() {
-		reader.Close()
-		conn.Close()
-	}
+		var closed atomic.Int32
+		// ownedUploadXmux is the XMUX slot currently charged to this logical conn's upload side.
+		// packet-up may rotate to a new client mid-session; onClose must Release the latest.
+		ownedUploadXmux := xmuxClient
+		var ownedUploadMu sync.Mutex
 
-	if mode == "stream-one" {
-		requestURL.Path = transportConfiguration.GetNormalizedPath()
+		reader, writer := io.Pipe()
+		conn := splitConn{
+			writer: writer,
+			onClose: func() {
+				if closed.Add(1) > 1 {
+					return
+				}
+				ownedUploadMu.Lock()
+				up := ownedUploadXmux
+				ownedUploadXmux = nil
+				ownedUploadMu.Unlock()
+				if up != nil {
+					up.Release()
+				}
+				if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
+					xmuxClient2.Release()
+				}
+			},
+		}
+
+		// Unified cleanup: close reader + conn on any error after pipe creation.
+		// conn.Close() triggers onClose which Releases borrowed XMUX clients.
+		cleanup := func() {
+			reader.Close()
+			conn.Close()
+		}
+
+		// tryMode opens streams for the current mode. Matches historical Dial semantics:
+		//   stream-one: single bi-directional OpenStream on primary
+		//   else: open download leg first (requestURL2/httpClient2; equals primary when no downloadSettings)
+		//   stream-up: then open upload-only stream on primary and finish
+		//   packet-up: continue with POST upload loop after download is open
+		tryMode := func() (established bool, contPacket bool, openErr error) {
+			if mode == "stream-one" {
+				requestURL.Path = transportConfiguration.GetNormalizedPath()
+				if xmuxClient != nil {
+					xmuxClient.LeftRequests.Add(-1)
+				}
+				var oerr error
+				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
+				if oerr != nil {
+					return false, false, oerr
+				}
+				return true, false, nil
+			}
+
+			// Non-stream-one: download leg first (httpClient2 may equal httpClient).
+			if xmuxClient2 != nil {
+				xmuxClient2.LeftRequests.Add(-1)
+			}
+			{
+				var oerr error
+				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
+				if oerr != nil {
+					return false, false, oerr
+				}
+			}
+
+			if mode == "stream-up" {
+				if xmuxClient != nil {
+					xmuxClient.LeftRequests.Add(-1)
+				}
+				var upErr error
+				_, _, _, upErr = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
+				if upErr != nil {
+					return false, false, upErr
+				}
+				return true, false, nil
+			}
+
+			// packet-up continues with POST loop
+			return false, true, nil
+		}
+
+		established, contPacket, openErr := tryMode()
+		if openErr != nil {
+			cleanup()
+			lastErr = openErr
+			if mi+1 < len(modeCascade) && IsDegradeEligibleError(openErr) {
+				errors.LogInfoInner(ctx, openErr, "XHTTP mode ", mode, " open failed; cascading to ", modeCascade[mi+1])
+				continue
+			}
+			return nil, openErr
+		}
+		if established {
+			return stat.Connection(&conn), nil
+		}
+		if !contPacket {
+			cleanup()
+			return nil, errors.New("XHTTP: unexpected mode open state")
+		}
+
+		// ---- packet-up path (success path for this attempt) ----
+		scMaxEachPostBytes := transportConfiguration.GetNormalizedScMaxEachPostBytes()
+		scMinPostsIntervalMs := transportConfiguration.GetNormalizedScMinPostsIntervalMs()
+
+		if scMaxEachPostBytes.From <= 0 {
+			cleanup()
+			return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
+		}
+
+		// Decrement LeftRequests once per Dial call (all modes).
+		// stream-one/stream-down/stream-up: decremented above.
+		// packet-up: decremented here.
 		if xmuxClient != nil {
 			xmuxClient.LeftRequests.Add(-1)
 		}
-		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
-		if err != nil {
-			cleanup()
-			return nil, err
+
+		maxUploadSize := scMaxEachPostBytes.rand()
+		uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(max(0, maxUploadSize-buf.Size)))
+
+		// Pre-compute URL string once to avoid per-packet allocation in upload loop.
+		requestURLStr := requestURL.String()
+
+		conn.writer = uploadWriter{
+			uploadPipeWriter,
+			maxUploadSize,
 		}
-		return stat.Connection(&conn), nil
-	} else { // stream-down
-		if xmuxClient2 != nil {
-			xmuxClient2.LeftRequests.Add(-1)
-		}
-		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
-		if err != nil {
-			cleanup()
-			return nil, err
-		}
-	}
-	if mode == "stream-up" {
-		if xmuxClient != nil {
-			xmuxClient.LeftRequests.Add(-1)
-		}
-		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
-		if err != nil {
-			cleanup()
-			return nil, err
-		}
-		return stat.Connection(&conn), nil
-	}
 
-	scMaxEachPostBytes := transportConfiguration.GetNormalizedScMaxEachPostBytes()
-	scMinPostsIntervalMs := transportConfiguration.GetNormalizedScMinPostsIntervalMs()
+		go func() {
+			var seq int64
+			var lastWrite time.Time
 
-	if scMaxEachPostBytes.From <= 0 {
-		cleanup()
-		return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
-	}
-
-	// Decrement LeftRequests once per Dial call (all modes).
-	// stream-one/stream-down/stream-up: decremented above.
-	// packet-up: decremented here.
-	if xmuxClient != nil {
-		xmuxClient.LeftRequests.Add(-1)
-	}
-
-	maxUploadSize := scMaxEachPostBytes.rand()
-	// WithSizeLimit(0) will still allow single bytes to pass, and a lot of
-	// code relies on this behavior. Subtract 1 so that together with
-	// uploadWriter wrapper, exact size limits can be enforced
-	// uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(maxUploadSize - 1))
-	uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(max(0, maxUploadSize-buf.Size)))
-
-	// Pre-compute URL string once to avoid per-packet allocation in upload loop.
-	requestURLStr := requestURL.String()
-
-	conn.writer = uploadWriter{
-		uploadPipeWriter,
-		maxUploadSize,
-	}
-
-	go func() {
-		var seq int64
-		var lastWrite time.Time
-
-		dynamicHTTPClient := httpClient
-		dynamicXmuxClient := xmuxClient
-		for {
-			// by offloading the uploads into a buffered pipe, multiple conn.Write
-			// calls get automatically batched together into larger POST requests.
-			// without batching, bandwidth is extremely limited.
-			remainder, err := uploadPipeReader.ReadMultiBuffer()
-			if err != nil {
-				break
-			}
-
-			doSplit := atomic.Bool{}
-			for doSplit.Store(true); doSplit.Load(); {
-				var chunk buf.MultiBuffer
-				remainder, chunk = buf.SplitSize(remainder, maxUploadSize)
-				if chunk.IsEmpty() {
+			dynamicHTTPClient := httpClient
+			dynamicXmuxClient := xmuxClient
+			for {
+				// by offloading the uploads into a buffered pipe, multiple conn.Write
+				// calls get automatically batched together into larger POST requests.
+				// without batching, bandwidth is extremely limited.
+				remainder, err := uploadPipeReader.ReadMultiBuffer()
+				if err != nil {
 					break
 				}
 
-				wroteRequest := done.New()
-
-				ctx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-					WroteRequest: func(httptrace.WroteRequestInfo) {
-						wroteRequest.Close()
-					},
-				})
-
-				seqStr := strconv.FormatInt(seq, 10)
-				seq += 1
-
-				if scMinPostsIntervalMs.From > 0 {
-					sleepDur := time.Duration(scMinPostsIntervalMs.rand())*time.Millisecond - time.Since(lastWrite)
-					if sleepDur > 0 {
-						select {
-						case <-time.After(sleepDur):
-						case <-ctx.Done():
-							return
-						}
+				doSplit := atomic.Bool{}
+				for doSplit.Store(true); doSplit.Load(); {
+					var chunk buf.MultiBuffer
+					remainder, chunk = buf.SplitSize(remainder, maxUploadSize)
+					if chunk.IsEmpty() {
+						break
 					}
-				}
 
-				lastWrite = time.Now()
+					wroteRequest := done.New()
 
-				if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Load() <= 0 ||
-					(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
-					oldClient := dynamicXmuxClient
-					newHTTP, newXmux, err := getHTTPClient(ctx, dest, streamSettings)
-					if err != nil {
-						errors.LogInfo(ctx, "XMUX: failed to renew upload client, keeping old: ", err)
-					} else if newXmux != nil && newXmux != oldClient {
-						if newXmux.Borrow() {
-							dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
-							// Atomically swap ownership so onClose Releases exactly one slot.
-							ownedUploadMu.Lock()
-							prev := ownedUploadXmux
-							if closed.Load() > 0 {
-								// Conn already closed: drop the newly borrowed slot.
-								ownedUploadMu.Unlock()
-								newXmux.Release()
-							} else {
-								ownedUploadXmux = newXmux
-								ownedUploadMu.Unlock()
-								if prev != nil {
-									prev.Release()
-								}
+					ctx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+						WroteRequest: func(httptrace.WroteRequestInfo) {
+							wroteRequest.Close()
+						},
+					})
+
+					seqStr := strconv.FormatInt(seq, 10)
+					seq += 1
+
+					if scMinPostsIntervalMs.From > 0 {
+						sleepDur := time.Duration(scMinPostsIntervalMs.rand())*time.Millisecond - time.Since(lastWrite)
+						if sleepDur > 0 {
+							select {
+							case <-time.After(sleepDur):
+							case <-ctx.Done():
+								return
 							}
 						}
-						// Borrow failed: keep using oldClient.
-					} else if newHTTP != nil {
-						dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
 					}
-				}
 
-				go func(hClient DialerClient) {
-					err := hClient.PostPacket(
-						ctx,
-						requestURLStr,
-						sessionId,
-						seqStr,
-						chunk,
-					)
-					wroteRequest.Close()
-					if err != nil {
-						errors.LogInfoInner(ctx, err, "failed to send upload")
-						uploadPipeReader.Interrupt()
-						doSplit.Store(false)
+					lastWrite = time.Now()
+
+					if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Load() <= 0 ||
+						(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
+						oldClient := dynamicXmuxClient
+						newHTTP, newXmux, err := getHTTPClient(ctx, dest, streamSettings)
+						if err != nil {
+							errors.LogInfo(ctx, "XMUX: failed to renew upload client, keeping old: ", err)
+						} else if newXmux != nil && newXmux != oldClient {
+							if newXmux.Borrow() {
+								dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
+								// Atomically swap ownership so onClose Releases exactly one slot.
+								ownedUploadMu.Lock()
+								prev := ownedUploadXmux
+								if closed.Load() > 0 {
+									// Conn already closed: drop the newly borrowed slot.
+									ownedUploadMu.Unlock()
+									newXmux.Release()
+								} else {
+									ownedUploadXmux = newXmux
+									ownedUploadMu.Unlock()
+									if prev != nil {
+										prev.Release()
+									}
+								}
+							}
+							// Borrow failed: keep using oldClient.
+						} else if newHTTP != nil {
+							dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
+						}
 					}
-				}(dynamicHTTPClient)
 
-				if _, ok := dynamicHTTPClient.(*DefaultDialerClient); ok {
-					<-wroteRequest.Wait()
+					go func(hClient DialerClient) {
+						err := hClient.PostPacket(
+							ctx,
+							requestURLStr,
+							sessionId,
+							seqStr,
+							chunk,
+						)
+						wroteRequest.Close()
+						if err != nil {
+							errors.LogInfoInner(ctx, err, "failed to send upload")
+							uploadPipeReader.Interrupt()
+							doSplit.Store(false)
+						}
+					}(dynamicHTTPClient)
+
+					if _, ok := dynamicHTTPClient.(*DefaultDialerClient); ok {
+						<-wroteRequest.Wait()
+					}
 				}
 			}
-		}
-	}()
+		}()
 
-	return stat.Connection(&conn), nil
+		return stat.Connection(&conn), nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("XHTTP: mode cascade exhausted")
 }
 
 // A wrapper around pipe that ensures the size limit is exactly honored.

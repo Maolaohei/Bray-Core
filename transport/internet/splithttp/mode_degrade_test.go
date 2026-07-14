@@ -1,6 +1,10 @@
 package splithttp
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
 func TestResolveInitialMode(t *testing.T) {
 	if got := ResolveInitialMode("", false, false); got != "packet-up" {
@@ -44,5 +48,32 @@ func TestModeDegradeOptIn(t *testing.T) {
 	}
 	if !ModeDegradeEnabled(map[string]string{"x-bray-mode-degrade": "1"}) {
 		t.Fatal("truthy header")
+	}
+}
+
+func TestBuildModeCascade(t *testing.T) {
+	got := BuildModeCascade("stream-one", false)
+	if len(got) != 1 || got[0] != "stream-one" {
+		t.Fatalf("no degrade: %v", got)
+	}
+	got = BuildModeCascade("stream-one", true)
+	if len(got) != 3 || got[0] != "stream-one" || got[1] != "stream-up" || got[2] != "packet-up" {
+		t.Fatalf("full ladder: %v", got)
+	}
+	got = BuildModeCascade("stream-up", true)
+	if len(got) != 2 || got[0] != "stream-up" || got[1] != "packet-up" {
+		t.Fatalf("partial ladder: %v", got)
+	}
+}
+
+func TestIsDegradeEligibleError(t *testing.T) {
+	if IsDegradeEligibleError(nil) {
+		t.Fatal("nil")
+	}
+	if IsDegradeEligibleError(context.Canceled) {
+		t.Fatal("canceled")
+	}
+	if !IsDegradeEligibleError(errors.New("edge 403 / reset")) {
+		t.Fatal("network-ish error should degrade")
 	}
 }

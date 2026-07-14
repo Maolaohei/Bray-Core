@@ -156,3 +156,26 @@ func RaceDialEndpoints(ctx context.Context, endpoints []string, dialFn MultiEndp
 	}
 	return nil, "", firstErr
 }
+
+// BuildEndpointList returns primary + extras (deduped, primary first).
+// primary may be empty; extras alone are still returned.
+func BuildEndpointList(primary string, extras []string) []string {
+	out := make([]string, 0, 1+len(extras))
+	seen := make(map[string]struct{}, 1+len(extras))
+	add := func(ep string) {
+		ep = strings.TrimSpace(ep)
+		if ep == "" {
+			return
+		}
+		if _, ok := seen[ep]; ok {
+			return
+		}
+		seen[ep] = struct{}{}
+		out = append(out, ep)
+	}
+	add(primary)
+	for _, ep := range extras {
+		add(ep)
+	}
+	return out
+}

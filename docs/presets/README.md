@@ -98,23 +98,54 @@ When edge rejects long bidirectional streams.
 }
 ```
 
-## Wave-2 recovery / CDN cascade (opt-in)
+## Wave-2 / Wave-3 recovery / CDN cascade (opt-in)
 
 | Feature | How to enable | Behavior |
 |---------|---------------|----------|
-| Mode degrade helpers | `mode: "auto"` or header `x-bray-mode-degrade: "true"` | Ladder stream-one → stream-up → packet-up |
-| Multi-endpoint race | header `x-bray-multi-endpoint: "true"` + `x-bray-endpoints: "a:443,b:443"` | Dual-path probe; first success wins |
-| REALITY soft demotion | server default | L2 fail → next handshake L1 (Suspect), not L0 |
+| Mode degrade (runtime) | `mode: "auto"` or header `x-bray-mode-degrade: "true"` | On open fail: stream-one -> stream-up -> packet-up |
+| Multi-endpoint race (runtime) | header `x-bray-multi-endpoint: "true"` + `x-bray-endpoints: "a:443,b:443"` | TCP dial races extras; first success wins |
+| REALITY soft demotion | server default | L2 fail -> next handshake L1 (Suspect), not L0 |
+| Control header isolation | automatic | `x-bray-*` never sent on wire |
 
-See `docs/bray-v2-wave2.md`.
+CDN stream-one with explicit degrade opt-in example (headers are client-local):
+
+```json
+{
+  "network": "xhttp",
+  "security": "tls",
+  "tlsSettings": {
+    "serverName": "cdn.example.com",
+    "fingerprint": "chrome",
+    "alpn": ["h2", "http/1.1"]
+  },
+  "xhttpSettings": {
+    "host": "cdn.example.com",
+    "path": "/assets/app/channel",
+    "mode": "stream-one",
+    "headers": {
+      "x-bray-mode-degrade": "true",
+      "x-bray-multi-endpoint": "true",
+      "x-bray-endpoints": "1.2.3.4:443,5.6.7.8:443"
+    },
+    "xPaddingBytes": "100-500",
+    "xmux": {
+      "maxConcurrency": { "from": 4, "to": 8 },
+      "maxConnections": { "from": 1, "to": 2 },
+      "hMaxReusableSecs": { "from": 300, "to": 600 }
+    }
+  }
+}
+```
+
+See `docs/bray-v2-wave2.md` and `docs/bray-v2-wave3.md`.
 
 ## Compatibility
 
 | Field omitted | Bray-V2 default behavior |
 |---------------|--------------------------|
-| `xmux` entirely | concurrency 8–16, connections 2–4, reuse 64–128, reusable 600–1200s |
+| `xmux` entirely | concurrency 8-16, connections 2-4, reuse 64-128, reusable 600-1200s |
 | explicit `xmux.*` | user values win |
-| REALITY server | L2 when eligible; shape/age gated; fail → quarantine → calibrate |
+| REALITY server | L2 when eligible; shape/age gated; fail -> quarantine -> calibrate |
 
 ## Observability
 

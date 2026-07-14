@@ -71,10 +71,20 @@ func (c *Config) GetNormalizedQuery() string {
 func (c *Config) GetRequestHeader() http.Header {
 	header := http.Header{}
 	for k, v := range c.Headers {
+		// Bray control headers (x-bray-*) are client-local only; never send on wire.
+		if isBrayControlHeader(k) {
+			continue
+		}
 		header.Add(k, v)
 	}
 	utils.TryDefaultHeadersWith(header, "fetch")
 	return header
+}
+
+// isBrayControlHeader reports client-local Bray-V2 control keys used for
+// opt-in features (mode degrade, multi-endpoint). They must not leave the process.
+func isBrayControlHeader(key string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "x-bray-")
 }
 
 func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
