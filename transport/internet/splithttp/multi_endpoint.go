@@ -1,7 +1,8 @@
-package splithttp
+﻿package splithttp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -14,6 +15,12 @@ var MultiEndpointRaceWindow = 50 * time.Millisecond
 
 // MultiEndpointProbeTimeout caps a single dual-path probe selection.
 var MultiEndpointProbeTimeout = 1500 * time.Millisecond
+
+// ErrNoMultiEndpoints is returned when RaceDialEndpoints is called with an empty list.
+var ErrNoMultiEndpoints = errors.New("xhttp: multi-endpoint race list is empty")
+
+// ErrNilMultiEndpointDial is returned when dialFn is nil.
+var ErrNilMultiEndpointDial = errors.New("xhttp: multi-endpoint dial function is nil")
 
 // MultiEndpointDialFunc dials one candidate endpoint.
 // Implementations should honor ctx cancellation.
@@ -72,16 +79,16 @@ func ParseExtraEndpoints(headers map[string]string) []string {
 
 // RaceDialEndpoints races dialFn across endpoints (primary first). The first
 // successful dial wins; losers are closed. If endpoints is empty/nil, returns
-// an error. If only one endpoint is provided, dials it directly without race.
+// ErrNoMultiEndpoints. If only one endpoint is provided, dials it directly without race.
 //
 // Compatibility: default single-dest dial path is unchanged; callers must pass
 // opt-in endpoints explicitly.
 func RaceDialEndpoints(ctx context.Context, endpoints []string, dialFn MultiEndpointDialFunc) (net.Conn, string, error) {
 	if len(endpoints) == 0 {
-		return nil, "", context.Canceled
+		return nil, "", ErrNoMultiEndpoints
 	}
 	if dialFn == nil {
-		return nil, "", context.Canceled
+		return nil, "", ErrNilMultiEndpointDial
 	}
 	if len(endpoints) == 1 {
 		c, err := dialFn(ctx, endpoints[0])

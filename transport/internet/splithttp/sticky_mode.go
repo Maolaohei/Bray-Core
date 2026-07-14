@@ -1,4 +1,4 @@
-package splithttp
+﻿package splithttp
 
 import (
 	"strings"
@@ -12,16 +12,24 @@ import (
 //
 // TTL-bounded so the ladder can re-probe after recovery. Opt-out via
 // headers["x-bray-sticky-mode"]=false|0|off|no. Default: enabled when cascade is allowed.
+//
+// Each entry stores its own TTL at remember time (from dial headers or default).
+// Headers never mutate process-global StickyModeTTL (Wave-7 review fix).
 
-// StickyModeTTL is how long a remembered mode is preferred.
+// StickyModeTTL is the default TTL when an entry has no per-entry TTL.
 var StickyModeTTL = 10 * time.Minute
 
 // StickyModeMaxEntries bounds the process-local sticky map.
 const StickyModeMaxEntries = 256
 
+// StickyModeFailInvalidateAfter consecutive failures of the sticky mode clear it.
+const StickyModeFailInvalidateAfter = 1
+
 type stickyEntry struct {
-	mode string
-	at   time.Time
+	mode     string
+	at       time.Time
+	ttl      time.Duration // 0 => use StickyModeTTL at lookup
+	failHits int
 }
 
 var (
@@ -58,6 +66,14 @@ func stickyDestKey(destNetAddr, host string) string {
 	return destNetAddr + "|" + strings.ToLower(host)
 }
 
+func stickyEntryExpired(e stickyEntry, now time.Time) bool {
+	ttl := e.ttl
+	if ttl <= 0 {
+		ttl = StickyModeTTL
+	}
+	return ttl > 0 && now.Sub(e.at) > ttl
+}
+
 // LookupStickyMode returns a non-expired sticky mode for key.
 func LookupStickyMode(key string) (string, bool) {
 	key = strings.TrimSpace(key)
@@ -71,24 +87,32 @@ func LookupStickyMode(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if StickyModeTTL > 0 && now.Sub(e.at) > StickyModeTTL {
+	if stickyEntryExpired(e, now) {
 		delete(stickyMode, key)
 		return "", false
 	}
 	return e.mode, e.mode != ""
 }
 
-// RememberStickyMode stores last-good mode for key.
+// RememberStickyMode stores last-good mode for key using default StickyModeTTL.
 func RememberStickyMode(key, mode string) {
+	RememberStickyModeTTL(key, mode, 0)
+}
+
+// RememberStickyModeTTL stores last-good mode with an optional per-entry TTL.
+// ttl<=0 means "use StickyModeTTL at lookup time".
+func RememberStickyModeTTL(key, mode string, ttl time.Duration) {
 	key = strings.TrimSpace(key)
 	mode = NormalizeXHTTPMode(mode)
 	if key == "" || mode == "" {
 		return
 	}
+	if ttl < 0 {
+		ttl = 0
+	}
 	stickyMu.Lock()
 	defer stickyMu.Unlock()
 	if len(stickyMode) >= StickyModeMaxEntries {
-		// Drop one arbitrary expired or oldest-ish entry (first map iteration).
 		var drop string
 		oldest := time.Now()
 		for k, e := range stickyMode {
@@ -101,8 +125,49 @@ func RememberStickyMode(key, mode string) {
 			delete(stickyMode, drop)
 		}
 	}
-	stickyMode[key] = stickyEntry{mode: mode, at: time.Now()}
+	stickyMode[key] = stickyEntry{mode: mode, at: time.Now(), ttl: ttl, failHits: 0}
 	recordStickyRemember()
+}
+
+// ForgetStickyMode removes sticky preference for key (if any).
+func ForgetStickyMode(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	stickyMu.Lock()
+	delete(stickyMode, key)
+	stickyMu.Unlock()
+}
+
+// NoteStickyModeFailure records a failure of attemptedMode for key.
+// When the sticky mode itself fails, the entry is cleared so the full
+// cascade can re-probe higher modes (Wave-7 review).
+func NoteStickyModeFailure(key, attemptedMode string) {
+	key = strings.TrimSpace(key)
+	attemptedMode = NormalizeXHTTPMode(attemptedMode)
+	if key == "" || attemptedMode == "" {
+		return
+	}
+	stickyMu.Lock()
+	defer stickyMu.Unlock()
+	e, ok := stickyMode[key]
+	if !ok {
+		return
+	}
+	if stickyEntryExpired(e, time.Now()) {
+		delete(stickyMode, key)
+		return
+	}
+	if NormalizeXHTTPMode(e.mode) != attemptedMode {
+		return
+	}
+	e.failHits++
+	if e.failHits >= StickyModeFailInvalidateAfter {
+		delete(stickyMode, key)
+		return
+	}
+	stickyMode[key] = e
 }
 
 // ApplyStickyMode reorders cascade to start at sticky when sticky is on the ladder.

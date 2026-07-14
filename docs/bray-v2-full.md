@@ -35,7 +35,18 @@ Client Dial
 | **4** | Intelligence | Sticky last-good mode; Bray-V2 metrics; adaptive XMUX open eviction; this overview |
 | **5** | Affinity + export | Sticky multi-endpoint winner; stats.Manager mirror; ep sticky metrics |
 | **6** | Safe ops glue | Auto stats mirror; sticky TTL headers; A/B rate helpers |
+| **7** | Review fixes | Cascade re-getHTTPClient after fatal open; LeftRequests only on success; sticky TTL per-entry (no globals); sticky fail invalidate; IPv6 multi-EP parse; empty multi-EP dedicated errors |
 
+## Wave-7 review fixes
+
+Post-review hardening on the mode cascade / sticky / multi-endpoint path (default behavior still safe):
+
+1. **P1 XMUX cascade**: on fatal open with more modes remaining, `MarkDead` + re-`getHTTPClient` before next mode (avoids Borrow-dead).
+2. **P1 LeftRequests**: decrement only after successful OpenStream / packet-up arming (failed cascade steps no longer burn quota).
+3. **P2 Sticky TTL**: `x-bray-sticky-*-ttl` apply per-entry at remember time; `ApplyStickyTTLFromHeaders` is a process-global no-op.
+4. **P2 Sticky fail**: `NoteStickyModeFailure` clears sticky when the sticky mode itself fails.
+5. **P2 IPv6 endpoints**: `destinationFromEndpoint` uses SplitHostPort; bare IPv6 inherits primary port.
+6. **P3 Multi-EP errors**: empty race list / nil dialFn return dedicated errors (not `context.Canceled`).
 ## Optimization matrix (compat / perf / risk)
 
 | Lever | Compat | Perf (good path) | Recovery value | Default |

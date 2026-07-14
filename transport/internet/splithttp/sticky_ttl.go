@@ -1,4 +1,4 @@
-package splithttp
+﻿package splithttp
 
 import (
 	"strconv"
@@ -48,25 +48,36 @@ func headerValueCI(headers map[string]string, name string) string {
 	return ""
 }
 
-// ApplyStickyTTLFromHeaders optionally overrides process-wide sticky TTLs from
-// client-local headers. Safe: only when valid positive duration is present.
+// StickyTTLFromHeaders returns optional per-dial sticky TTLs from client-local
+// headers. Zero means "use package default / entry default". Does NOT mutate
+// process-global StickyModeTTL / StickyEndpointTTL (Wave-7 review fix).
 //
 //	x-bray-sticky-mode-ttl: 10m | 30s | 15 (minutes)
 //	x-bray-sticky-endpoint-ttl: same
-//
-// Call once at dial setup (not per packet). Invalid values leave defaults.
-func ApplyStickyTTLFromHeaders(headers map[string]string) {
+func StickyTTLFromHeaders(headers map[string]string) (modeTTL, endpointTTL time.Duration) {
 	if headers == nil {
-		return
+		return 0, 0
 	}
 	if raw := headerValueCI(headers, "x-bray-sticky-mode-ttl"); raw != "" {
 		if d, ok := ParseStickyTTLDuration(raw); ok {
-			StickyModeTTL = d
+			modeTTL = d
 		}
 	}
 	if raw := headerValueCI(headers, "x-bray-sticky-endpoint-ttl"); raw != "" {
 		if d, ok := ParseStickyTTLDuration(raw); ok {
-			StickyEndpointTTL = d
+			endpointTTL = d
 		}
 	}
+	return modeTTL, endpointTTL
+}
+
+// ApplyStickyTTLFromHeaders is retained for compatibility with older call sites
+// and tests. It only reads headers and does not change process globals.
+// Prefer StickyTTLFromHeaders + Remember*TTL.
+//
+// Deprecated: no process-wide override; use StickyTTLFromHeaders.
+func ApplyStickyTTLFromHeaders(headers map[string]string) {
+	// Intentionally a no-op for process globals. Parsing still validated by
+	// StickyTTLFromHeaders at dial / remember sites.
+	_, _ = StickyTTLFromHeaders(headers)
 }

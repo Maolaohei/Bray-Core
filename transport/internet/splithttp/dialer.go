@@ -298,15 +298,49 @@ func decideHTTPVersion(tlsConfig *tls.Config, realityConfig *reality.Config) str
 
 // destinationFromEndpoint parses host:port (or tcp:/udp: prefix) into a Destination
 // retaining the network of the primary dial target when unspecified.
+//
+// IPv6-safe: uses SplitHostPort semantics. Bare hosts (no port) and bare/bracketed
+// IPv6 without a port inherit primary.Port. Prefer "[2001:db8::1]:443" form for
+// explicit IPv6 endpoints.
 func destinationFromEndpoint(endpoint string, primary net.Destination) (net.Destination, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return net.Destination{}, errors.New("empty multi-endpoint")
 	}
-	// Bare hostname (no colon) inherits primary port so operators can list "cdn2.example.com".
-	if !strings.Contains(endpoint, ":") && primary.Port != 0 {
-		endpoint = endpoint + ":" + primary.Port.String()
+
+	lower := strings.ToLower(endpoint)
+	hostport := endpoint
+	if strings.HasPrefix(lower, "tcp:") {
+		hostport = endpoint[4:]
+	} else if strings.HasPrefix(lower, "udp:") {
+		hostport = endpoint[4:]
 	}
+
+	// Bare hostname / bare IPv6 (no port) inherits primary port so operators can
+	// list "cdn2.example.com" or "[2001:db8::1]" without repeating the port.
+	if !strings.HasPrefix(lower, "unix:") {
+		if _, _, err := net.SplitHostPort(hostport); err != nil {
+			host := strings.TrimSpace(hostport)
+			host = strings.TrimPrefix(host, "[")
+			host = strings.TrimSuffix(host, "]")
+			if host != "" && primary.Port != 0 {
+				var hp string
+				if strings.Contains(host, ":") {
+					hp = "[" + host + "]:" + primary.Port.String()
+				} else {
+					hp = host + ":" + primary.Port.String()
+				}
+				if strings.HasPrefix(lower, "tcp:") {
+					endpoint = "tcp:" + hp
+				} else if strings.HasPrefix(lower, "udp:") {
+					endpoint = "udp:" + hp
+				} else {
+					endpoint = hp
+				}
+			}
+		}
+	}
+
 	d, err := net.ParseDestination(endpoint)
 	if err != nil {
 		// allow bare host:port without scheme
@@ -320,7 +354,8 @@ func destinationFromEndpoint(endpoint string, primary net.Destination) (net.Dest
 	}
 	if primary.Network != 0 && d.Network == net.Network_TCP && primary.Network == net.Network_UDP {
 		// Keep primary network for H3/UDP when endpoint string omitted scheme.
-		if !strings.HasPrefix(strings.ToLower(endpoint), "udp:") && !strings.HasPrefix(strings.ToLower(endpoint), "tcp:") {
+		elower := strings.ToLower(endpoint)
+		if !strings.HasPrefix(elower, "udp:") && !strings.HasPrefix(elower, "tcp:") {
 			d.Network = primary.Network
 		}
 	}
@@ -329,7 +364,6 @@ func destinationFromEndpoint(endpoint string, primary net.Destination) (net.Dest
 	}
 	return d, nil
 }
-
 func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStreamConfig) DialerClient {
 	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
@@ -413,7 +447,8 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			if err == nil {
 				recordMultiEndpointRace(winner != "" && winner != multiPrimaryEP)
 				if StickyEndpointEnabled(multiHeaders) && winner != "" {
-					RememberStickyEndpoint(multiStickyKey, winner)
+					_, epTTL := StickyTTLFromHeaders(multiHeaders)
+					RememberStickyEndpointTTL(multiStickyKey, winner, epTTL)
 				}
 			}
 		} else {
@@ -732,8 +767,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}
 
 	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
-	// Wave-6: optional sticky TTL override from client-local headers (no-op if absent).
-	ApplyStickyTTLFromHeaders(transportConfiguration.Headers)
+	// Wave-7: sticky TTL headers are per-entry at remember time (no process globals).
+	stickyModeTTL, _ := StickyTTLFromHeaders(transportConfiguration.Headers)
 	var requestURL url.URL
 
 	if tlsConfig != nil || realityConfig != nil {
@@ -901,21 +936,19 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		tryMode := func() (established bool, contPacket bool, openErr error) {
 			if mode == "stream-one" {
 				requestURL.Path = transportConfiguration.GetNormalizedPath()
-				if xmuxClient != nil {
-					xmuxClient.LeftRequests.Add(-1)
-				}
 				var oerr error
 				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
 				if oerr != nil {
 					return false, false, oerr
 				}
+				// Count LeftRequests only after a successful open (Wave-7).
+				if xmuxClient != nil {
+					xmuxClient.LeftRequests.Add(-1)
+				}
 				return true, false, nil
 			}
 
 			// Non-stream-one: download leg first (httpClient2 may equal httpClient).
-			if xmuxClient2 != nil {
-				xmuxClient2.LeftRequests.Add(-1)
-			}
 			{
 				var oerr error
 				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
@@ -923,20 +956,23 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					return false, false, oerr
 				}
 			}
+			if xmuxClient2 != nil {
+				xmuxClient2.LeftRequests.Add(-1)
+			}
 
 			if mode == "stream-up" {
-				if xmuxClient != nil {
-					xmuxClient.LeftRequests.Add(-1)
-				}
 				var upErr error
 				_, _, _, upErr = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
 				if upErr != nil {
 					return false, false, upErr
 				}
+				if xmuxClient != nil {
+					xmuxClient.LeftRequests.Add(-1)
+				}
 				return true, false, nil
 			}
 
-			// packet-up continues with POST loop
+			// packet-up continues with POST loop; primary LeftRequests decremented on packet path.
 			return false, true, nil
 		}
 
@@ -944,12 +980,42 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if openErr != nil {
 			cleanup()
 			lastErr = openErr
-			// Adaptive XMUX lite: drop broken sessions so next dial rotates.
-			MaybeEvictXmuxAfterOpenFailure(xmuxClient, openErr)
-			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-				MaybeEvictXmuxAfterOpenFailure(xmuxClient2, openErr)
+			// Sticky: clear affinity when the sticky mode itself fails (Wave-7).
+			if allowModeDegrade && StickyModeEnabled(transportConfiguration.Headers) {
+				NoteStickyModeFailure(stickyKey, mode)
 			}
-			if mi+1 < len(modeCascade) && IsDegradeEligibleError(openErr) {
+			hasMoreModes := mi+1 < len(modeCascade) && IsDegradeEligibleError(openErr)
+			// Fatal open + more modes: MarkDead and re-obtain clients so cascade
+			// does not Borrow a dead XMUX session (Wave-7 P1).
+			if ShouldRefreshXmuxBeforeCascade(openErr, hasMoreModes) {
+				MaybeEvictXmuxAfterOpenFailure(xmuxClient, openErr)
+				if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
+					MaybeEvictXmuxAfterOpenFailure(xmuxClient2, openErr)
+				}
+				if newHTTP, newXmux, gerr := getHTTPClient(ctx, dest, streamSettings); gerr == nil {
+					httpClient, xmuxClient = newHTTP, newXmux
+				} else {
+					errors.LogInfoInner(ctx, gerr, "XHTTP cascade: failed to refresh primary XMUX after fatal open")
+				}
+				if hasDownload {
+					memory2 := streamSettings.DownloadSettings
+					if newHTTP2, newXmux2, gerr2 := getHTTPClient(ctx, dest2, memory2); gerr2 == nil {
+						httpClient2, xmuxClient2 = newHTTP2, newXmux2
+					} else {
+						errors.LogInfoInner(ctx, gerr2, "XHTTP cascade: failed to refresh download XMUX after fatal open")
+					}
+				} else {
+					httpClient2, xmuxClient2 = httpClient, xmuxClient
+				}
+			} else if !hasMoreModes {
+				// Terminal failure: still drop broken sessions for the next Dial.
+				MaybeEvictXmuxAfterOpenFailure(xmuxClient, openErr)
+				if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
+					MaybeEvictXmuxAfterOpenFailure(xmuxClient2, openErr)
+				}
+			}
+			// Non-fatal CDN mode rejects: keep client; cascade reuses same transport.
+			if hasMoreModes {
 				recordModeCascadeStep()
 				errors.LogInfoInner(ctx, openErr, "XHTTP mode ", mode, " open failed; cascading to ", modeCascade[mi+1])
 				continue
@@ -959,7 +1025,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if established {
 			recordModeSuccess(mi > 0)
 			if allowModeDegrade && StickyModeEnabled(transportConfiguration.Headers) {
-				RememberStickyMode(stickyKey, mode)
+				RememberStickyModeTTL(stickyKey, mode, stickyModeTTL)
 			}
 			return stat.Connection(&conn), nil
 		}
@@ -1097,7 +1163,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 		recordModeSuccess(mi > 0)
 		if allowModeDegrade && StickyModeEnabled(transportConfiguration.Headers) {
-			RememberStickyMode(stickyKey, mode)
+			RememberStickyModeTTL(stickyKey, mode, stickyModeTTL)
 		}
 		return stat.Connection(&conn), nil
 	}

@@ -1,4 +1,4 @@
-package splithttp
+﻿package splithttp
 
 import (
 	"strings"
@@ -13,8 +13,9 @@ import (
 //
 // TTL-bounded; default ON when multi-endpoint is active.
 // Opt-out: headers["x-bray-sticky-endpoint"]=false|0|off|no.
+// Per-entry TTL is stored at remember time (no process-global header mutation).
 
-// StickyEndpointTTL is how long a remembered endpoint is preferred.
+// StickyEndpointTTL is the default TTL when an entry has no per-entry TTL.
 var StickyEndpointTTL = 10 * time.Minute
 
 // StickyEndpointMaxEntries bounds the process-local sticky endpoint map.
@@ -23,6 +24,7 @@ const StickyEndpointMaxEntries = 256
 type stickyEndpointEntry struct {
 	endpoint string
 	at       time.Time
+	ttl      time.Duration // 0 => use StickyEndpointTTL at lookup
 }
 
 var (
@@ -55,6 +57,14 @@ func stickyEndpointKey(primary, host string) string {
 	return stickyDestKey(primary, host)
 }
 
+func stickyEndpointExpired(e stickyEndpointEntry, now time.Time) bool {
+	ttl := e.ttl
+	if ttl <= 0 {
+		ttl = StickyEndpointTTL
+	}
+	return ttl > 0 && now.Sub(e.at) > ttl
+}
+
 // LookupStickyEndpoint returns a non-expired sticky endpoint for key.
 func LookupStickyEndpoint(key string) (string, bool) {
 	key = strings.TrimSpace(key)
@@ -68,19 +78,27 @@ func LookupStickyEndpoint(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if StickyEndpointTTL > 0 && now.Sub(e.at) > StickyEndpointTTL {
+	if stickyEndpointExpired(e, now) {
 		delete(stickyEP, key)
 		return "", false
 	}
 	return e.endpoint, e.endpoint != ""
 }
 
-// RememberStickyEndpoint stores last-good endpoint for key.
+// RememberStickyEndpoint stores last-good endpoint for key using default TTL.
 func RememberStickyEndpoint(key, endpoint string) {
+	RememberStickyEndpointTTL(key, endpoint, 0)
+}
+
+// RememberStickyEndpointTTL stores last-good endpoint with optional per-entry TTL.
+func RememberStickyEndpointTTL(key, endpoint string, ttl time.Duration) {
 	key = strings.TrimSpace(key)
 	endpoint = strings.TrimSpace(endpoint)
 	if key == "" || endpoint == "" {
 		return
+	}
+	if ttl < 0 {
+		ttl = 0
 	}
 	stickyEPMu.Lock()
 	defer stickyEPMu.Unlock()
@@ -97,8 +115,19 @@ func RememberStickyEndpoint(key, endpoint string) {
 			delete(stickyEP, drop)
 		}
 	}
-	stickyEP[key] = stickyEndpointEntry{endpoint: endpoint, at: time.Now()}
+	stickyEP[key] = stickyEndpointEntry{endpoint: endpoint, at: time.Now(), ttl: ttl}
 	recordEndpointStickyRemember()
+}
+
+// ForgetStickyEndpoint removes sticky preference for key (if any).
+func ForgetStickyEndpoint(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	stickyEPMu.Lock()
+	delete(stickyEP, key)
+	stickyEPMu.Unlock()
 }
 
 // ApplyStickyEndpoints reorders the race list so sticky is first when present.

@@ -46,8 +46,9 @@ func TestApplyStickyTTLFromHeaders(t *testing.T) {
 	StickyModeTTL = time.Hour
 	StickyEndpointTTL = time.Hour
 
+	// Wave-7: ApplyStickyTTLFromHeaders is a process-global no-op.
 	ApplyStickyTTLFromHeaders(nil)
-	if StickyModeTTL != time.Hour {
+	if StickyModeTTL != time.Hour || StickyEndpointTTL != time.Hour {
 		t.Fatal("nil headers must no-op")
 	}
 
@@ -55,14 +56,22 @@ func TestApplyStickyTTLFromHeaders(t *testing.T) {
 		"x-bray-sticky-mode-ttl":     "5m",
 		"X-Bray-Sticky-Endpoint-TTL": "2m",
 	})
-	if StickyModeTTL != 5*time.Minute || StickyEndpointTTL != 2*time.Minute {
-		t.Fatalf("got mode=%v ep=%v", StickyModeTTL, StickyEndpointTTL)
+	if StickyModeTTL != time.Hour || StickyEndpointTTL != time.Hour {
+		t.Fatalf("globals must stay default; got mode=%v ep=%v", StickyModeTTL, StickyEndpointTTL)
 	}
 
-	// invalid leaves previous
+	// invalid still no-op on globals
 	ApplyStickyTTLFromHeaders(map[string]string{"x-bray-sticky-mode-ttl": "bad"})
-	if StickyModeTTL != 5*time.Minute {
-		t.Fatal("invalid should keep previous")
+	if StickyModeTTL != time.Hour {
+		t.Fatal("invalid must not mutate globals")
+	}
+
+	modeTTL, epTTL := StickyTTLFromHeaders(map[string]string{
+		"x-bray-sticky-mode-ttl":     "5m",
+		"X-Bray-Sticky-Endpoint-TTL": "2m",
+	})
+	if modeTTL != 5*time.Minute || epTTL != 2*time.Minute {
+		t.Fatalf("StickyTTLFromHeaders mode=%v ep=%v", modeTTL, epTTL)
 	}
 }
 
