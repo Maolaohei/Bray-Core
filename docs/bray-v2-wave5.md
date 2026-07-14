@@ -1,6 +1,6 @@
 # Bray-V2 Wave-5
 
-Branch: `Bray-V2`
+Branch: `main` (landed from historical `Bray-V2`; legacy pre-V2 is `v1`)
 
 ## Scope (post full-body, compatibility-first)
 

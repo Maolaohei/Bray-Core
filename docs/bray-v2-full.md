@@ -1,8 +1,19 @@
 # Bray-V2 Full Body
 
-Branch: `Bray-V2`
+Branch: `main` (formerly feature branch `Bray-V2`; legacy line is `v1`)
 Audience: operators + core maintainers
 Principle: **compatibility first, performance second, recovery always opt-in or auto-safe**.
+
+## Branch policy (2026-07)
+
+| Branch | Role |
+|--------|------|
+| **`main`** | Current product line = Bray fully-hardened XHTTP + RA stack (Waves 1–7). Default clone/build/release target. |
+| **`v1`** | Frozen pre-V2 line (former `main` @ pre-promotion tip). Compatibility / rollback reference only. |
+| `Bray-V2` | Historical feature-branch name; tip was merged into `main`. Prefer `main`. |
+
+Release CI continues to build from `main`.
+
 
 ## What "full body" means
 

@@ -22,6 +22,35 @@ Bray-Core 是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的兼容增�
 
 ---
 
+
+## 分支策略
+
+| 分支 | 说明 |
+|------|------|
+| **`main`** | **当前默认主干** = Bray 完全体（原功能分支 `Bray-V2`，Wave 1–7）。克隆 / CI / 发版均以此为准。 |
+| **`v1`** | 升级前的旧主干快照（原 `main`），仅用于回滚与对比。 |
+
+```bash
+git clone https://github.com/Maolaohei/Bray-Core.git
+cd Bray-Core          # 默认已在 main（完全体）
+git checkout v1       # 仅当需要旧线行为时
+```
+
+详细能力见 [`docs/bray-v2-full.md`](docs/bray-v2-full.md) 与 [`docs/presets/README.md`](docs/presets/README.md)。
+
+## Bray 完全体（main）相对 v1 的要点
+
+在保持 VLESS / XHTTP / REALITY **协议与配置兼容** 的前提下，`main` 额外强化：
+
+| 能力 | 说明 |
+|------|------|
+| XMUX 浏览器默认 | 未配置 `xmux` 时使用 8–16 并发、2–4 连接、有界复用寿命（可显式写 0 恢复无限） |
+| Mode cascade | auto 等路径下 stream-one → stream-up → packet-up；失败可自愈 |
+| Sticky | 记住 last-good mode / multi-endpoint 赢家（TTL，可 opt-out） |
+| Multi-endpoint | 可选多落地竞速（`x-bray-multi-endpoint` + endpoints） |
+| 坏会话驱逐 | fatal open 时 MarkDead；cascade 时刷新 HTTP/XMUX client |
+| 可观测 | `bray-v2>>>` 指标与比率；控制头 `x-bray-*` 仅本地、不上线 |
+
 ## 主要能力
 
 ### REALITY（v0.5.5）

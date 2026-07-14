@@ -1,6 +1,6 @@
 # Bray-V2 Wave-2
 
-Branch: `Bray-V2`
+Branch: `main` (landed from historical `Bray-V2`; legacy pre-V2 is `v1`)
 
 ## Scope (recovery + multi-path lite, compatibility-first)
 

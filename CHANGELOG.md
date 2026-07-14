@@ -9,7 +9,16 @@
 
 ## [Unreleased]
 
+### 变更
+
+#### 分支：Bray 完全体并入 `main`（原 main → `v1`）
+
+- **`main`**：现为 Bray 完全体默认主干（历史功能分支 `Bray-V2`，Wave 1–7：XMUX 浏览器默认、mode cascade、sticky、multi-endpoint、指标与 review 修复等）。
+- **`v1`**：原 `main` 线冻结为回滚/对比分支（升级前基线）。
+- 文档：`docs/bray-v2-full.md`、`docs/presets/`、各 wave 说明中的 Branch 字段已改为指向 `main`。
+
 ### 修复
+
 
 #### XMUX 连接池 panic 修复（`GetXmuxClient` nil pointer dereference）
 
