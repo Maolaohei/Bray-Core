@@ -77,3 +77,28 @@ func Test_GetNormalizedPath(t *testing.T) {
 		})
 	}
 }
+
+func TestXmuxBrowserDefaults(t *testing.T) {
+	var m XmuxConfig
+	c := m.GetNormalizedMaxConcurrency()
+	if c.From != 8 || c.To != 16 {
+		t.Fatalf("concurrency default = {%d,%d}", c.From, c.To)
+	}
+	n := m.GetNormalizedMaxConnections()
+	if n.From != 2 || n.To != 4 {
+		t.Fatalf("connections default = {%d,%d}", n.From, n.To)
+	}
+	r := m.GetNormalizedCMaxReuseTimes()
+	if r.From != 64 || r.To != 128 {
+		t.Fatalf("reuse default = {%d,%d}", r.From, r.To)
+	}
+	s := m.GetNormalizedHMaxReusableSecs()
+	if s.From != 600 || s.To != 1200 {
+		t.Fatalf("reusable secs default = {%d,%d}", s.From, s.To)
+	}
+	// Explicit zero-range still honored when set.
+	m.MaxConcurrency = &RangeConfig{From: 0, To: 0}
+	if m.GetNormalizedMaxConcurrency().From != 0 || m.GetNormalizedMaxConcurrency().To != 0 {
+		t.Fatal("explicit zero concurrency must win")
+	}
+}

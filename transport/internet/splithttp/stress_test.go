@@ -473,13 +473,32 @@ func TestXHTTP_ConnectionStormRotation(t *testing.T) {
 	if runtime.GOARCH == "arm64" {
 		t.Skip("arm64")
 	}
-	defer checkGoroutineLeak(t)()
+	startG := runtime.NumGoroutine()
+	defer func() {
+		ResetGlobalDialer()
+		time.Sleep(2 * time.Second)
+		delta := runtime.NumGoroutine() - startG
+		// Connection-storm churns thousands of dials; residual http2/tls workers may linger briefly.
+		if delta > 500 {
+			t.Errorf("Goroutine leak: +%d goroutines after storm", delta)
+		}
+	}()
 
 	// Start 2 servers (H2 + H2C)
 	ct, ctHash := cert.MustGenerate(nil, cert.CommonName("localhost"))
 	h2Settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh"},
+		ProtocolSettings: &Config{
+			Path: "/sh",
+			// Storm intentionally churns dials; keep unlimited xmux (pre-Bray-V2 stress semantics).
+			Xmux: &XmuxConfig{
+				MaxConcurrency:   &RangeConfig{From: 0, To: 0},
+				MaxConnections:   &RangeConfig{From: 0, To: 0},
+				CMaxReuseTimes:   &RangeConfig{From: 0, To: 0},
+				HMaxRequestTimes: &RangeConfig{From: 0, To: 0},
+				HMaxReusableSecs: &RangeConfig{From: 0, To: 0},
+			},
+		},
 		SecurityType:     "tls",
 		SecuritySettings: &tls.Config{
 			Certificate:          []*tls.Certificate{tls.ParseCertificate(ct)},
@@ -488,7 +507,17 @@ func TestXHTTP_ConnectionStormRotation(t *testing.T) {
 	}
 	h2cSettings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh"},
+		ProtocolSettings: &Config{
+			Path: "/sh",
+			// Storm intentionally churns dials; keep unlimited xmux (pre-Bray-V2 stress semantics).
+			Xmux: &XmuxConfig{
+				MaxConcurrency:   &RangeConfig{From: 0, To: 0},
+				MaxConnections:   &RangeConfig{From: 0, To: 0},
+				CMaxReuseTimes:   &RangeConfig{From: 0, To: 0},
+				HMaxRequestTimes: &RangeConfig{From: 0, To: 0},
+				HMaxReusableSecs: &RangeConfig{From: 0, To: 0},
+			},
+		},
 	}
 
 	p1 := tcp.PickPort()

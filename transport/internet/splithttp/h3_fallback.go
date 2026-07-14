@@ -2,8 +2,10 @@ package splithttp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common/errors"
@@ -13,6 +15,48 @@ import (
 // Default 200ms per RFC 8305. Reduce for low-latency networks, increase for
 // congested UDP links where H3 may be slow.
 var H3RaceWindow = 200 * time.Millisecond
+
+// H3Cooldown is how long to skip H3 after an observed failure.
+var H3Cooldown = 30 * time.Minute
+
+// Package-level H3/H2 race metrics (process-wide, lock-free).
+var h3TransportMetrics struct {
+	H3Wins      atomic.Uint64
+	H2Fallbacks atomic.Uint64
+	H3Cooldowns atomic.Uint64
+	H3FailMarks atomic.Uint64
+	Races       atomic.Uint64
+	Failovers   atomic.Uint64
+}
+
+// H3MetricsSnapshot is a point-in-time view of H3 race stats.
+type H3MetricsSnapshot struct {
+	H3Wins      uint64
+	H2Fallbacks uint64
+	H3Cooldowns uint64
+	H3FailMarks uint64
+	Races       uint64
+	Failovers   uint64
+}
+
+// GetH3Metrics returns process-wide H3/H2 Happy Eyeballs counters.
+func GetH3Metrics() H3MetricsSnapshot {
+	return H3MetricsSnapshot{
+		H3Wins:      h3TransportMetrics.H3Wins.Load(),
+		H2Fallbacks: h3TransportMetrics.H2Fallbacks.Load(),
+		H3Cooldowns: h3TransportMetrics.H3Cooldowns.Load(),
+		H3FailMarks: h3TransportMetrics.H3FailMarks.Load(),
+		Races:       h3TransportMetrics.Races.Load(),
+		Failovers:   h3TransportMetrics.Failovers.Load(),
+	}
+}
+
+// H3MetricsReport returns a compact one-line summary for logs.
+func H3MetricsReport() string {
+	m := GetH3Metrics()
+	return fmt.Sprintf("H3 metrics: wins=%d h2_fallback=%d cooldowns=%d fail_marks=%d races=%d failovers=%d",
+		m.H3Wins, m.H2Fallbacks, m.H3Cooldowns, m.H3FailMarks, m.Races, m.Failovers)
+}
 
 // happyEyeballsTransport implements an H3→H2 dual-track transport with
 // Happy-Eyeballs-style racing on the first GET request:
@@ -47,11 +91,12 @@ func (t *happyEyeballsTransport) RoundTrip(req *http.Request) (*http.Response, e
 		t.mu.Unlock()
 		return active.RoundTrip(req)
 	}
-	h3Failed := !t.h3FailedAt.IsZero() && time.Since(t.h3FailedAt) < 30*time.Minute
+	h3Failed := !t.h3FailedAt.IsZero() && time.Since(t.h3FailedAt) < H3Cooldown
 	t.mu.Unlock()
 
 	// If H3 has been observed to fail within the recovery window, skip it.
 	if h3Failed {
+		h3TransportMetrics.H3Cooldowns.Add(1)
 		t.settle(t.h2)
 		return t.h2.RoundTrip(req)
 	}
@@ -71,6 +116,7 @@ type raceResult struct {
 }
 
 func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error) {
+	h3TransportMetrics.Races.Add(1)
 	h3Ch := make(chan raceResult, 1)
 	h2Ch := make(chan raceResult, 1)
 	ctx := req.Context()
@@ -154,6 +200,7 @@ func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error)
 // write. Replaying it on H2 would silently upload a truncated payload.
 // Only GetBody (or a nil body) allows a correct fallback.
 func (t *happyEyeballsTransport) failover(req *http.Request) (*http.Response, error) {
+	h3TransportMetrics.Failovers.Add(1)
 	resp, err := t.h3.RoundTrip(req)
 	if err == nil {
 		t.settle(t.h3)
@@ -206,6 +253,11 @@ func (t *happyEyeballsTransport) settle(transport http.RoundTripper) {
 	if !t.settled {
 		t.active = transport
 		t.settled = true
+		if transport == t.h3 {
+			h3TransportMetrics.H3Wins.Add(1)
+		} else if transport == t.h2 {
+			h3TransportMetrics.H2Fallbacks.Add(1)
+		}
 	}
 }
 
@@ -213,6 +265,7 @@ func (t *happyEyeballsTransport) setH3Failed() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.h3FailedAt = time.Now()
+	h3TransportMetrics.H3FailMarks.Add(1)
 }
 
 // Close shuts down both H3 and H2 transports.

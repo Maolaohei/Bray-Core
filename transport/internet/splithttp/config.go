@@ -25,6 +25,11 @@ var (
 	defaultRangeConfigUplinkChunkCookie = &RangeConfig{From: 2 * 1024, To: 3 * 1024}
 	defaultRangeConfigUplinkChunkHeader = &RangeConfig{From: 3 * 1000, To: 4 * 1000}
 	defaultRangeConfigZero              = &RangeConfig{From: 0, To: 0}
+	defaultRangeConfigXmuxMaxConcurrency = &RangeConfig{From: 8, To: 16}  // browser-like stream concurrency
+	defaultRangeConfigXmuxMaxConnections = &RangeConfig{From: 2, To: 4}   // small connection pool
+	defaultRangeConfigXmuxCMaxReuseTimes  = &RangeConfig{From: 64, To: 128} // rotate before endless reuse
+	defaultRangeConfigXmuxHMaxRequestTimes = &RangeConfig{From: 400, To: 800}
+	defaultRangeConfigXmuxHMaxReusableSecs = &RangeConfig{From: 600, To: 1200} // 10-20 min lifecycle
 )
 
 func (c *Config) GetNormalizedPath() string {
@@ -438,7 +443,7 @@ func (c *Config) ExtractMetaFromRequest(req *http.Request, path string) (session
 
 func (m *XmuxConfig) GetNormalizedMaxConcurrency() *RangeConfig {
 	if m.MaxConcurrency == nil {
-		return defaultRangeConfigZero
+		return defaultRangeConfigXmuxMaxConcurrency
 	}
 
 	return m.MaxConcurrency
@@ -446,7 +451,7 @@ func (m *XmuxConfig) GetNormalizedMaxConcurrency() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedMaxConnections() *RangeConfig {
 	if m.MaxConnections == nil {
-		return defaultRangeConfigZero
+		return defaultRangeConfigXmuxMaxConnections
 	}
 
 	return m.MaxConnections
@@ -454,7 +459,7 @@ func (m *XmuxConfig) GetNormalizedMaxConnections() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedCMaxReuseTimes() *RangeConfig {
 	if m.CMaxReuseTimes == nil {
-		return defaultRangeConfigZero
+		return defaultRangeConfigXmuxCMaxReuseTimes
 	}
 
 	return m.CMaxReuseTimes
@@ -462,7 +467,7 @@ func (m *XmuxConfig) GetNormalizedCMaxReuseTimes() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedHMaxRequestTimes() *RangeConfig {
 	if m.HMaxRequestTimes == nil {
-		return defaultRangeConfigZero
+		return defaultRangeConfigXmuxHMaxRequestTimes
 	}
 
 	return m.HMaxRequestTimes
@@ -470,7 +475,7 @@ func (m *XmuxConfig) GetNormalizedHMaxRequestTimes() *RangeConfig {
 
 func (m *XmuxConfig) GetNormalizedHMaxReusableSecs() *RangeConfig {
 	if m.HMaxReusableSecs == nil {
-		return defaultRangeConfigZero
+		return defaultRangeConfigXmuxHMaxReusableSecs
 	}
 
 	return m.HMaxReusableSecs

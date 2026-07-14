@@ -604,7 +604,7 @@ const (
 	// maxConnectionAge is the maximum lifetime of a connection before it is drained.
 	// Prevents stale state accumulation from NAT/LB changes, server rotation, and TLS session staleness.
 	// Connections with active streams will finish their work before closing.
-	maxConnectionAge = 30 * time.Minute
+	maxConnectionAge = 20 * time.Minute
 )
 
 // healthCheckLoop periodically checks connection health and removes unhealthy ones.
