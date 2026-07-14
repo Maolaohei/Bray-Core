@@ -666,16 +666,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		return nil, err
 	}
 
-	mode := transportConfiguration.Mode
-	if mode == "" || mode == "auto" {
-		mode = "packet-up"
-		if realityConfig != nil {
-			mode = "stream-one"
-			if transportConfiguration.DownloadSettings != nil {
-				mode = "stream-up"
-			}
-		}
-	}
+	mode := ResolveInitialMode(transportConfiguration.Mode, realityConfig != nil, transportConfiguration.DownloadSettings != nil)
 
 	sessionId := ""
 	if mode != "stream-one" {

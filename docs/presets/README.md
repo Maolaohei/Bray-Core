@@ -1,4 +1,4 @@
-﻿# Bray-V2 Wave-1 Transport Presets
+# Bray-V2 Wave-1 Transport Presets
 
 Zero-config defaults remain compatible with Xray configs. These presets are
 **recommended starting points** for operators; copy fields into your existing
@@ -98,6 +98,16 @@ When edge rejects long bidirectional streams.
 }
 ```
 
+## Wave-2 recovery / CDN cascade (opt-in)
+
+| Feature | How to enable | Behavior |
+|---------|---------------|----------|
+| Mode degrade helpers | `mode: "auto"` or header `x-bray-mode-degrade: "true"` | Ladder stream-one → stream-up → packet-up |
+| Multi-endpoint race | header `x-bray-multi-endpoint: "true"` + `x-bray-endpoints: "a:443,b:443"` | Dual-path probe; first success wins |
+| REALITY soft demotion | server default | L2 fail → next handshake L1 (Suspect), not L0 |
+
+See `docs/bray-v2-wave2.md`.
+
 ## Compatibility
 
 | Field omitted | Bray-V2 default behavior |
@@ -108,6 +118,6 @@ When edge rejects long bidirectional streams.
 
 ## Observability
 
-- REALITY: `CacheReport()` includes L1/L2 hits, L2 fails, quarantines, calibrations
+- REALITY: `CacheReport()` includes L1/L2 hits, L2 fails, L1 fails, L2 soft demotions, quarantines, calibrations
 - XHTTP H3 race: `GetH3Metrics()` / `H3MetricsReport()`
 - XMUX: existing `XmuxManager.GetMetrics()` / `LogMetrics()`

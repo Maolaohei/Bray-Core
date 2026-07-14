@@ -1,0 +1,158 @@
+package splithttp
+
+import (
+	"context"
+	"net"
+	"strings"
+	"sync"
+	"time"
+)
+
+// MultiEndpointRaceWindow is the head-start style window between racing dials.
+// Kept short to bound extra connection pressure.
+var MultiEndpointRaceWindow = 50 * time.Millisecond
+
+// MultiEndpointProbeTimeout caps a single dual-path probe selection.
+var MultiEndpointProbeTimeout = 1500 * time.Millisecond
+
+// MultiEndpointDialFunc dials one candidate endpoint.
+// Implementations should honor ctx cancellation.
+type MultiEndpointDialFunc func(ctx context.Context, endpoint string) (net.Conn, error)
+
+// MultiEndpointEnabled is opt-in via headers["x-bray-multi-endpoint"]=true/1/on/yes.
+func MultiEndpointEnabled(headers map[string]string) bool {
+	if headers == nil {
+		return false
+	}
+	for k, v := range headers {
+		if strings.EqualFold(k, "x-bray-multi-endpoint") {
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "1", "true", "yes", "on":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ParseExtraEndpoints reads comma/space-separated endpoints from
+// headers["x-bray-endpoints"]. Empty values are ignored.
+func ParseExtraEndpoints(headers map[string]string) []string {
+	if headers == nil {
+		return nil
+	}
+	var raw string
+	for k, v := range headers {
+		if strings.EqualFold(k, "x-bray-endpoints") {
+			raw = v
+			break
+		}
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == ';' || r == '\n' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+// RaceDialEndpoints races dialFn across endpoints (primary first). The first
+// successful dial wins; losers are closed. If endpoints is empty/nil, returns
+// an error. If only one endpoint is provided, dials it directly without race.
+//
+// Compatibility: default single-dest dial path is unchanged; callers must pass
+// opt-in endpoints explicitly.
+func RaceDialEndpoints(ctx context.Context, endpoints []string, dialFn MultiEndpointDialFunc) (net.Conn, string, error) {
+	if len(endpoints) == 0 {
+		return nil, "", context.Canceled
+	}
+	if dialFn == nil {
+		return nil, "", context.Canceled
+	}
+	if len(endpoints) == 1 {
+		c, err := dialFn(ctx, endpoints[0])
+		return c, endpoints[0], err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, MultiEndpointProbeTimeout)
+	defer cancel()
+
+	type result struct {
+		conn net.Conn
+		ep   string
+		err  error
+	}
+	ch := make(chan result, len(endpoints))
+	var wg sync.WaitGroup
+
+	for i, ep := range endpoints {
+		i, ep := i, ep
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i > 0 {
+				timer := time.NewTimer(time.Duration(i) * MultiEndpointRaceWindow)
+				defer timer.Stop()
+				select {
+				case <-ctx.Done():
+					return
+				case <-timer.C:
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			c, err := dialFn(ctx, ep)
+			select {
+			case ch <- result{conn: c, ep: ep, err: err}:
+			default:
+				if c != nil {
+					_ = c.Close()
+				}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	var firstErr error
+	for r := range ch {
+		if r.err == nil && r.conn != nil {
+			go func(winner string) {
+				for late := range ch {
+					if late.conn != nil && late.ep != winner {
+						_ = late.conn.Close()
+					}
+				}
+			}(r.ep)
+			return r.conn, r.ep, nil
+		}
+		if firstErr == nil && r.err != nil {
+			firstErr = r.err
+		}
+	}
+	if firstErr == nil {
+		firstErr = ctx.Err()
+	}
+	if firstErr == nil {
+		firstErr = context.DeadlineExceeded
+	}
+	return nil, "", firstErr
+}

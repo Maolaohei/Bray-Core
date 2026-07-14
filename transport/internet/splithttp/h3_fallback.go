@@ -95,9 +95,15 @@ func (t *happyEyeballsTransport) RoundTrip(req *http.Request) (*http.Response, e
 	t.mu.Unlock()
 
 	// If H3 has been observed to fail within the recovery window, skip it.
+	// Cooldown is its own metric; do not also count as a first-time H2 fallback settle.
 	if h3Failed {
 		h3TransportMetrics.H3Cooldowns.Add(1)
-		t.settle(t.h2)
+		t.mu.Lock()
+		if !t.settled {
+			t.active = t.h2
+			t.settled = true
+		}
+		t.mu.Unlock()
 		return t.h2.RoundTrip(req)
 	}
 
