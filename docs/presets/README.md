@@ -107,6 +107,8 @@ When edge rejects long bidirectional streams.
 | REALITY soft demotion | server default | L2 fail -> next handshake L1 (Suspect), not L0 |
 | Control header isolation | automatic | `x-bray-*` never sent on wire |
 | Sticky last-good mode | default on when cascade allowed; `x-bray-sticky-mode: "false"` to opt out | Prefer last successful mode (TTL) |
+| Sticky multi-endpoint | default on when multi-endpoint on; `x-bray-sticky-endpoint: "false"` to opt out | Prefer last winning IP/host first (TTL) |
+| Bray stats publish | code: `PublishBrayV2MetricsToStats(sm)` or Bind+PublishBound | Mirror atomics into `bray-v2>>>...` counters |
 
 CDN stream-one with explicit degrade opt-in example (headers are client-local):
 
@@ -127,7 +129,8 @@ CDN stream-one with explicit degrade opt-in example (headers are client-local):
       "x-bray-mode-degrade": "true",
       "x-bray-multi-endpoint": "true",
       "x-bray-endpoints": "1.2.3.4:443,5.6.7.8:443",
-      "x-bray-sticky-mode": "true"
+      "x-bray-sticky-mode": "true",
+      "x-bray-sticky-endpoint": "true"
     },
     "xPaddingBytes": "100-500",
     "xmux": {
@@ -139,7 +142,7 @@ CDN stream-one with explicit degrade opt-in example (headers are client-local):
 }
 ```
 
-See `docs/bray-v2-wave2.md`, `docs/bray-v2-wave3.md`, `docs/bray-v2-wave4.md`, and full-body `docs/bray-v2-full.md`.
+See `docs/bray-v2-wave2.md`, `docs/bray-v2-wave3.md`, `docs/bray-v2-wave4.md`, `docs/bray-v2-wave5.md`, and full-body `docs/bray-v2-full.md`.
 
 ## Compatibility
 

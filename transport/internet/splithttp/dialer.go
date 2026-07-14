@@ -353,12 +353,34 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 	}
 
 	// Opt-in multi-endpoint race list (Wave-3). Default single dest unchanged.
+	// Wave-5: sticky last-good endpoint reorders the race list per dial (TTL).
 	var multiEndpoints []string
+	var multiHeaders map[string]string
 	if transportCfg := streamSettings.ProtocolSettings.(*Config); transportCfg != nil {
+		multiHeaders = transportCfg.Headers
 		if MultiEndpointEnabled(transportCfg.Headers) {
 			multiEndpoints = BuildEndpointList(dest.NetAddr(), ParseExtraEndpoints(transportCfg.Headers))
 		}
 	}
+	// Host/SNI for endpoint sticky key (aligned with mode sticky dest|host).
+	stickyEPHost := ""
+	if transportConfig != nil {
+		stickyEPHost = transportConfig.Host
+	}
+	if stickyEPHost == "" && tlsConfig != nil {
+		stickyEPHost = tlsConfig.ServerName
+	}
+	if stickyEPHost == "" && realityConfig != nil {
+		stickyEPHost = realityConfig.ServerName
+	}
+	if stickyEPHost == "" {
+		stickyEPHost = dest.ServerName()
+	}
+	multiPrimaryEP := ""
+	if len(multiEndpoints) > 0 {
+		multiPrimaryEP = multiEndpoints[0]
+	}
+	multiStickyKey := stickyEndpointKey(dest.NetAddr(), stickyEPHost)
 
 	dialRawTCP := func(ctxInner context.Context, target net.Destination) (net.Conn, error) {
 		return internet.DialSystem(ctxInner, target, streamSettings.SocketSettings)
@@ -369,8 +391,19 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		var rawConn net.Conn
 		var err error
 		if len(multiEndpoints) > 1 {
+			raceList := multiEndpoints
+			if StickyEndpointEnabled(multiHeaders) {
+				if se, ok := LookupStickyEndpoint(multiStickyKey); ok {
+					reordered := ApplyStickyEndpoints(raceList, se)
+					if len(reordered) > 0 && reordered[0] != raceList[0] {
+						recordEndpointStickyHit()
+						errors.LogDebug(ctxInner, "XHTTP sticky endpoint: prefer ", reordered[0], " for ", multiStickyKey)
+					}
+					raceList = reordered
+				}
+			}
 			var winner string
-			rawConn, winner, err = RaceDialEndpoints(ctxInner, multiEndpoints, func(ctx context.Context, endpoint string) (net.Conn, error) {
+			rawConn, winner, err = RaceDialEndpoints(ctxInner, raceList, func(ctx context.Context, endpoint string) (net.Conn, error) {
 				d, perr := destinationFromEndpoint(endpoint, dest)
 				if perr != nil {
 					return nil, perr
@@ -378,8 +411,10 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 				return dialRawTCP(ctx, d)
 			})
 			if err == nil {
-				primaryEP := multiEndpoints[0]
-				recordMultiEndpointRace(winner != "" && winner != primaryEP)
+				recordMultiEndpointRace(winner != "" && winner != multiPrimaryEP)
+				if StickyEndpointEnabled(multiHeaders) && winner != "" {
+					RememberStickyEndpoint(multiStickyKey, winner)
+				}
 			}
 		} else {
 			rawConn, err = dialRawTCP(ctxInner, dest)

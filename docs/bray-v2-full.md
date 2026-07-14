@@ -17,7 +17,7 @@ Bray-V2 is not a new protocol. It is a **hardened stack** on XHTTP + REALITY Amo
 
 ```
 Client Dial
-  |- Multi-endpoint race (opt-in) ---- TCP candidates
+  |- Multi-endpoint race + sticky EP - TCP candidates
   |- REALITY UClient ------------------ L2 amortize / Suspect soft L1 / quarantine
   |- HTTP/2 or H3 Happy-Eyeballs ------ H3 prefer, H2 fallback, cooldown metrics
   |- XMUX pool ------------------------ browser defaults, probe, fast eviction
@@ -33,6 +33,7 @@ Client Dial
 | **2** | Recovery helpers | REALITY Suspect soft demotion (L2 fail -> next HS L1); mode ladder helpers; multi-endpoint race helper; H3 cooldown metric fix |
 | **3** | Runtime wiring | Dial mode cascade; multi-endpoint in TCP dial; strip `x-bray-*` |
 | **4** | Intelligence | Sticky last-good mode; Bray-V2 metrics; adaptive XMUX open eviction; this overview |
+| **5** | Affinity + export | Sticky multi-endpoint winner; stats.Manager mirror; ep sticky metrics |
 
 ## Optimization matrix (compat / perf / risk)
 
@@ -45,6 +46,8 @@ Client Dial
 | Mode cascade (explicit) | high | zero unless header | high | opt-in header |
 | Sticky mode | high | fewer failed opens | high | on when cascade |
 | Multi-endpoint race | high | first-win latency | medium | opt-in headers |
+| Sticky endpoint | high | fewer race staggers | medium | on when multi |
+| Stats metrics publish | high | zero unless polled | low | opt-in API |
 | H3 Happy Eyeballs | high | H3 win latency | medium | when ALPN h3 |
 | XMUX fatal open evict | high | faster rotate | medium | on |
 | Control header strip | critical | n/a | fingerprint | always |
@@ -68,7 +71,8 @@ See `docs/presets/README.md`.
 | `x-bray-mode-degrade` | 2/3 | Allow cascade for explicit modes |
 | `x-bray-multi-endpoint` | 2/3 | Enable endpoint race |
 | `x-bray-endpoints` | 2/3 | Extra `host:port` list |
-| `x-bray-sticky-mode` | 4 | Opt-out sticky (`false`) |
+| `x-bray-sticky-mode` | 4 | Opt-out mode sticky (`false`) |
+| `x-bray-sticky-endpoint` | 5 | Opt-out endpoint sticky (`false`) when multi-endpoint on |
 
 Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
 
@@ -79,7 +83,8 @@ Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
 | `reality.CacheReport()` | L1/L2 hits, fails, soft demotions, quarantine, calibrate |
 | `GetH3Metrics()` / `H3MetricsReport()` | H3 wins, H2 fallback, cooldown, races |
 | `XmuxManager.GetMetrics()` | reuse, TTFB, net recovery |
-| `GetBrayV2Metrics()` / `BrayV2MetricsReport()` | cascade, sticky, multi, xmux evict |
+| `GetBrayV2Metrics()` / `BrayV2MetricsReport()` | cascade, sticky mode/endpoint, multi, xmux evict |
+| `PublishBrayV2MetricsToStats(m)` | optional stats.Manager absolute mirror (`bray-v2>>>...`) |
 
 ## Threat model notes (GFW / CDN)
 
@@ -91,7 +96,7 @@ Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
 | L2 fingerprint / mismatch | Suspect soft demote to L1 next HS |
 | Repeated L2 fails | quarantine + calibrate ladder (Wave-1/2) |
 | H3 blocked | Happy Eyeballs -> H2 + cooldown |
-| Single IP scrubbed | multi-endpoint race (opt-in) |
+| Single IP scrubbed | multi-endpoint race + sticky winner (opt-in) |
 
 ## What we deliberately do NOT do
 
@@ -105,16 +110,15 @@ Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
 
 ```
 go build ./transport/internet/splithttp/ ./transport/internet/reality/ ./REALITY/
-go test -count=1 -timeout 120s ./transport/internet/splithttp/ -run "TestH3|TestResolve|TestNext|TestMode|TestMulti|TestRace|TestBuild|TestIsDegrade|TestOpenStream|TestDestination|TestBray|TestXmux|TestApply|TestSticky|TestIsFatal"
+go test -count=1 -timeout 120s ./transport/internet/splithttp/ -run "TestH3|TestResolve|TestNext|TestMode|TestMulti|TestRace|TestBuild|TestIsDegrade|TestOpenStream|TestDestination|TestBray|TestXmux|TestApply|TestSticky|TestIsFatal|TestPublish"
 ```
 
-## Future (post full-body)
+## Future (post Wave-5)
 
 1. Dual-stack / multi-SNI policy OS (uses existing HappyEyeballsConfig)
-2. Sticky multi-endpoint winner (IP affinity with TTL)
-3. Export Bray metrics via stats API / gRPC
-4. Client REALITY path hint -> XHTTP initial mode
-5. Field A/B: sticky TTL and cascade success rates
+2. Client REALITY path hint -> XHTTP initial mode
+3. Field A/B: sticky TTL and cascade success rates
+4. Optional gRPC/API polling wrapper over PublishBrayV2MetricsToStats
 
 ## Doc index
 
@@ -122,5 +126,6 @@ go test -count=1 -timeout 120s ./transport/internet/splithttp/ -run "TestH3|Test
 - `docs/bray-v2-wave2.md`
 - `docs/bray-v2-wave3.md`
 - `docs/bray-v2-wave4.md`
+- `docs/bray-v2-wave5.md`
 - `docs/bray-v2-full.md` (this file)
 - `docs/presets/README.md`
