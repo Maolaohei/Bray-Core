@@ -94,7 +94,19 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 		h.Write(pub)
 		if hmac.Equal(h.Sum(nil), certs[0].Signature) {
 			if len(c.Config.Mldsa65Verify) > 0 {
-				if len(certs[0].Extensions) > 0 {
+				// Prefer REALITY auth OID extension; fall back to Extensions[0] for legacy servers.
+				var mldsaSig []byte
+				realityOID := []int{1, 3, 6, 1, 4, 1, 20226, 1, 1}
+				for _, e := range certs[0].Extensions {
+					if e.Id.Equal(realityOID) && len(e.Value) > 0 {
+						mldsaSig = e.Value
+						break
+					}
+				}
+				if len(mldsaSig) == 0 && len(certs[0].Extensions) > 0 {
+					mldsaSig = certs[0].Extensions[0].Value
+				}
+				if len(mldsaSig) > 0 {
 					h.Write(c.HandshakeState.Hello.Raw)
 					h.Write(c.HandshakeState.ServerHello.Raw)
 					verify, err := mldsa65.Scheme().UnmarshalBinaryPublicKey(c.Config.Mldsa65Verify)
@@ -105,7 +117,7 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 					if !ok {
 						return errors.New("REALITY: unexpected ML-DSA-65 public key type")
 					}
-					if mldsa65.Verify(pubKey, h.Sum(nil), nil, certs[0].Extensions[0].Value) {
+					if mldsa65.Verify(pubKey, h.Sum(nil), nil, mldsaSig) {
 						c.Verified = true
 						return nil
 					}
@@ -388,7 +400,7 @@ var maps struct {
 // probability (replacing a random old entry), which slows turnover and
 // preserves frequently-used paths. Must be called with maps.Lock held.
 func addToPoolLocked(paths map[string]pathForms, path string) {
-	// Already present — skip pre-computation.
+	// Already present - skip pre-computation.
 	if _, ok := paths[path]; ok {
 		return
 	}
