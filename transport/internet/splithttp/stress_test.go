@@ -487,7 +487,7 @@ func TestXHTTP_ConnectionStormRotation(t *testing.T) {
 	// Start 2 servers (H2 + H2C)
 	ct, ctHash := cert.MustGenerate(nil, cert.CommonName("localhost"))
 	h2Settings := &internet.MemoryStreamConfig{
-		ProtocolName:     "splithttp",
+		ProtocolName: "splithttp",
 		ProtocolSettings: &Config{
 			Path: "/sh",
 			// Storm intentionally churns dials; keep unlimited xmux (pre-Bray-V2 stress semantics).
@@ -499,14 +499,14 @@ func TestXHTTP_ConnectionStormRotation(t *testing.T) {
 				HMaxReusableSecs: &RangeConfig{From: 0, To: 0},
 			},
 		},
-		SecurityType:     "tls",
+		SecurityType: "tls",
 		SecuritySettings: &tls.Config{
 			Certificate:          []*tls.Certificate{tls.ParseCertificate(ct)},
 			PinnedPeerCertSha256: [][]byte{ctHash[:]},
 		},
 	}
 	h2cSettings := &internet.MemoryStreamConfig{
-		ProtocolName:     "splithttp",
+		ProtocolName: "splithttp",
 		ProtocolSettings: &Config{
 			Path: "/sh",
 			// Storm intentionally churns dials; keep unlimited xmux (pre-Bray-V2 stress semantics).

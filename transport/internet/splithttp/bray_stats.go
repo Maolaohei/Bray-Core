@@ -36,7 +36,7 @@ var BrayV2StatsMirrorInterval = 30 * time.Second
 var BrayV2StatsAutoMirror = true
 
 var (
-	brayStatsMu   sync.Mutex
+	brayStatsMu    sync.Mutex
 	brayStatsBound stats.Manager
 
 	mirrorStop   chan struct{}

@@ -19,15 +19,15 @@ import (
 
 // Pre-allocated default RangeConfig values to avoid per-request heap allocations.
 var (
-	defaultRangeConfigMaxPostBytes      = &RangeConfig{From: 1000000, To: 1000000}
-	defaultRangeConfigMinPostInterval   = &RangeConfig{From: 30, To: 30}
-	defaultRangeConfigStreamUpSecs      = &RangeConfig{From: 20, To: 80}
-	defaultRangeConfigUplinkChunkCookie = &RangeConfig{From: 2 * 1024, To: 3 * 1024}
-	defaultRangeConfigUplinkChunkHeader = &RangeConfig{From: 3 * 1000, To: 4 * 1000}
-	defaultRangeConfigZero              = &RangeConfig{From: 0, To: 0}
-	defaultRangeConfigXmuxMaxConcurrency = &RangeConfig{From: 8, To: 16}  // browser-like stream concurrency
-	defaultRangeConfigXmuxMaxConnections = &RangeConfig{From: 2, To: 4}   // small connection pool
-	defaultRangeConfigXmuxCMaxReuseTimes  = &RangeConfig{From: 64, To: 128} // rotate before endless reuse
+	defaultRangeConfigMaxPostBytes         = &RangeConfig{From: 1000000, To: 1000000}
+	defaultRangeConfigMinPostInterval      = &RangeConfig{From: 30, To: 30}
+	defaultRangeConfigStreamUpSecs         = &RangeConfig{From: 20, To: 80}
+	defaultRangeConfigUplinkChunkCookie    = &RangeConfig{From: 2 * 1024, To: 3 * 1024}
+	defaultRangeConfigUplinkChunkHeader    = &RangeConfig{From: 3 * 1000, To: 4 * 1000}
+	defaultRangeConfigZero                 = &RangeConfig{From: 0, To: 0}
+	defaultRangeConfigXmuxMaxConcurrency   = &RangeConfig{From: 8, To: 16}   // browser-like stream concurrency
+	defaultRangeConfigXmuxMaxConnections   = &RangeConfig{From: 2, To: 4}    // small connection pool
+	defaultRangeConfigXmuxCMaxReuseTimes   = &RangeConfig{From: 64, To: 128} // rotate before endless reuse
 	defaultRangeConfigXmuxHMaxRequestTimes = &RangeConfig{From: 400, To: 800}
 	defaultRangeConfigXmuxHMaxReusableSecs = &RangeConfig{From: 600, To: 1200} // 10-20 min lifecycle
 )

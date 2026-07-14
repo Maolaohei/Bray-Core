@@ -1,4 +1,4 @@
-﻿package splithttp
+package splithttp
 
 import (
 	"strings"

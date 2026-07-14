@@ -5,10 +5,10 @@ import "fmt"
 // BrayV2Rates is derived success/hit ratios for field A/B (read-only).
 // Zero denominators yield 0.0 (no NaN).
 type BrayV2Rates struct {
-	ModeSuccessRate      float64 // ModeSuccesses / ModeAttempts
-	CascadeWinRate       float64 // ModeCascadeWins / ModeSuccesses
-	StickyHitRate        float64 // StickyHits / ModeAttempts
-	MultiAltWinRate      float64 // MultiEndpointAltWins / MultiEndpointRaces
+	ModeSuccessRate       float64 // ModeSuccesses / ModeAttempts
+	CascadeWinRate        float64 // ModeCascadeWins / ModeSuccesses
+	StickyHitRate         float64 // StickyHits / ModeAttempts
+	MultiAltWinRate       float64 // MultiEndpointAltWins / MultiEndpointRaces
 	EndpointStickyHitRate float64 // EndpointStickyHits / MultiEndpointRaces
 }
 
