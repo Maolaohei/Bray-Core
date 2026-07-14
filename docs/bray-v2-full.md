@@ -34,6 +34,7 @@ Client Dial
 | **3** | Runtime wiring | Dial mode cascade; multi-endpoint in TCP dial; strip `x-bray-*` |
 | **4** | Intelligence | Sticky last-good mode; Bray-V2 metrics; adaptive XMUX open eviction; this overview |
 | **5** | Affinity + export | Sticky multi-endpoint winner; stats.Manager mirror; ep sticky metrics |
+| **6** | Safe ops glue | Auto stats mirror; sticky TTL headers; A/B rate helpers |
 
 ## Optimization matrix (compat / perf / risk)
 
@@ -73,6 +74,8 @@ See `docs/presets/README.md`.
 | `x-bray-endpoints` | 2/3 | Extra `host:port` list |
 | `x-bray-sticky-mode` | 4 | Opt-out mode sticky (`false`) |
 | `x-bray-sticky-endpoint` | 5 | Opt-out endpoint sticky (`false`) when multi-endpoint on |
+| `x-bray-sticky-mode-ttl` | 6 | Optional mode sticky TTL (`10m` / `30s` / minutes int) |
+| `x-bray-sticky-endpoint-ttl` | 6 | Optional endpoint sticky TTL |
 
 Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
 
@@ -85,6 +88,8 @@ Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
 | `XmuxManager.GetMetrics()` | reuse, TTFB, net recovery |
 | `GetBrayV2Metrics()` / `BrayV2MetricsReport()` | cascade, sticky mode/endpoint, multi, xmux evict |
 | `PublishBrayV2MetricsToStats(m)` | optional stats.Manager absolute mirror (`bray-v2>>>...`) |
+| Auto mirror on stats Start | Wave-6: 30s background publish when real stats app present |
+| `GetBrayV2Rates()` / `BrayV2RatesReport()` | field A/B ratios from atomics |
 
 ## Threat model notes (GFW / CDN)
 
@@ -110,15 +115,15 @@ Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
 
 ```
 go build ./transport/internet/splithttp/ ./transport/internet/reality/ ./REALITY/
-go test -count=1 -timeout 120s ./transport/internet/splithttp/ -run "TestH3|TestResolve|TestNext|TestMode|TestMulti|TestRace|TestBuild|TestIsDegrade|TestOpenStream|TestDestination|TestBray|TestXmux|TestApply|TestSticky|TestIsFatal|TestPublish"
+go test -count=1 -timeout 120s ./transport/internet/splithttp/ -run "TestH3|TestResolve|TestNext|TestMode|TestMulti|TestRace|TestBuild|TestIsDegrade|TestOpenStream|TestDestination|TestBray|TestXmux|TestApply|TestSticky|TestIsFatal|TestPublish|TestParse|TestCompute"
 ```
 
-## Future (post Wave-5)
+## Future (intentionally deferred)
 
-1. Dual-stack / multi-SNI policy OS (uses existing HappyEyeballsConfig)
+These change dial policy or need more client hooks; not zero-risk:
+
+1. Dual-stack / multi-SNI policy OS (HappyEyeballs already operator-configurable)
 2. Client REALITY path hint -> XHTTP initial mode
-3. Field A/B: sticky TTL and cascade success rates
-4. Optional gRPC/API polling wrapper over PublishBrayV2MetricsToStats
 
 ## Doc index
 
@@ -127,5 +132,6 @@ go test -count=1 -timeout 120s ./transport/internet/splithttp/ -run "TestH3|Test
 - `docs/bray-v2-wave3.md`
 - `docs/bray-v2-wave4.md`
 - `docs/bray-v2-wave5.md`
+- `docs/bray-v2-wave6.md`
 - `docs/bray-v2-full.md` (this file)
 - `docs/presets/README.md`

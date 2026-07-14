@@ -732,6 +732,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}
 
 	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
+	// Wave-6: optional sticky TTL override from client-local headers (no-op if absent).
+	ApplyStickyTTLFromHeaders(transportConfiguration.Headers)
 	var requestURL url.URL
 
 	if tlsConfig != nil || realityConfig != nil {

@@ -191,22 +191,27 @@ func (m *Manager) GetAllOnlineUsers() []string {
 // Start implements common.Runnable.
 func (m *Manager) Start() error {
 	m.access.Lock()
-	defer m.access.Unlock()
-	m.running = true
 	errs := []error{}
+	m.running = true
 	for _, channel := range m.channels {
 		if err := channel.Start(); err != nil {
 			errs = append(errs, err)
 		}
 	}
+	m.access.Unlock()
 	if len(errs) != 0 {
 		return errors.Combine(errs...)
 	}
+	// Outside lock: transport observability hooks (e.g. Bray-V2 metrics mirror).
+	stats.InvokeManagerStartHooks(m)
 	return nil
 }
 
 // Close implement common.Closable.
 func (m *Manager) Close() error {
+	// Notify hooks before tearing down maps/channels.
+	stats.InvokeManagerCloseHooks(m)
+
 	m.access.Lock()
 	defer m.access.Unlock()
 	m.running = false

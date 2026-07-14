@@ -108,7 +108,9 @@ When edge rejects long bidirectional streams.
 | Control header isolation | automatic | `x-bray-*` never sent on wire |
 | Sticky last-good mode | default on when cascade allowed; `x-bray-sticky-mode: "false"` to opt out | Prefer last successful mode (TTL) |
 | Sticky multi-endpoint | default on when multi-endpoint on; `x-bray-sticky-endpoint: "false"` to opt out | Prefer last winning IP/host first (TTL) |
-| Bray stats publish | code: `PublishBrayV2MetricsToStats(sm)` or Bind+PublishBound | Mirror atomics into `bray-v2>>>...` counters |
+| Bray stats publish | automatic when `stats` app enabled (30s mirror); or manual Publish | Mirror atomics into `bray-v2>>>...` counters |
+| Sticky TTL A/B | headers `x-bray-sticky-mode-ttl` / `x-bray-sticky-endpoint-ttl` | Override default 10m (max 24h) |
+| Rates report | `GetBrayV2Rates()` / `BrayV2RatesReport()` | Field A/B ratios (read-only) |
 
 CDN stream-one with explicit degrade opt-in example (headers are client-local):
 
@@ -142,7 +144,7 @@ CDN stream-one with explicit degrade opt-in example (headers are client-local):
 }
 ```
 
-See `docs/bray-v2-wave2.md`, `docs/bray-v2-wave3.md`, `docs/bray-v2-wave4.md`, `docs/bray-v2-wave5.md`, and full-body `docs/bray-v2-full.md`.
+See `docs/bray-v2-wave2.md` ... `docs/bray-v2-wave6.md`, and full-body `docs/bray-v2-full.md`.
 
 ## Compatibility
 
