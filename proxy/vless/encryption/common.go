@@ -20,9 +20,17 @@ import (
 	"lukechampine.com/blake3"
 )
 
+// OutBytesCapacity is the fixed buffer size for CommonConn.Write:
+// 5-byte TLS-like header + max payload 8192 + 16-byte AEAD tag.
+// Keep in sync with the 8192 chunk limit in CommonConn.Write.
+const (
+	MaxAEADPayload   = 8192
+	OutBytesCapacity = 5 + MaxAEADPayload + 16
+)
+
 var OutBytesPool = sync.Pool{
 	New: func() any {
-		return make([]byte, 5+8192+16)
+		return make([]byte, OutBytesCapacity)
 	},
 }
 
@@ -68,8 +76,8 @@ func (c *CommonConn) Write(b []byte) (int, error) {
 	defer OutBytesPool.Put(outBytes)
 	for n := 0; n < len(b); {
 		b := b[n:]
-		if len(b) > 8192 {
-			b = b[:8192] // for avoiding another copy() in peer's Read()
+		if len(b) > MaxAEADPayload {
+			b = b[:MaxAEADPayload] // for avoiding another copy() in peer's Read()
 		}
 		n += len(b)
 		headerAndData := outBytes[:5+len(b)+16]

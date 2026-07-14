@@ -170,3 +170,10 @@ These change dial policy or need more client hooks; not zero-risk:
 - `docs/bray-v2-wave6.md`
 - `docs/bray-v2-full.md` (this file)
 - `docs/presets/README.md`
+
+## VLESS + Vision under XHTTP
+
+- **Direct REALITY/TLS + Vision**: splice possible; lowest proxy CPU.
+- **XHTTP front (Bray default)**: Vision does **not** give zero-copy through XHTTP; expect normal copy forwarding. Prefer empty flow or accept copy semantics.
+- **VLESS Encryption**: optional inner AEAD; default off for compatibility/performance.
+- Green-zone: no UUID echo on invalid user; encryption unit tests; `OutBytesCapacity` constant.

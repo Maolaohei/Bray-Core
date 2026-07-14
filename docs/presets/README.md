@@ -182,3 +182,19 @@ Multi-endpoint operator constraints:
 - XHTTP H3 race: `GetH3Metrics()` / `H3MetricsReport()`
 - XMUX: existing `XmuxManager.GetMetrics()` / `LogMetrics()`
 - Bray-V2 cascade/sticky/multi: `GetBrayV2Metrics()` / `BrayV2MetricsReport()`
+
+
+## VLESS + Vision under XHTTP (expectations)
+
+Bray default stack is **VLESS over XHTTP + REALITY/TLS**. Application-layer notes:
+
+| Setup | Vision (`xtls-rprx-vision`) | Notes |
+|-------|------------------------------|-------|
+| VLESS + REALITY/TLS **direct** (no XHTTP) | splice may apply (`CanSpliceCopy=2`) | best latency/CPU |
+| **VLESS + XHTTP** (+ REALITY/TLS) | treat as **copy path** (`CanSpliceCopy=3` in practice) | XHTTP/XMUX owns the transport; do not expect zero-copy Vision |
+| VLESS Encryption (`decryption` / client encryption) | opt-in only | extra AEAD CPU; keep off unless threat model needs it |
+
+Green-zone VLESS hardening (default-safe):
+- Encoding invalid-user errors no longer echo full UUIDs into logs.
+- Encryption header/AEAD/XorConn covered by unit tests (no wire-format change).
+- `OutBytesCapacity = 5+8192+16` documented next to the write chunk limit.

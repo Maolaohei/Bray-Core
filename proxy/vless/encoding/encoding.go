@@ -8,7 +8,6 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
-	"github.com/xtls/xray-core/common/uuid"
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/vless"
 	"io"
@@ -77,13 +76,14 @@ func DecodeRequestHeader(ctx context.Context, isfb bool, first *buf.Buffer, read
 		}
 		copy(id[:], first.BytesRange(1, 17))
 		if request.User = validator.Get(id); request.User == nil {
-			u := uuid.UUID(id)
-			return nil, nil, nil, isfb, errors.New("invalid request user id: " + u.String())
+			// Do not embed the full UUID in the error text (green-zone): probes and
+			// logs should not echo candidate user ids.
+			return nil, nil, nil, isfb, errors.New("invalid request user id")
 		}
 		first.Advance(17)
 	} else {
 		// Read version byte first. If invalid, fail fast without reading
-		// the full 17-byte header — avoids blocking for 4s on short/abusive
+		// the full 17-byte header — avoids blocking for ~4s on short/abusive
 		// connections that send a version byte other than 0.
 		if _, err := buffer.ReadFullFrom(reader, 1); err != nil {
 			return nil, nil, nil, false, errors.New("failed to read request version").Base(err)
@@ -99,8 +99,7 @@ func DecodeRequestHeader(ctx context.Context, isfb bool, first *buf.Buffer, read
 		}
 		copy(id[:], buffer.Bytes())
 		if request.User = validator.Get(id); request.User == nil {
-			u := uuid.UUID(id)
-			return nil, nil, nil, false, errors.New("invalid request user id: " + u.String())
+			return nil, nil, nil, false, errors.New("invalid request user id")
 		}
 	}
 
