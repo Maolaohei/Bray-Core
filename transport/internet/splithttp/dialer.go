@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	gotls "crypto/tls"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -426,8 +427,11 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		var err error
 		if len(multiEndpoints) > 1 {
 			raceList := multiEndpoints
+			// Capture preferred sticky EP once for reorder + fail-invalidate (green-zone).
+			stickyPreferred := ""
 			if StickyEndpointEnabled(multiHeaders) {
 				if se, ok := LookupStickyEndpoint(multiStickyKey); ok {
+					stickyPreferred = se
 					reordered := ApplyStickyEndpoints(raceList, se)
 					if len(reordered) > 0 && reordered[0] != raceList[0] {
 						recordEndpointStickyHit()
@@ -450,6 +454,10 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 					_, epTTL := StickyTTLFromHeaders(multiHeaders)
 					RememberStickyEndpointTTL(multiStickyKey, winner, epTTL)
 				}
+			} else if StickyEndpointEnabled(multiHeaders) && stickyPreferred != "" {
+				// Race failed while sticky was preferred: clear affinity so next dial
+				// re-probes the full endpoint list (mirror NoteStickyModeFailure).
+				NoteStickyEndpointFailure(multiStickyKey, stickyPreferred)
 			}
 		} else {
 			rawConn, err = dialRawTCP(ctxInner, dest)
@@ -956,15 +964,18 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					return false, false, oerr
 				}
 			}
-			if xmuxClient2 != nil {
-				xmuxClient2.LeftRequests.Add(-1)
-			}
 
 			if mode == "stream-up" {
+				// Green-zone: do not burn download LeftRequests until upload also succeeds.
+				// Half-open (download OK, upload fail) previously leaked quota and could
+				// exhaust XMUX MaxRequests during cascade retries.
 				var upErr error
 				_, _, _, upErr = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
 				if upErr != nil {
 					return false, false, upErr
+				}
+				if xmuxClient2 != nil {
+					xmuxClient2.LeftRequests.Add(-1)
 				}
 				if xmuxClient != nil {
 					xmuxClient.LeftRequests.Add(-1)
@@ -972,7 +983,11 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				return true, false, nil
 			}
 
-			// packet-up continues with POST loop; primary LeftRequests decremented on packet path.
+			// packet-up / other non-stream-up: download open succeeded; count download quota.
+			// Primary LeftRequests still decremented once on packet path after tryMode.
+			if xmuxClient2 != nil {
+				xmuxClient2.LeftRequests.Add(-1)
+			}
 			return false, true, nil
 		}
 
@@ -1019,8 +1034,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				recordModeCascadeStep()
 				errors.LogInfoInner(ctx, openErr, "XHTTP mode ", mode, " open failed; cascading to ", modeCascade[mi+1])
 				// Green-zone: small inter-step jitter only on failed cascade path.
+				// Preserve original openErr when cancel/deadline aborts the wait.
 				if werr := WaitCascadeStepJitter(ctx); werr != nil {
-					return nil, werr
+					return nil, stderrors.Join(openErr, werr)
 				}
 				continue
 			}

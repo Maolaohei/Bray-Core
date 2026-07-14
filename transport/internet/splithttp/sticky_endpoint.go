@@ -21,10 +21,15 @@ var StickyEndpointTTL = 10 * time.Minute
 // StickyEndpointMaxEntries bounds the process-local sticky endpoint map.
 const StickyEndpointMaxEntries = 256
 
+// StickyEndpointFailInvalidateAfter consecutive failures of the sticky endpoint clear it.
+// Mirrors StickyModeFailInvalidateAfter (green-zone: clear after first sticky-EP fail).
+const StickyEndpointFailInvalidateAfter = 1
+
 type stickyEndpointEntry struct {
 	endpoint string
 	at       time.Time
 	ttl      time.Duration // 0 => use StickyEndpointTTL at lookup
+	failHits int
 }
 
 var (
@@ -115,7 +120,7 @@ func RememberStickyEndpointTTL(key, endpoint string, ttl time.Duration) {
 			delete(stickyEP, drop)
 		}
 	}
-	stickyEP[key] = stickyEndpointEntry{endpoint: endpoint, at: time.Now(), ttl: ttl}
+	stickyEP[key] = stickyEndpointEntry{endpoint: endpoint, at: time.Now(), ttl: ttl, failHits: 0}
 	recordEndpointStickyRemember()
 }
 
@@ -128,6 +133,36 @@ func ForgetStickyEndpoint(key string) {
 	stickyEPMu.Lock()
 	delete(stickyEP, key)
 	stickyEPMu.Unlock()
+}
+
+// NoteStickyEndpointFailure records a failure of attemptedEndpoint for key.
+// When the sticky endpoint itself fails (race/dial), the entry is cleared so
+// the full multi-endpoint race can re-probe backups (green-zone mirror of mode sticky).
+func NoteStickyEndpointFailure(key, attemptedEndpoint string) {
+	key = strings.TrimSpace(key)
+	attemptedEndpoint = strings.TrimSpace(attemptedEndpoint)
+	if key == "" || attemptedEndpoint == "" {
+		return
+	}
+	stickyEPMu.Lock()
+	defer stickyEPMu.Unlock()
+	e, ok := stickyEP[key]
+	if !ok {
+		return
+	}
+	if stickyEndpointExpired(e, time.Now()) {
+		delete(stickyEP, key)
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(e.endpoint), attemptedEndpoint) {
+		return
+	}
+	e.failHits++
+	if e.failHits >= StickyEndpointFailInvalidateAfter {
+		delete(stickyEP, key)
+		return
+	}
+	stickyEP[key] = e
 }
 
 // ApplyStickyEndpoints reorders the race list so sticky is first when present.

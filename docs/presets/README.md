@@ -150,13 +150,18 @@ See `docs/bray-v2-wave2.md` ... `docs/bray-v2-wave6.md`, and full-body `docs/bra
 
 ## Green-zone hardening (default-safe)
 
+Hard caps and fail-invalidate rules that keep defaults safe (compat + perf first):
+
 | Item | Behavior | Perf / compat |
 |------|----------|---------------|
 | `x-bray-*` strip | Client-local only; never on wire | zero wire cost; locked by tests |
 | Cascade step jitter | On **failed** mode steps only, 0–200ms | happy path zero |
 | XMUX default jitter | Unconfigured `xmux` fields: process-stable ±10% in browser band | explicit ranges unchanged |
 | CDN first mode | Docs/preset: prefer `packet-up`/`stream-up` on hostile edges | **no** global auto→packet-up change |
-| Multi-endpoint | 2–3 endpoints max; no IP scan ranges; sticky on | opt-in headers |
+| Multi-endpoint | hard cap `MaxMultiEndpoints=4` (primary+extras); no IP scan ranges; sticky on | opt-in headers |
+| Sticky EP fail-invalidate | race/dial fail of preferred sticky EP clears affinity (mirror mode sticky) | default on with multi |
+| LeftRequests half-open | stream-up decrements download quota only after upload also succeeds | cascade-safe |
+| Fatal open typed | `net.Error` / `OpError` / `ErrClosed` / EOF first, then tight string needles | XMUX rotate |
 
 Multi-endpoint operator constraints:
 - Keep the list short (2–3 hosts/IPs). Do not put large scan ranges in `x-bray-endpoints`.

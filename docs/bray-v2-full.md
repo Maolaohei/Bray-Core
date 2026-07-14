@@ -133,7 +133,10 @@ Low-cost anti-fingerprint defaults (compat + happy-path perf preserved):
 2. **Cascade step jitter** — only between failed mode steps, 0–200ms; first-mode success is free.
 3. **XMUX default jitter** — nil `xmux` fields get process-stable ±10% browser-band ranges; explicit config wins.
 4. **CDN presets** — recommend `packet-up`/`stream-up` first on hostile edges; no global auto policy change.
-5. **Multi-EP** — short list (2–3), no scan ranges; sticky preferred.
+5. **Multi-EP** — hard cap `MaxMultiEndpoints=4` (primary+extras), no scan ranges; sticky preferred; sticky EP cleared on preferred-race fail.
+6. **LeftRequests half-open** — stream-up counts download+upload quota only after both opens succeed.
+7. **Fatal open typed** — prefer `net.OpError`/`ErrClosed`/EOF before string needles for XMUX eviction.
+8. **Cascade cancel** — jitter wait cancel returns `errors.Join(openErr, werr)` so root cause is preserved.
 
 ## What we deliberately do NOT do
 

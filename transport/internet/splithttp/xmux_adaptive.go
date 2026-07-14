@@ -3,6 +3,8 @@ package splithttp
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"strings"
 )
 
@@ -51,6 +53,26 @@ func isFatalOpenTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Prefer typed faults (green-zone): net.Error timeout, OpError, closed conn, EOF — then fall back to tight string needles.
+	// OpError, closed conn, EOF — then fall back to tight string needles.
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var op *net.OpError
+	if errors.As(err, &op) {
+		if op.Timeout() {
+			return true
+		}
+		// Dial/read/write op failures on the transport are fatal for session reuse.
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		if ne.Timeout() {
+			return true
+		}
+	}
+
 	msg := strings.ToLower(err.Error())
 	// Keep this list tight to avoid thrashing the pool on CDN 403/404 stream rejects.
 	needles := []string{

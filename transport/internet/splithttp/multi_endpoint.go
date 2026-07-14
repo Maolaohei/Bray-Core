@@ -16,11 +16,18 @@ var MultiEndpointRaceWindow = 50 * time.Millisecond
 // MultiEndpointProbeTimeout caps a single dual-path probe selection.
 var MultiEndpointProbeTimeout = 1500 * time.Millisecond
 
+// MaxMultiEndpoints caps primary+extras in a race list (green-zone).
+// Prevents misconfigured x-bray-endpoints from becoming a dial scan.
+const MaxMultiEndpoints = 4
+
 // ErrNoMultiEndpoints is returned when RaceDialEndpoints is called with an empty list.
 var ErrNoMultiEndpoints = errors.New("xhttp: multi-endpoint race list is empty")
 
 // ErrNilMultiEndpointDial is returned when dialFn is nil.
 var ErrNilMultiEndpointDial = errors.New("xhttp: multi-endpoint dial function is nil")
+
+// ErrNilMultiEndpointConn is returned when dialFn succeeds with a nil conn.
+var ErrNilMultiEndpointConn = errors.New("xhttp: multi-endpoint dial returned nil conn")
 
 // MultiEndpointDialFunc dials one candidate endpoint.
 // Implementations should honor ctx cancellation.
@@ -63,7 +70,15 @@ func ParseExtraEndpoints(headers map[string]string) []string {
 	})
 	out := make([]string, 0, len(parts))
 	seen := make(map[string]struct{}, len(parts))
+	// Cap extras alone so primary+extras stays within MaxMultiEndpoints.
+	maxExtras := MaxMultiEndpoints - 1
+	if maxExtras < 1 {
+		maxExtras = 1
+	}
 	for _, p := range parts {
+		if len(out) >= maxExtras {
+			break
+		}
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
@@ -92,6 +107,9 @@ func RaceDialEndpoints(ctx context.Context, endpoints []string, dialFn MultiEndp
 	}
 	if len(endpoints) == 1 {
 		c, err := dialFn(ctx, endpoints[0])
+		if err == nil && c == nil {
+			return nil, "", ErrNilMultiEndpointConn
+		}
 		return c, endpoints[0], err
 	}
 
@@ -141,6 +159,10 @@ func RaceDialEndpoints(ctx context.Context, endpoints []string, dialFn MultiEndp
 
 	var firstErr error
 	for r := range ch {
+		// treat nil conn as failure even if dialFn returned err==nil
+		if r.err == nil && r.conn == nil {
+			r.err = ErrNilMultiEndpointConn
+		}
 		if r.err == nil && r.conn != nil {
 			go func(winner string) {
 				for late := range ch {
@@ -170,6 +192,9 @@ func BuildEndpointList(primary string, extras []string) []string {
 	out := make([]string, 0, 1+len(extras))
 	seen := make(map[string]struct{}, 1+len(extras))
 	add := func(ep string) {
+		if len(out) >= MaxMultiEndpoints {
+			return
+		}
 		ep = strings.TrimSpace(ep)
 		if ep == "" {
 			return
