@@ -15,15 +15,15 @@ import (
 )
 
 type stubDialerClient struct {
-	posts         atomic.Int32
-	failN         atomic.Int32 // fail first N posts
-	lastSeq       string
-	payloads      []string
-	mu            sync.Mutex
-	block         chan struct{}
-	started       chan struct{}
-	maxInflight   atomic.Int32
-	inflight      atomic.Int32
+	posts       atomic.Int32
+	failN       atomic.Int32 // fail first N posts
+	lastSeq     string
+	payloads    []string
+	mu          sync.Mutex
+	block       chan struct{}
+	started     chan struct{}
+	maxInflight atomic.Int32
+	inflight    atomic.Int32
 }
 
 func (s *stubDialerClient) IsClosed() bool { return false }
