@@ -1097,11 +1097,16 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			maxUploadSize,
 		}
 
-		// Reliable packet-up: limited in-flight window (default 8). Seq is
-		// assigned at launch so concurrent POSTs stay contiguous; each POST
-		// still retries the same seq on transient failure. Server upload_queue
-		// reorders by seq (scMaxBufferedPosts).
-		uploadWindow := packetUploadWindow(transportConfiguration.GetNormalizedScMaxBufferedPosts())
+		// Reliable packet-up: limited in-flight window (default 8, RTT-scaled).
+		// Seq is assigned at launch so concurrent POSTs stay contiguous; each
+		// POST still retries the same seq on transient failure. Server
+		// upload_queue reorders by seq (scMaxBufferedPosts).
+		// Seed window from XMUX RTT when available (0 keeps default 8).
+		var seedRTT time.Duration
+		if xmuxClient != nil {
+			seedRTT = xmuxClient.GetRTT()
+		}
+		uploadWindow := packetUploadWindow(transportConfiguration.GetNormalizedScMaxBufferedPosts(), seedRTT)
 		go func() {
 			var seq int64
 			var lastWrite time.Time
@@ -1149,9 +1154,19 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 						break
 					}
 
-					// Pace launch starts only; in-flight POSTs overlap RTT.
+					// Adaptive launch pacing: keep configured interval for
+					// small/idle posts (camouflage); skip when more data is
+					// already queued or this chunk is full-size so the window
+					// can fill and hide RTT.
+					configuredMs := int32(0)
 					if scMinPostsIntervalMs.From > 0 {
-						sleepDur := time.Duration(scMinPostsIntervalMs.rand())*time.Millisecond - time.Since(lastWrite)
+						configuredMs = scMinPostsIntervalMs.rand()
+					}
+					hasBacklog := !remainder.IsEmpty()
+					fullChunk := chunk.Len() >= maxUploadSize
+					paceMs := packetUploadLaunchIntervalMs(configuredMs, hasBacklog, fullChunk)
+					if paceMs > 0 {
+						sleepDur := time.Duration(paceMs)*time.Millisecond - time.Since(lastWrite)
 						if sleepDur > 0 {
 							select {
 							case <-time.After(sleepDur):
@@ -1220,7 +1235,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					go func(client DialerClient, seqStr string, chunk buf.MultiBuffer) {
 						defer inflight.Done()
 						defer func() { <-slots }()
-						defer buf.ReleaseMulti(chunk)
+						// postPacketReliable takes ownership of chunk (snapshot + release).
 						if err := postPacketReliable(ctx, client, requestURLStr, sessionId, seqStr, chunk); err != nil {
 							failUpload(err, seqStr)
 						}

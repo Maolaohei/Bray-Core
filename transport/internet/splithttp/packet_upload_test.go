@@ -93,11 +93,7 @@ func TestPostPacketReliable_RetriesSameSeq(t *testing.T) {
 			t.Fatalf("payload mutated: %q", p)
 		}
 	}
-	// original still intact for caller release
-	if mb.String() != "hello-packet" {
-		t.Fatalf("source buffer corrupted: %q", mb.String())
-	}
-	buf.ReleaseMulti(mb)
+	// ownership transferred: caller must not use mb after call
 }
 
 func TestPostPacketReliable_Exhausts(t *testing.T) {
@@ -115,7 +111,6 @@ func TestPostPacketReliable_Exhausts(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("retries took too long")
 	}
-	buf.ReleaseMulti(mb)
 }
 
 func TestPostPacketReliable_RespectsCancel(t *testing.T) {
@@ -128,7 +123,6 @@ func TestPostPacketReliable_RespectsCancel(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}
-	buf.ReleaseMulti(mb)
 }
 
 func TestCloneMultiBuffer(t *testing.T) {
@@ -146,23 +140,48 @@ func TestCloneMultiBuffer(t *testing.T) {
 }
 
 func TestPacketUploadWindow(t *testing.T) {
-	if got := packetUploadWindow(0); got != packetUploadDefaultWindow {
+	if got := packetUploadWindow(0, 0); got != packetUploadDefaultWindow {
 		t.Fatalf("zero buffered=%d", got)
 	}
-	if got := packetUploadWindow(64); got != packetUploadDefaultWindow {
+	if got := packetUploadWindow(64, 0); got != packetUploadDefaultWindow {
 		t.Fatalf("default buffered=%d", got)
 	}
-	if got := packetUploadWindow(4); got != 2 {
+	if got := packetUploadWindow(4, 0); got != 2 {
 		t.Fatalf("half of 4 => %d", got)
 	}
-	if got := packetUploadWindow(1); got != 1 {
+	if got := packetUploadWindow(1, 0); got != 1 {
 		t.Fatalf("tiny buffer=%d", got)
 	}
-	if got := packetUploadWindow(1000); got != packetUploadDefaultWindow {
+	if got := packetUploadWindow(1000, 0); got != packetUploadDefaultWindow {
 		t.Fatalf("large buffered default=%d", got)
 	}
-	if got := packetUploadWindow(2); got != 1 {
-		t.Fatalf("half of 2 => %d", got)
+	if got := packetUploadWindow(64, 10*time.Millisecond); got != 6 {
+		t.Fatalf("low rtt=%d", got)
+	}
+	if got := packetUploadWindow(64, 100*time.Millisecond); got != 12 {
+		t.Fatalf("mid rtt=%d", got)
+	}
+	if got := packetUploadWindow(64, 250*time.Millisecond); got != packetUploadMaxWindow {
+		t.Fatalf("high rtt=%d", got)
+	}
+	// server buffer still caps high-RTT growth
+	if got := packetUploadWindow(8, 250*time.Millisecond); got != 4 {
+		t.Fatalf("high rtt capped by buffer=%d", got)
+	}
+}
+
+func TestPacketUploadLaunchInterval(t *testing.T) {
+	if got := packetUploadLaunchIntervalMs(30, false, false); got != 30 {
+		t.Fatalf("idle=%d", got)
+	}
+	if got := packetUploadLaunchIntervalMs(30, true, false); got != 0 {
+		t.Fatalf("backlog=%d", got)
+	}
+	if got := packetUploadLaunchIntervalMs(30, false, true); got != 0 {
+		t.Fatalf("full chunk=%d", got)
+	}
+	if got := packetUploadLaunchIntervalMs(0, false, false); got != 0 {
+		t.Fatalf("disabled=%d", got)
 	}
 }
 
@@ -180,7 +199,6 @@ func TestPostPacketReliable_ConcurrentSlots(t *testing.T) {
 			defer wg.Done()
 			mb := buf.MergeBytes(nil, []byte("p"))
 			_ = postPacketReliable(context.Background(), s, "u", "s", strconv.Itoa(seq), mb)
-			buf.ReleaseMulti(mb)
 		}(i)
 	}
 	// Wait until all N have entered PostPacket.
