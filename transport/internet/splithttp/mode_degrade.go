@@ -3,6 +3,7 @@ package splithttp
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,12 +56,76 @@ func NormalizeXHTTPMode(mode string) string {
 	return strings.ToLower(strings.TrimSpace(mode))
 }
 
+// IsValidXHTTPMode reports whether mode is empty/auto or a known concrete mode.
+func IsValidXHTTPMode(mode string) bool {
+	switch NormalizeXHTTPMode(mode) {
+	case "", "auto", "stream-one", "stream-up", "packet-up":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateConfiguredMode returns an error when the operator-configured mode
+// token is not empty/auto and not one of the three concrete XHTTP modes.
+// Typos must fail closed instead of silently becoming packet-up.
+func ValidateConfiguredMode(mode string) error {
+	if IsValidXHTTPMode(mode) {
+		return nil
+	}
+	return errors.New("XHTTP: invalid mode " + strconv.Quote(mode) +
+		"; expected auto|stream-one|stream-up|packet-up")
+}
+
+// ServerModeAllowsStreamOne is true when the listener accepts bi-dir stream-one
+// (no sessionId) requests.
+func ServerModeAllowsStreamOne(mode string) bool {
+	switch NormalizeXHTTPMode(mode) {
+	case "", "auto", "stream-one":
+		return true
+	default:
+		return false
+	}
+}
+
+// ServerModeAllowsStreamUp is true when the listener accepts session uplink
+// without seq (long-lived stream-up body).
+func ServerModeAllowsStreamUp(mode string) bool {
+	switch NormalizeXHTTPMode(mode) {
+	case "", "auto", "stream-up":
+		return true
+	default:
+		return false
+	}
+}
+
+// ServerModeAllowsPacketUp is true when the listener accepts sequenced packet
+// uploads.
+func ServerModeAllowsPacketUp(mode string) bool {
+	switch NormalizeXHTTPMode(mode) {
+	case "", "auto", "packet-up":
+		return true
+	default:
+		return false
+	}
+}
+
 // ResolveInitialMode picks the first mode for a dial.
 // Explicit modes are returned as-is; auto selects REALITY-aware defaults.
+// preferPacket is false here; use ResolveInitialModeOpts for browser dialer.
 func ResolveInitialMode(mode string, hasREALITY, hasDownloadSettings bool) string {
+	return ResolveInitialModeOpts(mode, hasREALITY, hasDownloadSettings, false)
+}
+
+// ResolveInitialModeOpts is ResolveInitialMode with optional preferPacket.
+// preferPacket forces packet-up for auto (browser dialer has no bi-dir stream).
+func ResolveInitialModeOpts(mode string, hasREALITY, hasDownloadSettings, preferPacket bool) string {
 	m := NormalizeXHTTPMode(mode)
 	if m != "" && m != "auto" {
 		return m
+	}
+	if preferPacket {
+		return "packet-up"
 	}
 	if !hasREALITY {
 		return "packet-up"
@@ -123,6 +188,11 @@ func BuildModeCascade(initial string, allowDegrade bool) []string {
 	if m == "" {
 		m = "packet-up"
 	}
+	if !IsValidXHTTPMode(m) {
+		// Defensive: unknown concrete tokens should not invent ladder steps.
+		// Callers should ValidateConfiguredMode first.
+		return []string{m}
+	}
 	out := []string{m}
 	if !allowDegrade {
 		return out
@@ -136,6 +206,12 @@ func BuildModeCascade(initial string, allowDegrade bool) []string {
 
 // IsDegradeEligibleError reports whether an open/dial error should trigger
 // mode cascade. Context cancellation is never retried with a different mode.
+//
+// Narrow policy (review fix):
+//   - transport-fatal / timeout faults: yes
+//   - CDN / edge mode rejects (403/404/405/406/408/409/429) and 5xx: yes
+//   - client/config 4xx (400/401/402/407/...): no
+//   - unknown non-status errors: no (avoid cascading on misconfiguration noise)
 func IsDegradeEligibleError(err error) bool {
 	if err == nil {
 		return false
@@ -147,5 +223,47 @@ func IsDegradeEligibleError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	return true
+	if isFatalOpenTransportError(err) {
+		return true
+	}
+	if code, ok := httpStatusFromError(err); ok {
+		return isCascadeHTTPStatus(code)
+	}
+	return false
+}
+
+// httpStatusFromError extracts an HTTP status from OpenStream / PostPacket
+// error strings ("unexpected status 403", "bad status code: 502", ...).
+func httpStatusFromError(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	msg := err.Error()
+	for _, prefix := range []string{
+		"unexpected status ",
+		"bad status code:",
+		"got non-200 error response code: ",
+	} {
+		if i := strings.Index(strings.ToLower(msg), strings.ToLower(prefix)); i >= 0 {
+			rest := strings.TrimSpace(msg[i+len(prefix):])
+			fields := strings.Fields(rest)
+			if len(fields) == 0 {
+				continue
+			}
+			n, convErr := strconv.Atoi(fields[0])
+			if convErr == nil && n >= 100 && n <= 599 {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func isCascadeHTTPStatus(code int) bool {
+	switch code {
+	case 403, 404, 405, 406, 408, 409, 421, 429:
+		return true
+	default:
+		return code >= 500 && code <= 599
+	}
 }

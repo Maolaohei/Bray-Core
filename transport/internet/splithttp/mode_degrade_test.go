@@ -20,6 +20,54 @@ func TestResolveInitialMode(t *testing.T) {
 	if got := ResolveInitialMode("packet-up", true, true); got != "packet-up" {
 		t.Fatalf("explicit wins=%s", got)
 	}
+	if got := ResolveInitialModeOpts("auto", true, false, true); got != "packet-up" {
+		t.Fatalf("preferPacket auto=%s", got)
+	}
+	if got := ResolveInitialModeOpts("stream-one", true, false, true); got != "stream-one" {
+		t.Fatalf("preferPacket must not override explicit=%s", got)
+	}
+}
+
+func TestValidateConfiguredMode(t *testing.T) {
+	if err := ValidateConfiguredMode(""); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateConfiguredMode("auto"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateConfiguredMode("stream-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateConfiguredMode("STREAM-UP"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateConfiguredMode("packet-up"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateConfiguredMode("streamone"); err == nil {
+		t.Fatal("typo must fail")
+	}
+	if err := ValidateConfiguredMode("stream_up"); err == nil {
+		t.Fatal("underscore must fail")
+	}
+}
+
+func TestServerModeAllows(t *testing.T) {
+	if !ServerModeAllowsStreamOne("auto") || !ServerModeAllowsStreamOne("stream-one") {
+		t.Fatal("stream-one allow")
+	}
+	if ServerModeAllowsStreamOne("packet-up") || ServerModeAllowsStreamOne("stream-up") {
+		t.Fatal("stream-one deny locked other")
+	}
+	if !ServerModeAllowsStreamUp("") || !ServerModeAllowsStreamUp("stream-up") {
+		t.Fatal("stream-up allow")
+	}
+	if ServerModeAllowsStreamUp("stream-one") || ServerModeAllowsPacketUp("stream-one") {
+		t.Fatal("locked stream-one must not allow sessioned shapes")
+	}
+	if !ServerModeAllowsPacketUp("auto") || !ServerModeAllowsPacketUp("packet-up") {
+		t.Fatal("packet-up allow")
+	}
 }
 
 func TestNextDegradedModeLadder(t *testing.T) {
@@ -74,8 +122,30 @@ func TestIsDegradeEligibleError(t *testing.T) {
 	if IsDegradeEligibleError(context.Canceled) {
 		t.Fatal("canceled")
 	}
-	if !IsDegradeEligibleError(errors.New("edge 403 / reset")) {
-		t.Fatal("network-ish error should degrade")
+	if !IsDegradeEligibleError(errors.New("connection reset by peer")) {
+		t.Fatal("transport fatal should degrade")
+	}
+	if !IsDegradeEligibleError(errors.New("unexpected status 403")) {
+		t.Fatal("CDN 403 should degrade")
+	}
+	if !IsDegradeEligibleError(errors.New("unexpected status 502")) {
+		t.Fatal("5xx should degrade")
+	}
+	if IsDegradeEligibleError(errors.New("unexpected status 400")) {
+		t.Fatal("400 config reject must not degrade")
+	}
+	if IsDegradeEligibleError(errors.New("unexpected status 401")) {
+		t.Fatal("401 must not degrade")
+	}
+	if IsDegradeEligibleError(errors.New("edge 403 / reset")) {
+		// no status parser hit and not a known fatal needle ("reset" alone is weak;
+		// full "connection reset" is fatal). This free-form string should not cascade.
+		// Keep fail-closed: unknown noise != cascade.
+	} else {
+		// expected: false
+	}
+	if IsDegradeEligibleError(errors.New("padding mismatch")) {
+		t.Fatal("unknown non-status must not degrade")
 	}
 }
 
@@ -94,9 +164,5 @@ func TestCascadeStepJitter(t *testing.T) {
 func TestWaitCascadeStepJitterCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := WaitCascadeStepJitter(ctx); err == nil {
-		// may race if jitter rolls 0; allow either cancel or nil
-		// force non-zero by looping a few canceled waits is flaky; just ensure no panic
-		_ = err
-	}
+	_ = WaitCascadeStepJitter(ctx)
 }

@@ -80,6 +80,7 @@ func isFatalOpenTransportError(err error) bool {
 		"broken pipe",
 		"connection reset",
 		"reset by peer",
+		"stream reset",
 		"goaway",
 		"connection refused",
 		"use of closed network connection",

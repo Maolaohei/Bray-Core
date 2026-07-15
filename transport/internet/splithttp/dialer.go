@@ -9,7 +9,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	reflect "reflect"
 	"runtime"
@@ -26,7 +25,6 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
-	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/browser_dialer"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion"
@@ -809,9 +807,26 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		return nil, err
 	}
 
-	initialMode := ResolveInitialMode(transportConfiguration.Mode, realityConfig != nil, transportConfiguration.DownloadSettings != nil)
+	if err := ValidateConfiguredMode(transportConfiguration.Mode); err != nil {
+		return nil, err
+	}
+
+	// Browser dialer cannot open bi-dir stream bodies; prefer packet-up for auto.
+	preferPacket := browser_dialer.HasBrowserDialer() && realityConfig == nil
+	initialMode := ResolveInitialModeOpts(transportConfiguration.Mode, realityConfig != nil, transportConfiguration.DownloadSettings != nil, preferPacket)
 	allowModeDegrade := ShouldAttemptModeDegrade(transportConfiguration.Mode, transportConfiguration.Headers)
+	// Explicit stream modes under browser still fail closed unless degrade is on.
 	modeCascade := BuildModeCascade(initialMode, allowModeDegrade)
+
+	// Fail-closed before any stream open burns XMUX quota when packet-up is possible.
+	for _, m := range modeCascade {
+		if m == "packet-up" {
+			if transportConfiguration.GetNormalizedScMaxEachPostBytes().From <= 0 {
+				return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
+			}
+			break
+		}
+	}
 
 	// Wave-4 sticky last-good mode: prefer previously successful mode on this dest.
 	stickyKey := stickyDestKey(dest.NetAddr(), requestURL.Host)
@@ -1058,6 +1073,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		scMaxEachPostBytes := transportConfiguration.GetNormalizedScMaxEachPostBytes()
 		scMinPostsIntervalMs := transportConfiguration.GetNormalizedScMinPostsIntervalMs()
 
+		// Validate config before burning XMUX LeftRequests (P2 review fix).
 		if scMaxEachPostBytes.From <= 0 {
 			cleanup()
 			return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
@@ -1081,53 +1097,88 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			maxUploadSize,
 		}
 
+		// Reliable packet-up: limited in-flight window (default 8). Seq is
+		// assigned at launch so concurrent POSTs stay contiguous; each POST
+		// still retries the same seq on transient failure. Server upload_queue
+		// reorders by seq (scMaxBufferedPosts).
+		uploadWindow := packetUploadWindow(transportConfiguration.GetNormalizedScMaxBufferedPosts())
 		go func() {
 			var seq int64
 			var lastWrite time.Time
-
+			var clientMu sync.Mutex
 			dynamicHTTPClient := httpClient
 			dynamicXmuxClient := xmuxClient
+
+			slots := make(chan struct{}, uploadWindow)
+			var inflight sync.WaitGroup
+			var failOnce sync.Once
+			var uploadFailed atomic.Bool
+
+			failUpload := func(err error, seqStr string) {
+				failOnce.Do(func() {
+					uploadFailed.Store(true)
+					if err != nil {
+						errors.LogInfoInner(ctx, err, "failed to send upload seq=", seqStr)
+					}
+					uploadPipeReader.Interrupt()
+				})
+			}
+
+			waitInflight := func() { inflight.Wait() }
+			defer waitInflight()
+
 			for {
-				// by offloading the uploads into a buffered pipe, multiple conn.Write
-				// calls get automatically batched together into larger POST requests.
-				// without batching, bandwidth is extremely limited.
+				if uploadFailed.Load() || ctx.Err() != nil {
+					break
+				}
+				// Batch conn.Write into larger POSTs via the buffered pipe.
 				remainder, err := uploadPipeReader.ReadMultiBuffer()
 				if err != nil {
 					break
 				}
 
-				doSplit := atomic.Bool{}
-				for doSplit.Store(true); doSplit.Load(); {
+				for !remainder.IsEmpty() {
+					if uploadFailed.Load() || ctx.Err() != nil {
+						buf.ReleaseMulti(remainder)
+						remainder = nil
+						break
+					}
 					var chunk buf.MultiBuffer
 					remainder, chunk = buf.SplitSize(remainder, maxUploadSize)
 					if chunk.IsEmpty() {
 						break
 					}
 
-					wroteRequest := done.New()
-
-					ctx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-						WroteRequest: func(httptrace.WroteRequestInfo) {
-							wroteRequest.Close()
-						},
-					})
-
-					seqStr := strconv.FormatInt(seq, 10)
-					seq += 1
-
+					// Pace launch starts only; in-flight POSTs overlap RTT.
 					if scMinPostsIntervalMs.From > 0 {
 						sleepDur := time.Duration(scMinPostsIntervalMs.rand())*time.Millisecond - time.Since(lastWrite)
 						if sleepDur > 0 {
 							select {
 							case <-time.After(sleepDur):
 							case <-ctx.Done():
+								buf.ReleaseMulti(chunk)
+								buf.ReleaseMulti(remainder)
 								return
 							}
 						}
 					}
-
 					lastWrite = time.Now()
 
+					select {
+					case slots <- struct{}{}:
+					case <-ctx.Done():
+						buf.ReleaseMulti(chunk)
+						buf.ReleaseMulti(remainder)
+						return
+					}
+					if uploadFailed.Load() {
+						<-slots
+						buf.ReleaseMulti(chunk)
+						buf.ReleaseMulti(remainder)
+						return
+					}
+
+					clientMu.Lock()
 					if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Load() <= 0 ||
 						(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
 						oldClient := dynamicXmuxClient
@@ -1157,26 +1208,23 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 							dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
 						}
 					}
+					client := dynamicHTTPClient
+					clientMu.Unlock()
 
-					go func(hClient DialerClient) {
-						err := hClient.PostPacket(
-							ctx,
-							requestURLStr,
-							sessionId,
-							seqStr,
-							chunk,
-						)
-						wroteRequest.Close()
-						if err != nil {
-							errors.LogInfoInner(ctx, err, "failed to send upload")
-							uploadPipeReader.Interrupt()
-							doSplit.Store(false)
+					// Assign seq at launch (not after success) so concurrent
+					// POSTs use contiguous numbers; retries reuse this seqStr.
+					seqStr := strconv.FormatInt(seq, 10)
+					seq++
+
+					inflight.Add(1)
+					go func(client DialerClient, seqStr string, chunk buf.MultiBuffer) {
+						defer inflight.Done()
+						defer func() { <-slots }()
+						defer buf.ReleaseMulti(chunk)
+						if err := postPacketReliable(ctx, client, requestURLStr, sessionId, seqStr, chunk); err != nil {
+							failUpload(err, seqStr)
 						}
-					}(dynamicHTTPClient)
-
-					if _, ok := dynamicHTTPClient.(*DefaultDialerClient); ok {
-						<-wroteRequest.Wait()
-					}
+					}(client, seqStr, chunk)
 				}
 			}
 		}()

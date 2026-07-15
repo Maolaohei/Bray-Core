@@ -290,7 +290,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
-	if sessionId == "" && h.config.Mode != "" && h.config.Mode != "auto" && h.config.Mode != "stream-one" && h.config.Mode != "stream-up" {
+	// Empty sessionId is stream-one shape only. Locked stream-up/packet-up reject it.
+	// (auto/empty config still allow stream-one for compatibility.)
+	if sessionId == "" && !ServerModeAllowsStreamOne(h.config.Mode) {
 		errors.LogInfo(context.Background(), "request without sessionId is not allowed in mode: ", h.config.Mode)
 		writer.WriteHeader(http.StatusBadRequest)
 		return
@@ -341,7 +343,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	if isUplinkRequest && sessionId != "" { // stream-up, packet-up
 		if seqStr == "" {
-			if h.config.Mode != "" && h.config.Mode != "auto" && h.config.Mode != "stream-up" {
+			if !ServerModeAllowsStreamUp(h.config.Mode) {
 				errors.LogInfo(context.Background(), "stream-up mode is not allowed")
 				writer.WriteHeader(http.StatusBadRequest)
 				return
@@ -394,7 +396,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 
-		if h.config.Mode != "" && h.config.Mode != "auto" && h.config.Mode != "packet-up" {
+		if !ServerModeAllowsPacketUp(h.config.Mode) {
 			errors.LogInfo(context.Background(), "packet-up mode is not allowed")
 			writer.WriteHeader(http.StatusBadRequest)
 			return
@@ -523,6 +525,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		h.updateAvgRTT(time.Since(reqStart))
 		writer.WriteHeader(http.StatusOK)
 	} else if request.Method == "GET" || sessionId == "" { // stream-down, stream-one
+		// Locked stream-one: no sessioned download leg (that is stream-up/packet-up).
+		if sessionId != "" && NormalizeXHTTPMode(h.config.Mode) == "stream-one" {
+			errors.LogInfo(context.Background(), "sessioned download is not allowed in mode: stream-one")
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		// Locked packet-up/stream-up without session already rejected above.
+		// Locked packet-up with empty sessionId rejected by ServerModeAllowsStreamOne.
 		if sessionId != "" {
 			// after GET is done, the connection is finished. disable automatic
 			// session reaping, and handle it in defer
