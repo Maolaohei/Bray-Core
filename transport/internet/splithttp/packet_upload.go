@@ -30,7 +30,6 @@ const packetUploadDefaultWindow = 8
 // buffer size (H1 pool, memory, and CDN concurrency friendliness).
 const packetUploadMaxWindow = 16
 
-
 // durableLocal reuses modest durable snapshots for postPacketReliable.
 // Store *durableLocal so Put never captures a stack-local slice header.
 type durableLocal struct {
@@ -88,7 +87,6 @@ func freeDurable(b []byte, kind int, dl *durableLocal) {
 		}
 	}
 }
-
 
 // packetUploadWindow returns the client POST in-flight window.
 // It never exceeds half of the server's reorder capacity so misordered
