@@ -7,15 +7,25 @@ import (
 	"time"
 )
 
-// TestSOCKS5_RapidNewPages 模拟真实环境：通过 SOCKS5 代理快速创建新连接
-// 用于复现"新网页卡一下"的问题
+// TestSOCKS5_RapidNewPages is a manual integration probe against a local SOCKS5 proxy.
+// It reproduces the "new page stalls briefly" symptom when v2rayN is listening.
 //
-// 使用方法：
-// 1. 启动 v2rayN，确保 SOCKS5 代理在 127.0.0.1:9996 运行
-// 2. 运行: go test -v -run TestSOCKS5_RapidNewPages -count=1 ./testing/scenarios/
+// Usage:
+// 1. Start v2rayN and ensure SOCKS5 is available at 127.0.0.1:9996
+// 2. Run: go test -v -run TestSOCKS5_RapidNewPages -count=1 ./testing/scenarios/
 func TestSOCKS5_RapidNewPages(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping manual SOCKS5 stall probe under -short")
+	}
+
 	proxyAddr := "127.0.0.1:9996"
-	// 测试目标：访问常见网站
+	// Manual integration probe: requires a local v2rayN/SOCKS5 listener.
+	if conn, err := net.DialTimeout("tcp", proxyAddr, 500*time.Millisecond); err != nil {
+		t.Skipf("skipping: local SOCKS5 proxy not available at %s: %v", proxyAddr, err)
+	} else {
+		_ = conn.Close()
+	}
+
 	targets := []string{
 		"www.google.com:443",
 		"www.youtube.com:443",
@@ -24,8 +34,7 @@ func TestSOCKS5_RapidNewPages(t *testing.T) {
 		"www.cloudflare.com:443",
 	}
 
-	// 阶段 1：快速创建新连接（模拟新网页）
-	t.Log("Phase 1: 快速创建新连接...")
+	t.Log("Phase 1: rapid new connections...")
 	var (
 		totalConns   int
 		totalStalls  int
@@ -43,16 +52,16 @@ func TestSOCKS5_RapidNewPages(t *testing.T) {
 			continue
 		}
 
-		// SOCKS5 握手
-		conn.Write([]byte{0x05, 0x01, 0x00})
+		// SOCKS5 handshake
+		_, _ = conn.Write([]byte{0x05, 0x01, 0x00})
 		buf := make([]byte, 2)
-		conn.Read(buf)
+		_, _ = conn.Read(buf)
 
-		// SOCKS5 连接请求
+		// SOCKS5 connect request
 		req := buildSocks5Connect(target)
-		conn.Write(req)
+		_, _ = conn.Write(req)
 		resp := make([]byte, 10)
-		conn.Read(resp)
+		_, _ = conn.Read(resp)
 
 		latency := time.Since(start)
 		totalLatency += latency
@@ -63,49 +72,46 @@ func TestSOCKS5_RapidNewPages(t *testing.T) {
 			totalStalls++
 		}
 
-		conn.Close()
+		_ = conn.Close()
 	}
 
+	t.Logf("=== rapid new connection probe ===")
+	t.Logf("  connections: %d, stalls/failures: %d", totalConns, totalStalls)
+	if totalConns == 0 {
+		t.Fatal("no successful SOCKS5 connections; cannot evaluate stall ratio")
+	}
 	avgLatency := totalLatency / time.Duration(totalConns)
-	t.Logf("=== 快速新连接测试 ===")
-	t.Logf("  连接数: %d, 失败: %d", totalConns, totalStalls)
-	t.Logf("  平均延迟: %v", avgLatency)
+	t.Logf("  average latency: %v", avgLatency)
 
-	// 阶段 2：复用连接测试
-	t.Log("Phase 2: 测试连接复用...")
+	t.Log("Phase 2: connection reuse...")
 	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
 
-	// SOCKS5 握手
-	conn.Write([]byte{0x05, 0x01, 0x00})
+	// SOCKS5 handshake
+	_, _ = conn.Write([]byte{0x05, 0x01, 0x00})
 	buf := make([]byte, 2)
-	conn.Read(buf)
+	_, _ = conn.Read(buf)
 
-	// 连接目标
 	req := buildSocks5Connect("www.google.com:443")
-	conn.Write(req)
+	_, _ = conn.Write(req)
 	resp := make([]byte, 10)
-	conn.Read(resp)
+	_, _ = conn.Read(resp)
 
-	// 复用连接发送多次请求
 	reuseStart := time.Now()
 	for i := 0; i < 10; i++ {
 		req := buildSocks5Connect(targets[i%len(targets)])
-		conn.Write(req)
+		_, _ = conn.Write(req)
 		resp := make([]byte, 10)
-		conn.Read(resp)
+		_, _ = conn.Read(resp)
 	}
 	reuseTime := time.Since(reuseStart)
-	t.Logf("  复用 10 次: %v (平均 %v/次)", reuseTime, reuseTime/10)
+	t.Logf("  reuse 10 times: %v (mean %v/req)", reuseTime, reuseTime/10)
 
-	// 对比
-	if totalConns > 0 {
-		ratio := float64(totalLatency/time.Duration(totalConns)) / float64(reuseTime/10)
-		t.Logf("  新建/复用比: %.1fx", ratio)
-	}
+	ratio := float64(totalLatency/time.Duration(totalConns)) / float64(reuseTime/10)
+	t.Logf("  new/reuse ratio: %.1fx", ratio)
 }
 
 func buildSocks5Connect(target string) []byte {
