@@ -64,9 +64,9 @@ func marshalAddons(addons *Addons) []byte {
 	}
 
 	// Fast path for common case: Flow = "xtls-rprx-vision", Seed = nil
-	// Pre-computed: 0x0a 0x11 "xtls-rprx-vision" = 19 bytes
-	if flowLen == 17 && seedLen == 0 && flow == "xtls-rprx-vision" {
-		return []byte{0x0a, 0x11,
+	// Pre-computed: 0x0a 0x10 "xtls-rprx-vision" = 18 bytes
+	if flowLen == 16 && seedLen == 0 && flow == "xtls-rprx-vision" {
+		return []byte{0x0a, 0x10,
 			'x', 't', 'l', 's', '-', 'r', 'p', 'r', 'x', '-', 'v', 'i', 's', 'i', 'o', 'n'}
 	}
 
@@ -93,7 +93,7 @@ func marshalAddons(addons *Addons) []byte {
 	if flowLen > 0 {
 		result[pos] = 0x0a // (1 << 3) | 2
 		pos++
-		pos = putVarint(result[pos:], uint32(flowLen))
+		pos += putVarint(result[pos:], uint32(flowLen))
 		copy(result[pos:], flow)
 		pos += flowLen
 	}
@@ -102,7 +102,7 @@ func marshalAddons(addons *Addons) []byte {
 	if seedLen > 0 {
 		result[pos] = 0x12 // (2 << 3) | 2
 		pos++
-		pos = putVarint(result[pos:], uint32(seedLen))
+		pos += putVarint(result[pos:], uint32(seedLen))
 		copy(result[pos:], seed)
 		pos += seedLen
 	}

@@ -135,3 +135,63 @@ func TestDecodeRequestHeader_TCPRoundTrip(t *testing.T) {
 		t.Fatal("nil addons")
 	}
 }
+
+func TestMarshalAddons_VisionRoundTrip(t *testing.T) {
+	addons := &Addons{Flow: vless.XRV}
+	encoded := MarshalAddons(addons)
+	// Protobuf wire: field1 tag(0x0a) + len(0x10) + "xtls-rprx-vision"
+	want := []byte{0x0a, 0x10,
+		'x', 't', 'l', 's', '-', 'r', 'p', 'r', 'x', '-', 'v', 'i', 's', 'i', 'o', 'n'}
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("marshal vision addons = %x, want %x", encoded, want)
+	}
+
+	header := buf.StackNew()
+	defer header.Release()
+	common.Must(EncodeHeaderAddons(&header, addons))
+
+	decoded := &Addons{}
+	tmp := buf.New()
+	defer tmp.Release()
+	common.Must(DecodeHeaderAddons(tmp, bytes.NewReader(header.Bytes()), decoded))
+	if decoded.Flow != vless.XRV {
+		t.Fatalf("decoded flow=%q, want %q", decoded.Flow, vless.XRV)
+	}
+	if len(decoded.Seed) != 0 {
+		t.Fatalf("decoded seed=%v, want empty", decoded.Seed)
+	}
+}
+
+func TestMarshalAddons_WithSeedRoundTrip(t *testing.T) {
+	seed := bytes.Repeat([]byte{0xab}, 32)
+	addons := &Addons{Flow: "custom-flow", Seed: seed}
+	encoded := MarshalAddons(addons)
+	// field1(0x0a)+len(11)+"custom-flow"+field2(0x12)+len(32)+seed
+	if len(encoded) != 1+1+11+1+1+32 {
+		t.Fatalf("encoded len=%d, want %d (%x)", len(encoded), 47, encoded)
+	}
+	if encoded[0] != 0x0a || encoded[1] != 11 {
+		t.Fatalf("flow header = %x %x", encoded[0], encoded[1])
+	}
+	if string(encoded[2:13]) != "custom-flow" {
+		t.Fatalf("flow bytes = %q", encoded[2:13])
+	}
+	if encoded[13] != 0x12 || encoded[14] != 32 {
+		t.Fatalf("seed header = %x %x", encoded[13], encoded[14])
+	}
+
+	header := buf.StackNew()
+	defer header.Release()
+	common.Must(EncodeHeaderAddons(&header, addons))
+
+	decoded := &Addons{}
+	tmp := buf.New()
+	defer tmp.Release()
+	common.Must(DecodeHeaderAddons(tmp, bytes.NewReader(header.Bytes()), decoded))
+	if decoded.Flow != "custom-flow" {
+		t.Fatalf("flow=%q", decoded.Flow)
+	}
+	if !bytes.Equal(decoded.Seed, seed) {
+		t.Fatalf("seed mismatch: %x", decoded.Seed)
+	}
+}
