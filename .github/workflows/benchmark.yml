@@ -41,7 +41,7 @@ jobs:
       # Restore only baseline artifacts before generating new results, so cache
       # restore cannot clobber the fresh new_*.txt files.
       - name: Download baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: bench_baseline
           key: benchmark-baseline-${{ github.base_ref || 'main' }}
@@ -273,7 +273,7 @@ jobs:
 
       - name: Cache baseline
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: bench_baseline
           key: benchmark-baseline-main-${{ github.sha }}
