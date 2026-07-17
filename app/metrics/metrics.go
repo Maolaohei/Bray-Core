@@ -161,7 +161,7 @@ func (p *MetricsHandler) handleDebugVars(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Write(payload)
+	_, _ = w.Write(payload)
 }
 
 func marshalJSON(value interface{}) json.RawMessage {

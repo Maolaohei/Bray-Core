@@ -32,7 +32,8 @@ func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
 }
 
 func (o *Observer) Check(tag []string) {
-	o.hp.Check(tag)
+	// BurstObservatory.Check has no error return; ignore healthping result.
+	_ = o.hp.Check(tag)
 }
 
 func (o *Observer) createResult() []*observatory.OutboundStatus {

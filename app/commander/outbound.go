@@ -75,8 +75,8 @@ func (co *Outbound) Dispatch(ctx context.Context, link *transport.Link) {
 	co.access.RLock()
 
 	if co.closed {
-		common.Interrupt(link.Reader)
-		common.Interrupt(link.Writer)
+		_ = common.Interrupt(link.Reader)
+		_ = common.Interrupt(link.Writer)
 		co.access.RUnlock()
 		return
 	}

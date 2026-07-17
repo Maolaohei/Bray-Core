@@ -166,16 +166,16 @@ func (d *downloader) downloadOne(asset *Asset) (stage, error) {
 	keepTemp := false
 	defer func() {
 		if !keepTemp {
-			os.Remove(tempName)
+			_ = os.Remove(tempName)
 		}
 	}()
 
 	if err := d.fetch(asset.Url, temp); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return stage{}, err
 	}
 	if err := temp.Chmod(0o644); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return stage{}, err
 	}
 	if err := temp.Close(); err != nil {
@@ -209,7 +209,7 @@ func (d *downloader) fetch(rawURL string, writer io.Writer) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return errors.New("unexpected status code: ", resp.StatusCode)
 	}
 
@@ -338,7 +338,7 @@ func backupFile(target string) (string, error) {
 	}
 	name := file.Name()
 	if err := file.Close(); err != nil {
-		os.Remove(name)
+		_ = os.Remove(name)
 		return "", err
 	}
 	if err := os.Remove(name); err != nil {
