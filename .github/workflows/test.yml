@@ -46,16 +46,16 @@ jobs:
         with:
           go-version: '1.26'
 
-      # 自动修复格式不规范的代码
+      # Auto-fix nonstandard formatting
       - name: Run gofmt Auto Fix
         run: |
           gofmt -s -w .
 
-      # 检测代码是否被修改，若有，自动生成 Commit 机器人推回仓库
+      # Commit formatting fixes back when needed
       - name: Auto Commit Formatted Changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: 自动格式化 Go 代码 (gofmt 自动修复)"
+          commit_message: "chore: auto format Go code (gofmt)"
           branch: ${{ github.head_ref || github.ref_name }}
 
   lint:
@@ -72,10 +72,13 @@ jobs:
         with:
           go-version: '1.26'
 
+      # golangci-lint v1.x is built with older Go and fails against go1.26.
+      # Action v9 runs on Node 24 and supports golangci-lint v2.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
+          args: --timeout=5m
 
   test:
     runs-on: ${{ matrix.os }}
@@ -97,11 +100,38 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: resources
+          # scheduled-assets-update saves xray-geodat-${{sha}}-${{run_number}}.
+          # Prefix restore so any recent assets cache can hit.
           key: xray-geodat-${{ github.sha }}
+          restore-keys: |
+            xray-geodat-
+      - name: Ensure Geodat Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p resources
+          ensure_asset() {
+            local name="$1"
+            local url="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/${name}"
+            if [ -s "resources/${name}" ]; then
+              echo "${name} present ($(wc -c < "resources/${name}") bytes)"
+              return 0
+            fi
+            echo "Downloading ${name} from ${url}..."
+            curl -fsSL --retry 5 --retry-delay 2 -o "resources/${name}" "${url}"
+            if [ ! -s "resources/${name}" ]; then
+              echo "failed to download ${name}" >&2
+              exit 1
+            fi
+            echo "${name} downloaded ($(wc -c < "resources/${name}") bytes)"
+          }
+          ensure_asset geoip.dat
+          ensure_asset geosite.dat
       - name: Test codebase
         run: |
           go env -w GONOSUMDB=*
-          go test -short -timeout 120s ./...
+          # Keep CI under the 120s package budget; long stress suites are skipped via testing.Short().
+          go test -short -timeout 120s -count=1 ./...
         env:
           GONOSUMDB: '*'
 
@@ -109,7 +139,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           go env -w GONOSUMDB=*
-          go test -race -short -timeout 120s \
+          go test -race -short -timeout 120s -count=1 \
             ./transport/internet/splithttp/ \
             ./transport/internet/quality/ \
             ./transport/internet/tcpinfo/ \

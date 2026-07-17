@@ -33,41 +33,107 @@ jobs:
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
 
+      - name: Prepare results directory
+        run: |
+          mkdir -p bench_results
+          mkdir -p bench_baseline
+
+      # Restore only baseline artifacts before generating new results, so cache
+      # restore cannot clobber the fresh new_*.txt files.
+      - name: Download baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: bench_baseline
+          key: benchmark-baseline-${{ github.base_ref || 'main' }}
+          restore-keys: |
+            benchmark-baseline-
+
+      - name: Materialize baseline files
+        run: |
+          shopt -s nullglob
+          for f in bench_baseline/base_*.txt; do
+            cp "$f" "bench_results/$(basename "$f")"
+          done
+          ls -la bench_results || true
+          ls -la bench_baseline || true
+
+      # Capture only go test stdout so log/panic noise does not break benchstat.
       - name: Run XMUX benchmarks
         run: |
-          go test -run=XXX -bench=BenchmarkXMUX -benchmem -count=3 -timeout=180s \
-            ./transport/internet/splithttp/ > bench_results/new_xmux.txt
+          set -o pipefail
+          go test -run=^$ -bench=BenchmarkXMUX -benchmem -count=3 -timeout=180s \
+            ./transport/internet/splithttp/ \
+            2> bench_results/new_xmux.err | tee bench_results/new_xmux.raw | \
+            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            > bench_results/new_xmux.txt || true
+          if ! grep -q '^Benchmark' bench_results/new_xmux.txt; then
+            echo "XMUX benchmark produced no Benchmark lines" | tee bench_results/new_xmux.txt
+            cat bench_results/new_xmux.err || true
+            exit 1
+          fi
 
       - name: Run Happy Eyeballs benchmarks
         run: |
-          go test -run=XXX -bench='Benchmark(Score|ClampRTT)' -benchmem -count=3 -timeout=180s \
-            ./transport/internet/ > bench_results/new_happy.txt
+          set -o pipefail
+          go test -run=^$ -bench='Benchmark(Score|ClampRTT)' -benchmem -count=3 -timeout=180s \
+            ./transport/internet/ \
+            2> bench_results/new_happy.err | tee bench_results/new_happy.raw | \
+            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            > bench_results/new_happy.txt || true
+          if ! grep -q '^Benchmark' bench_results/new_happy.txt; then
+            echo "Happy Eyeballs benchmark produced no Benchmark lines" | tee bench_results/new_happy.txt
+            cat bench_results/new_happy.err || true
+            exit 1
+          fi
 
-      - name: Run Warmup benchmarks
+      - name: Run Warmup/Metrics benchmarks
         run: |
-          go test -run=XXX -bench='BenchmarkWarmup|BenchmarkMetrics' -benchmem -count=3 -timeout=180s \
-            ./transport/internet/ > bench_results/new_warmup.txt
+          set -o pipefail
+          # Keep the historical "warmup" artifact name for baseline cache compatibility.
+          # Prefer Warmup/Metrics names; fall back to XMUX metrics if those symbols are absent.
+          go test -run=^$ -bench='Benchmark(Warmup|Metrics|XMUXMetrics)' -benchmem -count=3 -timeout=180s \
+            ./transport/internet/ ./transport/internet/splithttp/ \
+            2> bench_results/new_warmup.err | tee bench_results/new_warmup.raw | \
+            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            > bench_results/new_warmup.txt || true
+          if ! grep -q '^Benchmark' bench_results/new_warmup.txt; then
+            echo "Warmup/Metrics benchmark produced no Benchmark lines" | tee bench_results/new_warmup.txt
+            cat bench_results/new_warmup.err || true
+            exit 1
+          fi
 
       - name: Run VLESS Decode benchmarks
         run: |
-          go test -run=XXX -bench='BenchmarkDecodeHeader|BenchmarkMarshalAddons' -benchmem -count=3 -timeout=180s \
-            ./proxy/vless/encoding/ > bench_results/new_vless.txt
+          set -o pipefail
+          go test -run=^$ -bench='Benchmark(DecodeHeader|MarshalAddons)' -benchmem -count=3 -timeout=180s \
+            ./proxy/vless/encoding/ \
+            2> bench_results/new_vless.err | tee bench_results/new_vless.raw | \
+            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            > bench_results/new_vless.txt || true
+          if ! grep -q '^Benchmark' bench_results/new_vless.txt; then
+            echo "VLESS benchmark produced no Benchmark lines" | tee bench_results/new_vless.txt
+            cat bench_results/new_vless.err || true
+            exit 1
+          fi
 
       - name: Run Buffer benchmarks
         run: |
-          go test -run=XXX -bench='BenchmarkNewBuffer|BenchmarkCopy|BenchmarkSplitBytes' -benchmem -count=3 -timeout=180s \
-            ./common/buf/ > bench_results/new_buf.txt
-
-      - name: Download baseline
-        uses: actions/cache@v4
-        with:
-          path: bench_results
-          key: benchmark-baseline-${{ github.base_ref || 'main' }}
-          restore-keys: benchmark-baseline-
+          set -o pipefail
+          go test -run=^$ -bench='Benchmark(NewBuffer|Copy|SplitBytes)' -benchmem -count=3 -timeout=180s \
+            ./common/buf/ \
+            2> bench_results/new_buf.err | tee bench_results/new_buf.raw | \
+            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            > bench_results/new_buf.txt || true
+          if ! grep -q '^Benchmark' bench_results/new_buf.txt; then
+            echo "Buffer benchmark produced no Benchmark lines" | tee bench_results/new_buf.txt
+            cat bench_results/new_buf.err || true
+            exit 1
+          fi
 
       - name: Compare benchmarks
         id: compare
         run: |
+          set -euo pipefail
           echo "## Benchmark Results" > bench_results/report.md
           echo "" >> bench_results/report.md
 
@@ -79,6 +145,17 @@ jobs:
             fi
           done
 
+          sanitize_bench() {
+            local src="$1"
+            local dst="$2"
+            # Keep only lines benchstat can parse. Drop log/panic/garbage noise.
+            if [ -f "$src" ]; then
+              grep -E '^(Benchmark[[:alnum:]_./-]+[[:space:]]+[0-9]+[[:space:]]|pkg:|goos:|goarch:|cpu:|PASS|FAIL|ok[[:space:]])' "$src" > "$dst" || true
+            else
+              : > "$dst"
+            fi
+          }
+
           if [ "$HAS_BASELINE" = true ]; then
             echo "### Comparison with baseline" >> bench_results/report.md
             echo "" >> bench_results/report.md
@@ -86,8 +163,17 @@ jobs:
 
             for name in xmux happy warmup vless buf; do
               if [ -f "bench_results/base_${name}.txt" ] && [ -f "bench_results/new_${name}.txt" ]; then
+                sanitize_bench "bench_results/base_${name}.txt" "bench_results/base_${name}.clean.txt"
+                sanitize_bench "bench_results/new_${name}.txt" "bench_results/new_${name}.clean.txt"
                 echo "=== ${name} ===" >> bench_results/report.md
-                benchstat bench_results/base_${name}.txt bench_results/new_${name}.txt >> bench_results/report.md 2>&1 || true
+                if [ -s "bench_results/base_${name}.clean.txt" ] && [ -s "bench_results/new_${name}.clean.txt" ]; then
+                  if ! benchstat "bench_results/base_${name}.clean.txt" "bench_results/new_${name}.clean.txt" >> bench_results/report.md 2>> bench_results/report.md; then
+                    echo "benchstat failed for ${name}; falling back to current results only." >> bench_results/report.md
+                    head -n 40 "bench_results/new_${name}.clean.txt" >> bench_results/report.md
+                  fi
+                else
+                  echo "skipped: missing clean benchmark lines" >> bench_results/report.md
+                fi
                 echo "" >> bench_results/report.md
               fi
             done
@@ -104,12 +190,29 @@ jobs:
           echo '```' >> bench_results/report.md
           for f in bench_results/new_*.txt; do
             if [ -f "$f" ]; then
-              echo "--- $(basename $f .txt) ---" >> bench_results/report.md
-              cat "$f" >> bench_results/report.md
+              echo "--- $(basename "$f" .txt) ---" >> bench_results/report.md
+              # Cap each result file in the report so one bad run cannot explode the PR comment.
+              head -n 200 "$f" >> bench_results/report.md
+              lines=$(wc -l < "$f" | tr -d ' ')
+              if [ "$lines" -gt 200 ]; then
+                echo "... truncated $((lines-200)) more lines ..." >> bench_results/report.md
+              fi
               echo "" >> bench_results/report.md
             fi
           done
           echo '```' >> bench_results/report.md
+
+          # Hard cap the markdown report itself (GitHub issue comment limit is 65536).
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('bench_results/report.md')
+          text = p.read_text(encoding='utf-8', errors='replace')
+          limit = 50000
+          if len(text) > limit:
+              text = text[:limit] + "\n\n...(content truncated to stay under GitHub comment limit)...\n"
+              p.write_text(text, encoding='utf-8')
+          print(f"report_chars={len(text)}")
+          PY
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
@@ -117,20 +220,54 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const report = fs.readFileSync('bench_results/report.md', 'utf8');
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: report
+            let report = fs.readFileSync('bench_results/report.md', 'utf8');
+            const MAX = 50000;
+            if (report.length > MAX) {
+              report = report.slice(0, MAX) + "\n\n...(content truncated to stay under GitHub comment limit)...";
+            }
+
+            const marker = '<!-- bray-core-benchmark-report -->';
+            const body = `${marker}\n${report}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
             });
+            const existing = comments.find((c) => c.user?.type === 'Bot' && c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
 
       - name: Save baseline
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
+          mkdir -p bench_baseline
           for name in xmux happy warmup vless buf; do
             if [ -f "bench_results/new_${name}.txt" ]; then
-              cp "bench_results/new_${name}.txt" "bench_results/base_${name}.txt"
+              # Persist only benchstat-compatible lines.
+              if grep -E '^(Benchmark[[:alnum:]_./-]+[[:space:]]+[0-9]+[[:space:]]|pkg:|goos:|goarch:|cpu:)' \
+                "bench_results/new_${name}.txt" > "bench_baseline/base_${name}.txt"; then
+                :
+              else
+                cp "bench_results/new_${name}.txt" "bench_baseline/base_${name}.txt"
+              fi
+              cp "bench_baseline/base_${name}.txt" "bench_results/base_${name}.txt"
             fi
           done
 
@@ -138,5 +275,5 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
-          path: bench_results/base_*.txt
+          path: bench_baseline
           key: benchmark-baseline-main-${{ github.sha }}

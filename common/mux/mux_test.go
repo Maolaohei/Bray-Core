@@ -100,16 +100,10 @@ func TestReaderWriter_MultiSession(t *testing.T) {
 
 	pWriter.Close()
 
-	rawMB, _ := pReader.ReadMultiBuffer()
-	var raw []byte
-	for _, b := range rawMB {
-		if b != nil {
-			raw = append(raw, b.BytesTo(b.Len())...)
-		}
-	}
-	t.Logf("RAW (%d bytes): %x", len(raw), raw)
-
-	bytesReader := &buf.BufferedReader{Buffer: rawMB}
+	// Drain through the pipe reader continuously. A one-shot ReadMultiBuffer()
+	// can leave FrameMetadata.Unmarshal with only a partial Buffer and a nil
+	// underlying Reader, which panics on the next read.
+	bytesReader := &buf.BufferedReader{Reader: pReader}
 
 	type parsedFrame struct {
 		meta    FrameMetadata

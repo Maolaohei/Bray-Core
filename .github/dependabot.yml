@@ -9,6 +9,11 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "daily"
+    # apernet/quic-go is a deliberate fork. Newer tags often ship a go.mod that
+    # declares module github.com/quic-go/quic-go, which makes Dependabot fail
+    # with go_module_path_mismatch and cannot be auto-bumped safely.
+    ignore:
+      - dependency-name: "github.com/apernet/quic-go"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

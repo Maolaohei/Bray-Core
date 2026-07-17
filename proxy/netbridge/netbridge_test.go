@@ -338,7 +338,13 @@ func TestNetBridge_Init_NonLoopback(t *testing.T) {
 func TestNetBridge_Network(t *testing.T) {
 	n := &NetBridge{}
 	networks := n.Network()
+	// Without UDP configured, NetBridge only listens on TCP.
+	if len(networks) != 1 {
+		t.Fatalf("Network() returned %d networks, want 1 when UdpPort is unset", len(networks))
+	}
+	n.config = &Config{UdpPort: 35001}
+	networks = n.Network()
 	if len(networks) != 2 {
-		t.Errorf("Network() returned %d networks, want 2", len(networks))
+		t.Fatalf("Network() returned %d networks, want 2 when UdpPort is set", len(networks))
 	}
 }

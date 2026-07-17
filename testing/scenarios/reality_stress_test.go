@@ -178,6 +178,9 @@ func httpsRequest(proxyPort int, host, path string, timeout time.Duration) stres
 
 // TestREALITYHighConcurrentAccess 50 并发 × 3 域名 × 10 轮，验证稳定性。
 func TestREALITYHighConcurrentAccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY stress test in short mode")
+	}
 	const concurrency = 50
 	const rounds = 10
 
@@ -263,6 +266,9 @@ func TestREALITYHighConcurrentAccess(t *testing.T) {
 // TestREALITYLargeFileDownload 通过 REALITY 隧道传输大块数据，验证长连接稳定性。
 // 使用本地 echo 服务器，分块写入+读取验证不断流。
 func TestREALITYLargeFileDownload(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY stress test in short mode")
+	}
 	const (
 		chunkSize = 256 * 1024 // 256KB/块
 		chunks    = 40         // 40 块 = 10 MB 总计
@@ -418,6 +424,9 @@ func TestREALITYLargeFileDownload(t *testing.T) {
 
 // TestREALITYGoroutineStability 验证测试结束后 goroutine 数量回落。
 func TestREALITYGoroutineStability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY stress test in short mode")
+	}
 	clientPort, cleanup := buildStressConfig(t, "/stress-goroutine")
 	defer cleanup()
 	time.Sleep(3 * time.Second)
@@ -539,6 +548,9 @@ func buildXHTTPModeConfig(t *testing.T, mode string) (clientPort xraynet.Port, c
 
 // TestREALITYXHTTPModes 三种 XHTTP 模式 × 10 并发 × 5 轮，验证每种模式稳定性。
 func TestREALITYXHTTPModes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY stress test in short mode")
+	}
 	modes := []string{"packet-up", "stream-up", "stream-one"}
 
 	for _, mode := range modes {
@@ -890,6 +902,9 @@ func printResourceTop10(t *testing.T, heapTop, cpuTop []profileEntry) {
 
 // TestREALITYFullSuiteWithPprof 完整测试套件 + pprof 真机分析。
 func TestREALITYFullSuiteWithPprof(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY stress test in short mode")
+	}
 	pprofPort := 19090 + int(time.Now().UnixNano()%1000)
 
 	// === 阶段 1: 基线采集 ===
@@ -1095,6 +1110,9 @@ func TestREALITYFullSuiteWithPprof(t *testing.T) {
 // TestREALITYShowFalseBenchmark 对比 Show:true vs Show:false 的性能差异。
 // 预期: Show:false 冷连接从 477ms 暴降到 <20ms，高并发 CPU 占用大幅下降。
 func TestREALITYShowFalseBenchmark(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY stress test in short mode")
+	}
 	type benchResult struct {
 		showDebug       bool
 		coldConnMs      int64
