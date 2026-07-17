@@ -529,7 +529,11 @@ func TestUDPConnection(t *testing.T) {
 		t.Error(err)
 	}
 
-	time.Sleep(20 * time.Second)
+	if testing.Short() {
+		time.Sleep(time.Second)
+	} else {
+		time.Sleep(20 * time.Second)
+	}
 
 	if err := testUDPConn(clientPort, 1024, time.Second*5)(); err != nil {
 		t.Error(err)

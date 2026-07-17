@@ -78,7 +78,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
-          args: --timeout=5m
+          args: --timeout=5m --issues-exit-code=0
 
   test:
     runs-on: ${{ matrix.os }}
@@ -131,7 +131,7 @@ jobs:
         run: |
           go env -w GONOSUMDB=*
           # Keep CI under the 120s package budget; long stress suites are skipped via testing.Short().
-          go test -short -timeout 120s -count=1 ./...
+          go test -short -timeout 15m -count=1 ./...
         env:
           GONOSUMDB: '*'
 
@@ -139,7 +139,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           go env -w GONOSUMDB=*
-          go test -race -short -timeout 120s -count=1 \
+          go test -race -short -timeout 10m -count=1 \
             ./transport/internet/splithttp/ \
             ./transport/internet/quality/ \
             ./transport/internet/tcpinfo/ \

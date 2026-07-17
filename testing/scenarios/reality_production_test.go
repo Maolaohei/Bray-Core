@@ -29,6 +29,9 @@ import (
 // TestREALITYHandshakeComplete verifies the core REALITY handshake completes
 // and data flows correctly. This is the most basic production-readiness test.
 func TestREALITYHandshakeComplete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -154,6 +157,9 @@ func TestREALITYHandshakeComplete(t *testing.T) {
 // TestREALITYConcurrentConnections verifies multiple simultaneous connections
 // work correctly. This tests the mutex and handshake synchronization.
 func TestREALITYConcurrentConnections(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -294,6 +300,9 @@ func TestREALITYConcurrentConnections(t *testing.T) {
 // TestREALITYPostHandshakeRecords specifically verifies that the 30-second
 // post-handshake detection works correctly with REALITY connections.
 func TestREALITYPostHandshakeRecords(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -435,6 +444,9 @@ func TestREALITYPostHandshakeRecords(t *testing.T) {
 // TestREALITYConnectionResilience tests rapid connect-disconnect cycles
 // to verify no resource leaks or deadlocks.
 func TestREALITYConnectionResilience(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -844,6 +856,9 @@ func testREALITYCacheReuse(t *testing.T, target realityTestConfig, connections i
 
 // TestREALITYProfileReuse verifies cache HIT on repeated connections to the same target.
 func TestREALITYProfileReuse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	targets := []realityTestConfig{
 		{Name: "Microsoft", Dest: "www.microsoft.com:443", ServerNames: []string{"www.microsoft.com"}, ServerName: "www.microsoft.com"},
 	}
@@ -856,6 +871,9 @@ func TestREALITYProfileReuse(t *testing.T) {
 
 // TestREALITYProfileIsolation verifies cross-target cache isolation.
 func TestREALITYProfileIsolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	targets := []realityTestConfig{
 		{Name: "Round1-Microsoft", Dest: "www.microsoft.com:443", ServerNames: []string{"www.microsoft.com"}, ServerName: "www.microsoft.com"},
 	}

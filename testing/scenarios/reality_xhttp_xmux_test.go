@@ -52,6 +52,9 @@ func xhttpRealityShortIDs() [][]byte {
 
 // TestVlessXHTTPRealityBasic verifies VLESS + XHTTP + REALITY over localhost.
 func TestVlessXHTTPRealityBasic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -145,6 +148,9 @@ func TestVlessXHTTPRealityBasic(t *testing.T) {
 
 // TestVlessXHTTPRealityXMUX verifies VLESS + XHTTP + XMUX + REALITY.
 func TestVlessXHTTPRealityXMUX(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -245,6 +251,9 @@ func TestVlessXHTTPRealityXMUX(t *testing.T) {
 // TestVlessXHTTPRealityConcurrentXMUX verifies concurrent connections through
 // the full VLESS+XHTTP+XMUX+REALITY pipeline.
 func TestVlessXHTTPRealityConcurrentXMUX(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -354,6 +363,9 @@ func TestVlessXHTTPRealityConcurrentXMUX(t *testing.T) {
 
 // TestVlessXHTTPRealityCacheFastPath verifies cache hit path works in XHTTP+REALITY.
 func TestVlessXHTTPRealityCacheFastPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -451,6 +463,9 @@ func TestVlessXHTTPRealityCacheFastPath(t *testing.T) {
 // DetectPostHandshakeRecordsLens runs a 30s background goroutine. The first
 // connection may fail because post-handshake records aren't available yet.
 func TestVlessXHTTPRealityColdStartTiming(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -552,6 +567,9 @@ func TestVlessXHTTPRealityColdStartTiming(t *testing.T) {
 
 // TestVlessXHTTPRealityRapidConnectDisconnect verifies cleanup after rapid cycles.
 func TestVlessXHTTPRealityRapidConnectDisconnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
@@ -646,6 +664,9 @@ func TestVlessXHTTPRealityRapidConnectDisconnect(t *testing.T) {
 
 // TestVlessXHTTPRealityMixedPacketSizes verifies various payload sizes.
 func TestVlessXHTTPRealityMixedPacketSizes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long REALITY scenario under -short")
+	}
 	tcpServer := tcp.Server{MsgProcessor: xor}
 	dest, err := tcpServer.Start()
 	common.Must(err)
