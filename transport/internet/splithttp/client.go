@@ -54,19 +54,13 @@ type DefaultDialerClient struct {
 	// pool of H1 upload conns, created using dialUploadConn (bounded)
 	uploadRawPool  *h1ConnPool
 	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
-	// onRTT is called after each request completes with the measured RTT.
-	// Used for RTT-aware scheduling in XmuxManager.
-	onRTT func(rtt time.Duration)
-	// onTTFB is called once when the first response byte/headers arrive for a
-	// successful stream open. Used for XMUX pool health metrics (not scheduling).
-	onTTFB func(ttfb time.Duration)
-	// onNewConn is called when a new raw TCP connection is established.
-	// Used by TransportProfile to start TCP_INFO sampling.
-	// The conn argument is the raw TCP socket (before TLS/REALITY wrapping).
-	onNewConn func(conn net.Conn)
-	// onFatalError is called when a fatal connection error is detected.
-	// Used by Fast Eviction to immediately remove dead clients from the pool.
-	onFatalError func(err error)
+	// Callbacks are stored atomically because getHTTPClient may re-wire them
+	// from concurrent Dial paths while OpenStream/PostPacket read them.
+	// Values are function objects; nil means unset.
+	onRTT        atomic.Value // func(time.Duration)
+	onTTFB       atomic.Value // func(time.Duration)
+	onNewConn    atomic.Value // func(net.Conn)
+	onFatalError atomic.Value // func(error)
 }
 
 func (c *DefaultDialerClient) IsClosed() bool {
@@ -75,22 +69,70 @@ func (c *DefaultDialerClient) IsClosed() bool {
 
 // SetOnRTT sets the callback for RTT measurement.
 func (c *DefaultDialerClient) SetOnRTT(fn func(rtt time.Duration)) {
-	c.onRTT = fn
+	if fn == nil {
+		c.onRTT.Store((func(time.Duration))(nil))
+		return
+	}
+	c.onRTT.Store(fn)
 }
 
 // SetOnTTFB sets the callback for Time-To-First-Byte measurement on stream open.
 func (c *DefaultDialerClient) SetOnTTFB(fn func(ttfb time.Duration)) {
-	c.onTTFB = fn
+	if fn == nil {
+		c.onTTFB.Store((func(time.Duration))(nil))
+		return
+	}
+	c.onTTFB.Store(fn)
 }
 
 // SetOnNewConn sets the callback for new raw TCP connections.
 func (c *DefaultDialerClient) SetOnNewConn(fn func(conn net.Conn)) {
-	c.onNewConn = fn
+	if fn == nil {
+		c.onNewConn.Store((func(net.Conn))(nil))
+		return
+	}
+	c.onNewConn.Store(fn)
 }
 
 // SetOnFatalError sets the callback for fatal connection errors (Fast Eviction).
 func (c *DefaultDialerClient) SetOnFatalError(fn func(err error)) {
-	c.onFatalError = fn
+	if fn == nil {
+		c.onFatalError.Store((func(error))(nil))
+		return
+	}
+	c.onFatalError.Store(fn)
+}
+
+func (c *DefaultDialerClient) getOnRTT() func(time.Duration) {
+	v := c.onRTT.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(func(time.Duration))
+}
+
+func (c *DefaultDialerClient) getOnTTFB() func(time.Duration) {
+	v := c.onTTFB.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(func(time.Duration))
+}
+
+func (c *DefaultDialerClient) getOnNewConn() func(net.Conn) {
+	v := c.onNewConn.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(func(net.Conn))
+}
+
+func (c *DefaultDialerClient) getOnFatalError() func(error) {
+	v := c.onFatalError.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(func(error))
 }
 
 // isFatalConnError checks if an error indicates the connection is dead and should be evicted.
@@ -142,8 +184,8 @@ func (c *DefaultDialerClient) markFatal(err error) {
 		return
 	}
 	c.closed.Store(true)
-	if c.onFatalError != nil {
-		go c.onFatalError(err)
+	if fn := c.getOnFatalError(); fn != nil {
+		go fn(err)
 	}
 }
 
@@ -181,8 +223,8 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		GotFirstResponseByte: func() {
 			// Prefer true first-byte latency when the transport fires the hook.
 			ttfbOnce.Do(func() {
-				if c.onTTFB != nil {
-					c.onTTFB(time.Since(t0))
+				if fn := c.getOnTTFB(); fn != nil {
+					fn(time.Since(t0))
 				}
 			})
 		},
@@ -240,8 +282,8 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 			// Fallback when httptrace.GotFirstResponseByte is unavailable
 			// (custom RoundTripper / some H3 paths): headers accepted == TTFB.
 			ttfbOnce.Do(func() {
-				if c.onTTFB != nil {
-					c.onTTFB(time.Since(t0))
+				if fn := c.getOnTTFB(); fn != nil {
+					fn(time.Since(t0))
 				}
 			})
 			resultCh <- streamResult{remote: r, local: l}
@@ -253,8 +295,8 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		rr, ll := gotRemote, gotLocal
 		addrMu.Unlock()
 		ttfbOnce.Do(func() {
-			if c.onTTFB != nil {
-				c.onTTFB(time.Since(t0))
+			if fn := c.getOnTTFB(); fn != nil {
+				fn(time.Since(t0))
 			}
 		})
 		resultCh <- streamResult{rc: rc, remote: rr, local: ll}
@@ -299,8 +341,8 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 		}
 
 		// Record RTT for RTT-aware scheduling
-		if c.onRTT != nil {
-			c.onRTT(time.Since(start))
+		if fn := c.getOnRTT(); fn != nil {
+			fn(time.Since(start))
 		}
 
 		io.Copy(io.Discard, resp.Body)
@@ -387,8 +429,8 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 					_ = h1UploadConn.Close()
 					return fmt.Errorf("got non-200 error response code: %d", resp.StatusCode)
 				}
-				if c.onRTT != nil {
-					c.onRTT(time.Since(start))
+				if fn := c.getOnRTT(); fn != nil {
+					fn(time.Since(start))
 				}
 				break
 			} else if newConnection {

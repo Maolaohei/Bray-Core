@@ -645,8 +645,11 @@ func TestXHTTP_LongDurationLoad(t *testing.T) {
 			defer conn.Close()
 
 			c := concurrentWriters.Add(1)
-			if c > peakConcurrent {
-				atomic.StoreInt64(&peakConcurrent, c)
+			for {
+				prev := atomic.LoadInt64(&peakConcurrent)
+				if c <= prev || atomic.CompareAndSwapInt64(&peakConcurrent, prev, c) {
+					break
+				}
 			}
 			defer concurrentWriters.Add(-1)
 

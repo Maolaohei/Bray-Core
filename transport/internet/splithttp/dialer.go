@@ -468,8 +468,8 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		}
 
 		// Notify profiling: raw TCP socket before TLS/REALITY wrapping
-		if dc.onNewConn != nil {
-			dc.onNewConn(rawConn)
+		if fn := dc.getOnNewConn(); fn != nil {
+			fn(rawConn)
 		}
 
 		conn := rawConn
@@ -1281,6 +1281,31 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 	// Split into pooled Buffers, then hand each one off to the pipe.
 	// WriteMultiBuffer takes ownership, so never touch a Buffer after the
 	// handoff (Len after release races packet-up postPacketReliable).
+	//
+	// Prefer a single NewWithSize buffer when the write fits one allocation
+	// (common: app write <= scMaxEachPostBytes). Avoids MergeBytes' multi
+	// 8KiB chunk path and the extra MultiBuffer slice growth for small posts.
+	if len(b) == 0 {
+		return 0, nil
+	}
+	if len(b) <= buf.Size {
+		// Single standard buffer: zero intermediate MultiBuffer growth.
+		chunk := buf.New()
+		n, _ := chunk.Write(b)
+		if err := w.WriteMultiBuffer(buf.MultiBuffer{chunk}); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+	// Larger than one Buffer: use size-class pool when possible for fewer pages.
+	if len(b) <= int(w.maxLen) || w.maxLen <= 0 {
+		chunk := buf.NewWithSize(int32(len(b)))
+		n, _ := chunk.Write(b)
+		if err := w.WriteMultiBuffer(buf.MultiBuffer{chunk}); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
 	mb := buf.MergeBytes(nil, b)
 	written := 0
 	for len(mb) > 0 {

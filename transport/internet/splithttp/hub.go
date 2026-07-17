@@ -31,15 +31,6 @@ import (
 	"github.com/xtls/xray-core/transport/internet/tls"
 )
 
-const maxPooledBodySize = 64 * 1024
-
-var bodyPayloadPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, maxPooledBodySize)
-		return &b
-	},
-}
-
 type requestHandler struct {
 	config         *Config
 	host           string
@@ -452,15 +443,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			}
 			if request.ContentLength > 0 {
 				bodyLen := int(request.ContentLength)
-				var bodyBuf []byte
-				if bodyLen <= maxPooledBodySize {
-					bp := bodyPayloadPool.Get().(*[]byte)
-					bodyBuf = (*bp)[:bodyLen]
-					defer bodyPayloadPool.Put(bp)
-				} else {
-					bodyBuf = make([]byte, bodyLen)
-				}
-				bodyPayload = bodyBuf
+				// Allocate once for queue ownership. Avoid pool+clone double copy
+				// on the packet-up hot path (uploadQueue may retain the slice).
+				bodyPayload = make([]byte, bodyLen)
 				_, readErr = io.ReadFull(request.Body, bodyPayload)
 			} else {
 				bodyPayload, readErr = buf.ReadAllToBytes(io.LimitReader(request.Body, int64(scMaxEachPostBytes)+1))
@@ -501,14 +486,10 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 
-		// Clone payload to avoid Use-After-Return on bodyPayloadPool buffers.
-		// The pool buffer is returned to the pool when this handler returns,
-		// but uploadQueue may still hold a reference via partial-read remainder.
-		ownedPayload := make([]byte, len(payload))
-		copy(ownedPayload, payload)
-
+		// payload is already uniquely owned (fresh decode / single body alloc /
+		// PlacementAuto assemble). Do not clone again before enqueue.
 		err = currentSession.uploadQueue.Push(Packet{
-			Payload: ownedPayload,
+			Payload: payload,
 			Seq:     seq,
 		})
 		if err != nil {

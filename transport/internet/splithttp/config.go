@@ -18,6 +18,10 @@ import (
 	"github.com/xtls/xray-core/transport/internet"
 )
 
+// requestHeaderBaseCache stores a cloneable base header map per Config pointer.
+// Headers map is immutable after start in normal use; rebuild on miss only.
+var requestHeaderBaseCache sync.Map // *Config -> http.Header
+
 // Pre-allocated default RangeConfig values to avoid per-request heap allocations.
 // XMUX nil fields use process-stable jittered copies (green-zone); explicit config wins.
 var (
@@ -177,21 +181,78 @@ func (c *Config) GetNormalizedQuery() string {
 	return query
 }
 
-func (c *Config) GetRequestHeader() http.Header {
-	header := http.Header{}
-	for k, v := range c.Headers {
-		// Bray control headers (x-bray-*) are client-local only; never send on wire.
-		if isBrayControlHeader(k) {
+// cloneHeaderShallow builds a request-local http.Header from an immutable base.
+// The outer map and each values slice are new, so Set/Add/Del are safe; string
+// values are shared (immutable). Avoids http.Header.Clone's deeper bookkeeping.
+func cloneHeaderShallow(src http.Header) http.Header {
+	if src == nil {
+		return make(http.Header)
+	}
+	dst := make(http.Header, len(src))
+	for k, vv := range src {
+		if len(vv) == 0 {
+			dst[k] = nil
 			continue
 		}
-		header.Add(k, v)
+		cp := make([]string, len(vv))
+		copy(cp, vv)
+		dst[k] = cp
+	}
+	return dst
+}
+
+func (c *Config) GetRequestHeader() http.Header {
+	if c != nil {
+		if cached, ok := requestHeaderBaseCache.Load(c); ok {
+			return cloneHeaderShallow(cached.(http.Header))
+		}
+	}
+	header := http.Header{}
+	if c != nil {
+		for k, v := range c.Headers {
+			// Bray control headers (x-bray-*) are client-local only; never send on wire.
+			if isBrayControlHeader(k) {
+				continue
+			}
+			header.Add(k, v)
+		}
 	}
 	utils.TryDefaultHeadersWith(header, "fetch")
+	if c != nil {
+		// Store a frozen clone so callers mutating the returned header never
+		// poison the cache.
+		requestHeaderBaseCache.Store(c, header.Clone())
+	}
 	return header
 }
 
 // isBrayControlHeader reports client-local Bray-V2 control keys used for
 // opt-in features (mode degrade, multi-endpoint). They must not leave the process.
+
+// requestURLString returns a stable URL string for padding placement.
+// Prefer already-materialized RequestURI/URL.String only once.
+func requestURLString(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	u := req.URL
+	// Prefer manual Scheme://Host/Path?query to avoid url.URL.String re-encoding.
+	if u.Opaque != "" {
+		return u.String()
+	}
+	if u.Scheme != "" && u.Host != "" {
+		path := u.EscapedPath()
+		if path == "" {
+			path = "/"
+		}
+		if u.RawQuery != "" {
+			return u.Scheme + "://" + u.Host + path + "?" + u.RawQuery
+		}
+		return u.Scheme + "://" + u.Host + path
+	}
+	return u.String()
+}
+
 func isBrayControlHeader(key string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "x-bray-")
 }
@@ -430,13 +491,14 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 	// Stream open has no payload size yet; keep configured range.
 	length := int(basePad.rand())
 	config := XPaddingConfig{Length: length}
+	rawURL := requestURLString(request)
 
 	if c.XPaddingObfsMode {
 		config.Placement = XPaddingPlacement{
 			Placement: c.XPaddingPlacement,
 			Key:       c.XPaddingKey,
 			Header:    c.XPaddingHeader,
-			RawURL:    request.URL.String(),
+			RawURL:    rawURL,
 		}
 		config.Method = PaddingMethod(c.XPaddingMethod)
 	} else {
@@ -444,7 +506,7 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 			Placement: PlacementQueryInHeader,
 			Key:       "x_padding",
 			Header:    "Referer",
-			RawURL:    request.URL.String(),
+			RawURL:    rawURL,
 		}
 	}
 
@@ -489,13 +551,14 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 	from, to := AdaptivePaddingRange(basePad.From, basePad.To, payloadLen)
 	length := int((&RangeConfig{From: from, To: to}).rand())
 	config := XPaddingConfig{Length: length}
+	rawURL := requestURLString(request)
 
 	if c.XPaddingObfsMode {
 		config.Placement = XPaddingPlacement{
 			Placement: c.XPaddingPlacement,
 			Key:       c.XPaddingKey,
 			Header:    c.XPaddingHeader,
-			RawURL:    request.URL.String(),
+			RawURL:    rawURL,
 		}
 		config.Method = PaddingMethod(c.XPaddingMethod)
 	} else {
@@ -503,7 +566,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 			Placement: PlacementQueryInHeader,
 			Key:       "x_padding",
 			Header:    "Referer",
-			RawURL:    request.URL.String(),
+			RawURL:    rawURL,
 		}
 	}
 

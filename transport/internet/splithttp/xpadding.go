@@ -46,6 +46,10 @@ var randBufPool = sync.Pool{
 	},
 }
 
+// repeatXCache memoizes pure "X"*n strings for common padding lengths.
+// Safe for concurrent read after store; values are immutable.
+var repeatXCache sync.Map // int -> string
+
 // paddingBytePool reuses byte slices for RepeatX padding generation.
 // Sizing: common padding range is 100-1000 bytes; 8192 covers edge cases.
 var paddingBytePool = sync.Pool{
@@ -243,13 +247,25 @@ func generateTokenishPaddingBase62Raw(targetHuffmanBytes int) string {
 }
 
 func generateRepeatX(length int) string {
+	if length <= 0 {
+		return ""
+	}
+	if v, ok := repeatXCache.Load(length); ok {
+		return v.(string)
+	}
+	var s string
 	if length <= 8192 {
 		bp := paddingBytePool.Get().(*[]byte)
-		s := string((*bp)[:length])
+		s = string((*bp)[:length])
 		paddingBytePool.Put(bp)
-		return s
+	} else {
+		s = strings.Repeat("X", length)
 	}
-	return strings.Repeat("X", length)
+	// Cache common sizes only to bound memory.
+	if length <= 2048 {
+		repeatXCache.Store(length, s)
+	}
+	return s
 }
 
 func GeneratePadding(method PaddingMethod, length int) string {
@@ -374,9 +390,16 @@ func (c *Config) ApplyXPaddingToHeader(h http.Header, config XPaddingConfig) {
 		} else {
 			return
 		}
-		clone := *baseURL
-		clone.RawQuery = p.Key + "=" + paddingValue
-		h.Set(p.Header, clone.String())
+		// Build Referer-like URL without re-encoding the full query map.
+		base := baseURL.Scheme + "://" + baseURL.Host + baseURL.Path
+		if baseURL.Opaque != "" && baseURL.Scheme != "" {
+			// Fall back to clone path for rare opaque URLs.
+			clone := *baseURL
+			clone.RawQuery = p.Key + "=" + paddingValue
+			h.Set(p.Header, clone.String())
+			return
+		}
+		h.Set(p.Header, base+"?"+p.Key+"="+paddingValue)
 	}
 }
 

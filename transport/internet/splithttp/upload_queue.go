@@ -60,28 +60,10 @@ func NewUploadQueue(maxPackets int) *uploadQueue {
 	}
 }
 
-func (h *uploadQueue) Push(p Packet) (retErr error) {
-	// Fast path: try non-blocking send for packets without Reader.
-	// This avoids lock contention when channel has capacity.
-	if p.Reader == nil && !h.closed.Load() {
-		// Recover from send-on-closed-channel panic if Close() runs concurrently.
-		defer func() {
-			if r := recover(); r != nil {
-				retErr = errors.New("packet queue closed")
-			}
-		}()
-		select {
-		case h.pushedPackets <- p:
-			return nil
-		default:
-			// Channel full — fall through to locked path for validation + backpressure.
-		}
-	}
-
-	// Slow path: locked send with full validation.
-	// The channel send naturally blocks until space is available,
-	// providing gradient backpressure to the producer. No timeout error —
-	// the caller's context or connection close is the only way out.
+func (h *uploadQueue) Push(p Packet) error {
+	// Serialize all channel sends with Close(). An unlocked try-send races
+	// with close(pushedPackets) and trips the race detector under concurrent
+	// upload/session teardown, even when a recover would swallow the panic.
 	h.writeCloseMutex.Lock()
 	defer h.writeCloseMutex.Unlock()
 
@@ -93,6 +75,14 @@ func (h *uploadQueue) Push(p Packet) (retErr error) {
 	}
 	if p.Reader != nil {
 		h.nomore = true
+	}
+	// Prefer non-blocking when the queue still has capacity; otherwise block
+	// under the same mutex so Close cannot interleave with the send.
+	// Read() does not take writeCloseMutex, so a full queue still drains.
+	select {
+	case h.pushedPackets <- p:
+		return nil
+	default:
 	}
 	h.pushedPackets <- p
 	return nil

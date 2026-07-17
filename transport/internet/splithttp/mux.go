@@ -22,6 +22,41 @@ type XmuxConn interface {
 	IsClosed() bool
 }
 
+// xmuxSnapPool reuses snapshot buffers for GetXmuxClient selection.
+// Pool stores *xmuxSnap so Put never captures a stack-local slice header.
+type xmuxSnap struct {
+	s []*XmuxClient
+}
+
+var xmuxSnapPool = sync.Pool{
+	New: func() any {
+		return &xmuxSnap{s: make([]*XmuxClient, 0, 8)}
+	},
+}
+
+func acquireSnap(n int) *xmuxSnap {
+	sn := xmuxSnapPool.Get().(*xmuxSnap)
+	if cap(sn.s) < n {
+		sn.s = make([]*XmuxClient, 0, n)
+	} else {
+		sn.s = sn.s[:0]
+	}
+	return sn
+}
+
+func releaseSnap(sn *xmuxSnap) {
+	if sn == nil {
+		return
+	}
+	for i := range sn.s {
+		sn.s[i] = nil
+	}
+	sn.s = sn.s[:0]
+	if cap(sn.s) <= 64 {
+		xmuxSnapPool.Put(sn)
+	}
+}
+
 // Connection lifecycle states.
 const (
 	StateActive   int32 = 0 // accepting new streams
@@ -63,6 +98,19 @@ func (p *XmuxClientPool) Snapshot() []*XmuxClient {
 	snap := make([]*XmuxClient, len(p.clients))
 	copy(snap, p.clients)
 	return snap
+}
+
+// snapshotInto copies clients into dst (reusing capacity when possible).
+// Caller must hold p.mu for the duration of the copy.
+func (p *XmuxClientPool) snapshotInto(dst []*XmuxClient) []*XmuxClient {
+	n := len(p.clients)
+	if cap(dst) < n {
+		dst = make([]*XmuxClient, n)
+	} else {
+		dst = dst[:n]
+	}
+	copy(dst, p.clients)
+	return dst
 }
 
 // RemoveAt removes the client at index i. Caller must hold p.mu (write lock).
@@ -153,7 +201,7 @@ func (c *XmuxClient) WaitForReady(ctx context.Context) error {
 
 // Borrow atomically attempts to reserve a stream slot on this connection.
 // Returns true only if state is Active and the increment took effect while still Active.
-// This prevents the race: GetXmuxClient returns client → Draining fires → stream added to retired connection.
+// This prevents the race: GetXmuxClient returns client -> Draining fires -> stream added to retired connection.
 func (c *XmuxClient) Borrow() bool {
 	for {
 		if c.state.Load() != StateActive {
@@ -442,19 +490,19 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn, probeURL
 }
 
 // preConnectLoop establishes initial pool connections using exponential backoff.
-// Fully async — never blocks on probe completion. Health check loop handles cleanup.
+// Fully async -> never blocks on probe completion. Health check loop handles cleanup.
 func (m *XmuxManager) preConnectLoop() {
 	if m.pool.Len() == 0 {
 		errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient (initial)")
 		go m.newXmuxClient()
 		// Brief pause to let the connection establish before returning.
-		// Not a probe wait — just enough time for TCP+TLS to complete locally.
+		// Not a probe wait -> just enough time for TCP+TLS to complete locally.
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Optionally fill one more connection to ensure robustness, but do NOT wait.
 	if m.pool.Len() < 2 {
-		errors.LogDebug(context.Background(), "XMUX: pre-connect filling pool")
+		// demoted: pre-connect filling pool
 		go m.newXmuxClient()
 	}
 }
@@ -506,7 +554,7 @@ func (m *XmuxManager) checkNetworkChange() {
 		return
 	}
 
-	// Network hash changed — check if this is a new change or continuation
+	// Network hash changed -> check if this is a new change or continuation
 	if m.pendingNetChange == newHash {
 		m.pendingNetChangeCount++
 	} else {
@@ -636,7 +684,7 @@ func (m *XmuxManager) healthCheckLoop() {
 
 // healthCheckTick performs one tick of health checking.
 func (m *XmuxManager) healthCheckTick() {
-	// Phase 1: Under write lock — prune stale connections, compute migration need
+	// Phase 1: Under write lock -> prune stale connections, compute migration need
 	m.pool.mu.Lock()
 
 	now := time.Now()
@@ -652,7 +700,7 @@ func (m *XmuxManager) healthCheckTick() {
 				m.pool.RemoveAt(i)
 				continue
 			}
-			// Still draining with active streams — skip
+			// Still draining with active streams -> skip
 			i++
 			continue
 		}
@@ -664,7 +712,7 @@ func (m *XmuxManager) healthCheckTick() {
 			continue
 		}
 
-		// Active state — check if should be retired
+		// Active state -> check if should be retired
 		if c.XmuxConn.IsClosed() {
 			errors.LogDebug(context.Background(), "XMUX: health-check removing closed xmuxClient")
 			c.MarkDead()
@@ -721,7 +769,7 @@ func (m *XmuxManager) healthCheckTick() {
 
 	m.pool.mu.Unlock()
 
-	// Phase 2: Without lock — network I/O (dialing)
+	// Phase 2: Without lock -> network I/O (dialing)
 	for i := 0; i < needNew; i++ {
 		errors.LogDebug(context.Background(), "XMUX: migration creating xmuxClient, pool+=", i+1, "/", needNew)
 		conn := m.newConnFunc()
@@ -951,7 +999,7 @@ func (m *XmuxManager) GetPoolBehavior() quality.Behavior {
 }
 
 // effectiveConnections returns the AIMD-smoothed connection limit.
-// Lock-free read via atomic.Load — safe for concurrent callers.
+// Lock-free read via atomic.Load -> safe for concurrent callers.
 func (m *XmuxManager) effectiveConnections() int32 {
 	m.poolBehaviorMu.RLock()
 	scaled := m.scaledOnce
@@ -963,7 +1011,7 @@ func (m *XmuxManager) effectiveConnections() int32 {
 }
 
 // effectiveConcurrency returns the AIMD-smoothed concurrency limit.
-// Lock-free read via atomic.Load — safe for concurrent callers.
+// Lock-free read via atomic.Load -> safe for concurrent callers.
 func (m *XmuxManager) effectiveConcurrency() int32 {
 	m.poolBehaviorMu.RLock()
 	scaled := m.scaledOnce
@@ -1104,58 +1152,38 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		return nil, errors.New("XMUX: newConnFunc returned nil")
 	}
 
-	// Phase 1: Read lock — prune stale clients and find best candidate
-	m.pool.mu.RLock()
-
+	// Phase 1: single write-lock prune pass, then select on a snapshot.
+	m.pool.mu.Lock()
+	nowWall := time.Now()
 	for i := 0; i < len(m.pool.clients); {
 		c := m.pool.clients[i]
-
-		// Skip clients not in Active state
 		if c.state.Load() != StateActive {
-			m.pool.mu.RUnlock()
-			m.pool.mu.Lock()
-			if i < len(m.pool.clients) && m.pool.clients[i] == c {
-				c.closeConn()
-				m.pool.RemoveAt(i)
-			}
-			m.pool.mu.Unlock()
-			m.pool.mu.RLock()
+			c.closeConn()
+			m.pool.RemoveAt(i)
 			continue
 		}
-
 		if c.XmuxConn.IsClosed() ||
 			c.leftUsage.Load() == 0 ||
 			c.LeftRequests.Load() <= 0 ||
-			(c.UnreusableAt != time.Time{} && time.Now().After(c.UnreusableAt)) {
-			// Must upgrade to write lock for removal
-			m.pool.mu.RUnlock()
-			m.pool.mu.Lock()
-			// Re-check after acquiring write lock (another goroutine may have removed it)
-			if i < len(m.pool.clients) && m.pool.clients[i] == c {
-				errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", c.XmuxConn.IsClosed(),
-					", state = ", c.state.Load(),
-					", activeStreams = ", c.activeStreams.Load(),
-					", leftUsage = ", c.leftUsage.Load(),
-					", LeftRequests = ", c.LeftRequests.Load(),
-					", UnreusableAt = ", c.UnreusableAt)
-				if c.XmuxConn.IsClosed() {
-					c.MarkDead()
-				} else {
-					c.maybeDrain()
-				}
-				m.pool.RemoveAt(i)
+			(c.UnreusableAt != time.Time{} && nowWall.After(c.UnreusableAt)) {
+			if c.XmuxConn.IsClosed() {
+				c.MarkDead()
+			} else {
+				c.maybeDrain()
 			}
-			m.pool.mu.Unlock()
-			m.pool.mu.RLock()
-			// Don't increment i — re-check this index (new element shifted in)
+			m.pool.RemoveAt(i)
 			continue
 		}
 		i++
 	}
-
 	effectiveConns := m.effectiveConnections()
 	poolLen := len(m.pool.clients)
-	m.pool.mu.RUnlock()
+	var snap *xmuxSnap
+	if poolLen > 0 {
+		snap = acquireSnap(poolLen)
+		snap.s = m.pool.snapshotInto(snap.s)
+	}
+	m.pool.mu.Unlock()
 
 	needNew := false
 	if poolLen == 0 {
@@ -1166,18 +1194,14 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 
 	if !needNew {
 		effectiveConc := m.effectiveConcurrency()
-
-		// Snapshot-based selection: read-only iteration under RLock
-		snap := m.pool.Snapshot()
 		var best *XmuxClient
 		bestScore := int64(math.MaxInt64)
-		now := time.Now().UnixNano()
-		for _, c := range snap {
+		now := nowWall.UnixNano()
+		for _, c := range snap.s {
 			if c.state.Load() != StateActive {
 				continue
 			}
-			// Idle eviction: only evict if NO active streams AND idle for too long.
-			// This prevents killing WebSocket/gRPC connections that have long gaps between requests.
+			// Idle eviction: only skip if NO active streams AND idle for too long.
 			if c.activeStreams.Load() == 0 {
 				if lastUsed := c.LastUsed.Load(); lastUsed > 0 && now-lastUsed > int64(clientIdleTimeout) {
 					continue
@@ -1186,9 +1210,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 			if effectiveConc > 0 && c.activeStreams.Load() >= effectiveConc {
 				continue
 			}
-			if s := c.cachedScore.Load(); s < bestScore {
+			if sc := c.cachedScore.Load(); sc < bestScore {
 				best = c
-				bestScore = s
+				bestScore = sc
 			}
 		}
 
@@ -1201,20 +1225,22 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				old := best.leftUsage.Load()
 				if old == 0 {
 					best.maybeDrain()
-					// Re-snapshot and find next best
-					snap = m.pool.Snapshot()
+					m.pool.mu.RLock()
+					// snapshotInto reuses snap capacity; ownership stays with us.
+					snap.s = m.pool.snapshotInto(snap.s)
+					m.pool.mu.RUnlock()
 					best = nil
 					bestScore = int64(math.MaxInt64)
-					for _, c := range snap {
+					for _, c := range snap.s {
 						if c.state.Load() != StateActive {
 							continue
 						}
 						if effectiveConc > 0 && c.activeStreams.Load() >= effectiveConc {
 							continue
 						}
-						if s := c.cachedScore.Load(); s < bestScore {
+						if sc := c.cachedScore.Load(); sc < bestScore {
 							best = c
-							bestScore = s
+							bestScore = sc
 						}
 					}
 					if best == nil {
@@ -1237,28 +1263,28 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				m.lastActivity.Store(time.Now().UnixNano())
 				best.LastUsed.Store(time.Now().UnixNano())
 				m.RecordReuseHit()
-				// Wait for probe to complete before returning existing connection
 				if err := best.WaitForReady(ctx); err != nil {
 					errors.LogInfo(ctx, "XMUX: probe failed for existing connection, removing: ", err)
-					// Remove broken connection from pool and close transport
 					m.pool.mu.Lock()
 					m.pool.RemoveAndClose(best)
 					m.pool.mu.Unlock()
-					// Fall through to Phase 2 to create new connection
 				} else {
+					releaseSnap(snap)
+					snap = nil
 					return best, nil
 				}
 			}
 		}
 	}
 
+	// Snapshot no longer needed once we fall through to create/dial path.
+	releaseSnap(snap)
+	snap = nil
+
 	// Phase 2: Create new connection (no lock held)
-	// On probe failure, remove broken connection and retry once.
 	const maxAttempts = 2
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		errors.LogDebug(ctx, "XMUX: creating xmuxClient (attempt ", attempt+1, ")")
-
 		conn := m.newConnFunc()
 		if conn == nil {
 			lastErr = errors.New("XMUX: newConnFunc returned nil")
@@ -1266,11 +1292,8 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		}
 		c := m.addToPool(conn)
 		m.lastActivity.Store(time.Now().UnixNano())
-
-		// Wait for probe to complete before returning new connection
 		if err := c.WaitForReady(ctx); err != nil {
 			errors.LogInfo(ctx, "XMUX: probe failed for new connection (attempt ", attempt+1, "), removing: ", err)
-			// Remove broken connection from pool and close transport
 			m.pool.mu.Lock()
 			m.pool.RemoveAndClose(c)
 			m.pool.mu.Unlock()
@@ -1294,7 +1317,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 //
 // Fixed-point scales: confidence ×100, behavior ×100, combined ×10000.
 // Max combinedFixed = 100 * 150 = 15000. Max retrans = 100.
-// Max intermediate = 100 * 50 * 15000 = 75,000,000 — fits in int64.
+// Max intermediate = 100 * 50 * 15000 = 75,000,000 -> fits in int64.
 func scoreClient(c *XmuxClient) int64 {
 	inflight := int64(c.activeStreams.Load())
 	rttMs := c.GetRTT().Milliseconds()
@@ -1305,8 +1328,8 @@ func scoreClient(c *XmuxClient) int64 {
 	}
 
 	// Saturating arithmetic: cap inflight contribution to prevent overflow.
-	// Max intermediate = 100 * 50 * 15000 = 75,000,000 — fits in int64.
-	// But inflight*10000 could overflow if inflight > 2^53/10000 ≈ 900 trillion.
+	// Max intermediate = 100 * 50 * 15000 = 75,000,000 -> fits in int64.
+	// But inflight*10000 could overflow if inflight > 2^53/10000 -> 900 trillion.
 	// In practice inflight is small, but cap defensively at 1M.
 	if inflight > 1_000_000 {
 		inflight = 1_000_000
@@ -1458,7 +1481,7 @@ func (m *XmuxManager) IdleFor() time.Duration {
 		snap := m.pool.Snapshot()
 		for _, c := range snap {
 			if c.activeStreams.Load() > 0 {
-				return 0 // Not idle — has active streams
+				return 0 // Not idle -> has active streams
 			}
 		}
 	}

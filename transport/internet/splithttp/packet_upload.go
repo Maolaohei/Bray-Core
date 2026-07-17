@@ -6,9 +6,11 @@ package splithttp
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/bytespool"
 	"github.com/xtls/xray-core/common/errors"
 )
 
@@ -27,6 +29,66 @@ const packetUploadDefaultWindow = 8
 // packetUploadMaxWindow hard-caps client in-flight posts regardless of server
 // buffer size (H1 pool, memory, and CDN concurrency friendliness).
 const packetUploadMaxWindow = 16
+
+
+// durableLocal reuses modest durable snapshots for postPacketReliable.
+// Store *durableLocal so Put never captures a stack-local slice header.
+type durableLocal struct {
+	b []byte
+}
+
+var durableBytePool = sync.Pool{
+	New: func() any {
+		return &durableLocal{b: make([]byte, 0, 4096)}
+	},
+}
+
+// durableKind tags the allocator so freeDurable never crosses pool boundaries.
+const (
+	durableNone      = 0
+	durableLocalPool = 1
+	durableBytesPool = 2
+)
+
+func allocDurable(n int) ([]byte, int, *durableLocal) {
+	if n <= 0 {
+		return nil, durableNone, nil
+	}
+	if n >= 2048 {
+		// Prefer size-class pool for multi-KB posts (common full chunk).
+		b := bytespool.Alloc(int32(n))
+		return b[:n], durableBytesPool, nil
+	}
+	dl := durableBytePool.Get().(*durableLocal)
+	if cap(dl.b) < n {
+		dl.b = make([]byte, n)
+	} else {
+		dl.b = dl.b[:n]
+	}
+	return dl.b, durableLocalPool, dl
+}
+
+func freeDurable(b []byte, kind int, dl *durableLocal) {
+	if kind == durableNone {
+		return
+	}
+	switch kind {
+	case durableBytesPool:
+		if b != nil {
+			bytespool.Free(b[:cap(b)])
+		}
+	case durableLocalPool:
+		if dl == nil {
+			return
+		}
+		// Only return modest caps to avoid retaining huge slices forever.
+		if cap(dl.b) <= 16*1024 {
+			dl.b = dl.b[:0]
+			durableBytePool.Put(dl)
+		}
+	}
+}
+
 
 // packetUploadWindow returns the client POST in-flight window.
 // It never exceeds half of the server's reorder capacity so misordered
@@ -91,14 +153,23 @@ func cloneMultiBuffer(src buf.MultiBuffer) buf.MultiBuffer {
 	return buf.MergeBytes(nil, raw)
 }
 
+// multiFromDurable wraps a durable byte snapshot as an unmanaged MultiBuffer.
+// PostPacket may ReleaseMulti the wrapper; unmanaged bytes stay valid for retries.
+func multiFromDurable(durable []byte) buf.MultiBuffer {
+	if len(durable) == 0 {
+		return nil
+	}
+	return buf.MultiBuffer{buf.FromBytes(durable)}
+}
+
 // postPacketReliable sends one sequenced packet with bounded retries.
 // Same seqStr is reused across attempts so the server never sees a hole
 // from a failed mid-flight POST.
 //
 // Ownership: takes payload. On entry a single durable byte snapshot is made
-// (lazy retry source); payload is released immediately after the snapshot so
-// the success path pays one copy, not one copy per attempt, and MultiBuffer
-// pages return to the pool before the HTTP RTT completes.
+// (retry source); payload is released immediately after the snapshot.
+// Each attempt wraps the same durable bytes via FromBytes (no second content
+// copy). MultiBuffer pages return to the pool before the HTTP RTT completes.
 func postPacketReliable(
 	ctx context.Context,
 	client DialerClient,
@@ -115,21 +186,23 @@ func postPacketReliable(
 	}
 
 	var durable []byte
+	var durableKind int
+	var durableLocalRef *durableLocal
 	if !payload.IsEmpty() {
-		durable = make([]byte, int(payload.Len()))
+		n := int(payload.Len())
+		durable, durableKind, durableLocalRef = allocDurable(n)
 		payload.Copy(durable)
 		buf.ReleaseMulti(payload)
 	}
+	// free durable after all attempts (success or failure)
+	defer freeDurable(durable, durableKind, durableLocalRef)
 
 	var lastErr error
 	for attempt := 1; attempt <= packetUploadMaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var chunk buf.MultiBuffer
-		if durable != nil {
-			chunk = buf.MergeBytes(nil, durable)
-		}
+		chunk := multiFromDurable(durable)
 		err := client.PostPacket(ctx, url, sessionId, seqStr, chunk)
 		if err == nil {
 			return nil
