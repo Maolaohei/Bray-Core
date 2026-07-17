@@ -127,10 +127,12 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
 }
 
 func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstapling bool)) {
+	// In-memory/one-shot certs have nothing to reload; skip the ticker entirely
+	// so unit tests and short-lived listeners do not race GetCertificate.
+	if entry.OneTimeLoading || (entry.CertificatePath == "" && entry.KeyPath == "" && entry.OcspStapling == 0) {
+		return
+	}
 	go func() {
-		if entry.OneTimeLoading {
-			return
-		}
 		var isOcspstapling bool
 		hotReloadCertInterval := uint64(3600)
 		if entry.OcspStapling != 0 {
@@ -138,6 +140,7 @@ func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstaplin
 			isOcspstapling = true
 		}
 		t := time.NewTicker(time.Duration(hotReloadCertInterval) * time.Second)
+		defer t.Stop()
 		for {
 			var isReloaded bool
 			if entry.CertificatePath != "" && entry.KeyPath != "" {

@@ -384,12 +384,20 @@ type XmuxManager struct {
 	}
 }
 
-func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
+// NewXmuxManager creates a manager and starts background pool loops.
+// Optional probeURL is the HEAD probe target for real dial warm-up; pass it
+// at construction time so preConnectLoop never races a later field write.
+func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn, probeURL ...string) *XmuxManager {
+	probe := ""
+	if len(probeURL) > 0 {
+		probe = probeURL[0]
+	}
 	m := &XmuxManager{
 		xmuxConfig:   xmuxConfig,
 		concurrency:  xmuxConfig.GetNormalizedMaxConcurrency().rand(),
 		connections:  xmuxConfig.GetNormalizedMaxConnections().rand(),
 		newConnFunc:  newConnFunc,
+		probeURL:     probe,
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
 		lastActivity: atomic.Int64{},

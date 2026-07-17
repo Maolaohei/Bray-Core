@@ -19,6 +19,9 @@ import (
 // Bulk uplink: continuous writes then one bulk read. Exercises adaptive
 // launch pacing (skip interval when backlog / full chunks exist).
 func TestBenchmark_PacketUpBulkDefaultPacing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long XHTTP packet-up bulk bench under -short")
+	}
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName: "splithttp",

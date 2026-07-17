@@ -24,7 +24,10 @@ var _ = runtime.GOARCH
 var _ = time.Second
 
 func TestBenchmark_UpstreamCompare(t *testing.T) {
-	// Results sent to t.Log — just run and compare
+	if testing.Short() {
+		t.Skip("skipping long XHTTP throughput compare under -short")
+	}
+	// Results sent to t.Log - just run and compare
 	t.Run("H2C", func(t *testing.T) { benchThroughput(t, false, "packet-up", 128*1024) })
 	if runtime.GOARCH != "arm64" {
 		t.Run("H2-TLS", func(t *testing.T) { benchThroughput(t, true, "packet-up", 128*1024) })

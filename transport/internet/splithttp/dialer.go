@@ -182,11 +182,8 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 			xmuxConfig = *transportConfig.Xmux
 		}
 
-		xmuxManager = NewXmuxManager(xmuxConfig, func() XmuxConn {
-			return createHTTPClient(dest, streamSettings)
-		})
-
-		// Build probe URL for real TCP/TLS dial trigger.
+		// Build probe URL before starting XmuxManager background loops so
+		// preConnectLoop/newXmuxClient never race a later probeURL write.
 		tlsCfg := tls.ConfigFromStreamSettings(streamSettings)
 		realityCfg := reality.ConfigFromStreamSettings(streamSettings)
 		var probeScheme string
@@ -210,7 +207,11 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 				probeHost += ":" + dest.Port.String()
 			}
 		}
-		xmuxManager.probeURL = probeScheme + "://" + probeHost + transportConfig.GetNormalizedPath()
+		probeURL := probeScheme + "://" + probeHost + transportConfig.GetNormalizedPath()
+
+		xmuxManager = NewXmuxManager(xmuxConfig, func() XmuxConn {
+			return createHTTPClient(dest, streamSettings)
+		}, probeURL)
 
 		globalDialerMap[key] = xmuxManager
 	}
@@ -230,7 +231,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	// Set RTT callback on DefaultDialerClient for RTT-aware scheduling
 	if dc, ok := client.(*DefaultDialerClient); ok {
-		// Atomic profile reference — set by onNewConn, read by onRTT
+		// Atomic profile reference - set by onNewConn, read by onRTT
 		var activeProfile atomic.Value // stores interface{ FeedRTT(time.Duration) }
 
 		dc.SetOnRTT(func(rtt time.Duration) {
@@ -245,7 +246,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 			xmuxManager.RecordTTFB(ttfb)
 		})
 
-		// Wire up TransportProfile: raw TCP socket → Profile → UpdateQuality → scoreClient
+		// Wire up TransportProfile: raw TCP socket -> Profile -> UpdateQuality -> scoreClient
 		dc.SetOnNewConn(func(rawConn net.Conn) {
 			profile := tcpinfo.NewProfile(rawConn, nil)
 			profile.OnUpdate(func(snap *quality.Snapshot) {
@@ -710,7 +711,7 @@ func globalDialerCleanup(done chan struct{}) {
 			globalDialerAccess.Lock()
 			poolSize := len(globalDialerMap)
 			// Dynamic timeout: large pools get cleaned up faster.
-			// Linear interpolation from 10min (pool≤10) to 3min (pool≥100).
+			// Linear interpolation from 10min (pool<=10) to 3min (pool>=100).
 			timeout := globalMapIdleTimeoutBase
 			if poolSize > 10 {
 				reduction := time.Duration(float64(globalMapIdleTimeoutBase-globalMapIdleTimeoutMin) *
@@ -742,7 +743,7 @@ func globalDialerCleanup(done chan struct{}) {
 
 // ResetGlobalDialer closes the cleanup goroutine and resets the global state.
 // Blocks until the cleanup goroutine finishes closing all managers.
-// Intended for test cleanup — call after each test that uses Dial.
+// Intended for test cleanup - call after each test that uses Dial.
 func ResetGlobalDialer() {
 	globalDialerAccess.Lock()
 	if globalDialerQuit != nil {
@@ -1277,16 +1278,22 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 		}
 	*/
 
-	buffer := buf.MultiBufferContainer{}
-	common.Must2(buffer.Write(b))
-
-	var writed int
-	for _, buff := range buffer.MultiBuffer {
-		err := w.WriteMultiBuffer(buf.MultiBuffer{buff})
-		if err != nil {
-			return writed, err
+	// Split into pooled Buffers, then hand each one off to the pipe.
+	// WriteMultiBuffer takes ownership, so never touch a Buffer after the
+	// handoff (Len after release races packet-up postPacketReliable).
+	mb := buf.MergeBytes(nil, b)
+	written := 0
+	for len(mb) > 0 {
+		chunk := mb[0]
+		mb = mb[1:]
+		n := int(chunk.Len())
+		if err := w.WriteMultiBuffer(buf.MultiBuffer{chunk}); err != nil {
+			if len(mb) > 0 {
+				buf.ReleaseMulti(mb)
+			}
+			return written, err
 		}
-		writed += int(buff.Len())
+		written += n
 	}
-	return writed, nil
+	return written, nil
 }

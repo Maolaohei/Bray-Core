@@ -596,12 +596,15 @@ type httpServerConn struct {
 }
 
 func (c *httpServerConn) Write(b []byte) (int, error) {
+	// ServeHTTP may return while a handler goroutine is still writing
+	// (echo/Copy helpers). Serialize Write+Flush against Close and the
+	// HTTP server finishing the response, or Flush races ResponseWriter.
+	c.Lock()
+	defer c.Unlock()
 	if c.Instance.Done() {
 		return 0, io.ErrClosedPipe
 	}
-	c.Lock()
 	n, err := c.ResponseWriter.Write(b)
-	c.Unlock()
 	if err == nil {
 		c.ResponseWriter.(http.Flusher).Flush()
 	}
