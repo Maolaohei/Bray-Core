@@ -373,7 +373,7 @@ func TestVlessXtlsVision(t *testing.T) {
 
 func TestVlessXtlsVisionReality(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping REALITY scenario that dials external Dest under -short")
+		t.Skip("skipping long REALITY scenario under -short")
 	}
 	tcpServer := tcp.Server{
 		MsgProcessor: xor,
@@ -516,7 +516,7 @@ func TestVlessXtlsVisionReality(t *testing.T) {
 // Known broken fingerprint: android, 360
 func TestVlessRealityFingerprints(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping REALITY fingerprint matrix that dials external Dest under -short")
+		t.Skip("skipping long REALITY scenario under -short")
 	}
 	TestFingerprint := func(fingerprint string) error {
 		tcpServer := tcp.Server{
