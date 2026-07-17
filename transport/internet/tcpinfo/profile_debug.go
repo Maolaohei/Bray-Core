@@ -10,23 +10,23 @@ import (
 // DebugInfo is a JSON-serializable view of the TransportProfile state.
 // Used by Debug API for troubleshooting.
 type DebugInfo struct {
-	Network NetworkDebug  `json:"networkProfile"`
+	Network NetworkDebug   `json:"networkProfile"`
 	History []HistoryEntry `json:"history,omitempty"`
 }
 
 // NetworkDebug contains the current snapshot in a human-readable format.
 type NetworkDebug struct {
-	RTT         string  `json:"rtt,omitempty"`
-	RTTVar      string  `json:"rttVar,omitempty"`
-	Loss        float64 `json:"loss,omitempty"`
-	Retrans     uint32  `json:"retrans,omitempty"`
-	Unacked     uint32  `json:"unacked,omitempty"`
-	Quality     quality.Quality `json:"quality"`
-	Confidence  uint8   `json:"confidence"`
-	Source      string  `json:"source"`
-	Age         string  `json:"age"`
-	IsStale     bool    `json:"isStale"`
-	Reason      []string `json:"reason"`
+	RTT        string          `json:"rtt,omitempty"`
+	RTTVar     string          `json:"rttVar,omitempty"`
+	Loss       float64         `json:"loss,omitempty"`
+	Retrans    uint32          `json:"retrans,omitempty"`
+	Unacked    uint32          `json:"unacked,omitempty"`
+	Quality    quality.Quality `json:"quality"`
+	Confidence uint8           `json:"confidence"`
+	Source     string          `json:"source"`
+	Age        string          `json:"age"`
+	IsStale    bool            `json:"isStale"`
+	Reason     []string        `json:"reason"`
 }
 
 // HistoryEntry is a single point in the debug history ring buffer.
