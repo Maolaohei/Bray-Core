@@ -407,8 +407,8 @@ func TestVlessXtlsVisionReality(t *testing.T) {
 						SecuritySettings: []*serial.TypedMessage{
 							serial.ToTypedMessage(&reality.Config{
 								Show:        true,
-								Dest:        "www.google.com:443", // use google for now, may fail in some region
-								ServerNames: []string{"www.google.com"},
+								Dest:        "www.microsoft.com:443", // google may be unreachable in some regions
+								ServerNames: []string{"www.microsoft.com"},
 								PrivateKey:  privateKey,
 								ShortIds:    shortIds,
 								Type:        "tcp",
@@ -486,7 +486,7 @@ func TestVlessXtlsVisionReality(t *testing.T) {
 							serial.ToTypedMessage(&reality.Config{
 								Show:        true,
 								Fingerprint: "chrome",
-								ServerName:  "www.google.com",
+								ServerName:  "www.microsoft.com",
 								PublicKey:   publicKey,
 								ShortId:     shortIds[0],
 								SpiderX:     "/",
@@ -550,8 +550,8 @@ func TestVlessRealityFingerprints(t *testing.T) {
 							SecuritySettings: []*serial.TypedMessage{
 								serial.ToTypedMessage(&reality.Config{
 									Show:        false,
-									Dest:        "www.google.com:443", // use google for now, may fail in some region
-									ServerNames: []string{"www.google.com"},
+									Dest:        "www.microsoft.com:443", // google may be unreachable in some regions
+									ServerNames: []string{"www.microsoft.com"},
 									PrivateKey:  privateKey,
 									ShortIds:    shortIds,
 									Type:        "tcp",
@@ -626,7 +626,7 @@ func TestVlessRealityFingerprints(t *testing.T) {
 								serial.ToTypedMessage(&reality.Config{
 									Show:        false,
 									Fingerprint: fingerprint,
-									ServerName:  "www.google.com",
+									ServerName:  "www.microsoft.com",
 									PublicKey:   publicKey,
 									ShortId:     shortIds[0],
 									SpiderX:     "/",

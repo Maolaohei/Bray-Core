@@ -8,10 +8,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 )
+
+var testBinaryBuildMu sync.Mutex
 
 func BuildXray() error {
 	genTestBinaryPath()
+	testBinaryBuildMu.Lock()
+	defer testBinaryBuildMu.Unlock()
 	if _, err := os.Stat(testBinaryPath); err == nil {
 		return nil
 	}
