@@ -146,11 +146,24 @@ func TestOpenStream_ContextCancelDoesNotMarkClosed(t *testing.T) {
 	if isFatalConnError(context.DeadlineExceeded) {
 		t.Fatal("DeadlineExceeded must not be fatal")
 	}
-	if !isFatalConnError(io.EOF) {
-		t.Fatal("EOF should be fatal")
+	// Bare EOF is stream-scoped on H2 multiplex; must NOT force-close the pooled socket.
+	if isFatalConnError(io.EOF) {
+		t.Fatal("bare io.EOF must not be fatal (would mid-kill sibling streams)")
+	}
+	if isFatalConnError(io.ErrUnexpectedEOF) {
+		t.Fatal("UnexpectedEOF must not be fatal")
 	}
 	if !isFatalConnError(syscall.ECONNRESET) {
 		t.Fatal("ECONNRESET should be fatal")
+	}
+	if !isFatalConnError(net.ErrClosed) {
+		t.Fatal("net.ErrClosed should be fatal")
+	}
+	if !isFatalConnError(errors.New("http2: client connection lost")) {
+		t.Fatal("client connection lost should be fatal")
+	}
+	if isFatalConnError(errors.New("http2: stream closed")) {
+		t.Fatal("stream-scoped error must not be fatal")
 	}
 
 	c := &DefaultDialerClient{transportConfig: &Config{}, httpVersion: "2"}
@@ -159,8 +172,12 @@ func TestOpenStream_ContextCancelDoesNotMarkClosed(t *testing.T) {
 		t.Fatal("non-fatal error must not mark closed")
 	}
 	c.markFatal(io.EOF)
+	if c.IsClosed() {
+		t.Fatal("bare EOF must not mark closed")
+	}
+	c.markFatal(syscall.ECONNRESET)
 	if !c.IsClosed() {
-		t.Fatal("fatal error must mark closed")
+		t.Fatal("hard conn death must mark closed")
 	}
 }
 
@@ -184,7 +201,7 @@ func TestPostPacket_H2_NonFatalDoesNotClose(t *testing.T) {
 
 func TestPostPacket_H2_FatalCloses(t *testing.T) {
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return nil, io.EOF
+		return nil, net.ErrClosed
 	})
 	c := &DefaultDialerClient{
 		transportConfig: &Config{},
@@ -193,7 +210,25 @@ func TestPostPacket_H2_FatalCloses(t *testing.T) {
 	}
 	_ = c.PostPacket(context.Background(), "http://example/u", "s", "1", nil)
 	if !c.IsClosed() {
-		t.Fatal("EOF must close dialer")
+		t.Fatal("hard conn death must close dialer")
+	}
+}
+
+func TestPostPacket_H2_BareEOFDoesNotClose(t *testing.T) {
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, io.EOF
+	})
+	c := &DefaultDialerClient{
+		transportConfig: &Config{},
+		httpVersion:     "2",
+		client:          &http.Client{Transport: rt},
+	}
+	err := c.PostPacket(context.Background(), "http://example/u", "s", "1", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if c.IsClosed() {
+		t.Fatal("bare EOF must not close dialer")
 	}
 }
 

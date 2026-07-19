@@ -121,8 +121,9 @@ func TestDefault(t *testing.T) {
 
 	n := len(xmuxClients)
 	// steady 2-4 => burst 4-8; absolute burst max 16. Beyond that, over-admit reuses.
-	if n < 4 || n > 16 {
-		t.Errorf("expected 4-16 distinct clients under burst-capped defaults, got %d", n)
+	// Jitter can pull the connections floor to 1 => burst min(16,max(2,3))=3, so 3 is legal.
+	if n < 3 || n > 16 {
+		t.Errorf("expected 3-16 distinct clients under burst-capped defaults, got %d", n)
 	}
 }
 

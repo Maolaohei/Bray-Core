@@ -140,24 +140,30 @@ func (c *DefaultDialerClient) getOnFatalError() func(error) {
 	return v.(func(error))
 }
 
-// isFatalConnError checks if an error indicates the connection is dead and should be evicted.
-// Only "connection-level" faults trigger eviction. "Stream-level" faults and "dial failures"
-// are handled by their own retry logic.
+// isFatalConnError checks if an error indicates the H2/H3/H1 transport should be
+// evicted from the XMUX pool. Only connection-level faults qualify.
+//
+// Bare io.EOF / UnexpectedEOF are intentionally NOT fatal: on multiplexed H2 a
+// single stream can end with EOF while sibling streams are still healthy.
+// Treating EOF as fatal used to MarkDead → forceCloseLiveConns and mid-transfer
+// "断流" on concurrent stream-one/packet-up downloads.
 func isFatalConnError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Soft stream-end signals: fail this request only, keep the pooled transport.
+	if stderrors.Is(err, io.EOF) || stderrors.Is(err, io.ErrUnexpectedEOF) {
+		return false
+	}
 
-	// Fast path: most common TCP errors (branch-predictor friendly)
-	if stderrors.Is(err, io.EOF) ||
-		stderrors.Is(err, io.ErrUnexpectedEOF) ||
-		stderrors.Is(err, stdnet.ErrClosed) ||
+	// Fast path: hard TCP/socket death (branch-predictor friendly)
+	if stderrors.Is(err, stdnet.ErrClosed) ||
 		stderrors.Is(err, syscall.EPIPE) ||
 		stderrors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
 
-	// Slow path: TLS, HTTP/2, and third-party errors
+	// Slow path: TLS, HTTP/2, and third-party connection-level errors
 	return isFatalConnErrorSlow(err)
 }
 
@@ -169,7 +175,9 @@ func isFatalConnErrorSlow(err error) bool {
 		return true
 	}
 
-	// String-based matching for TLS/x509/HTTP2 errors
+	// String-based matching for TLS/x509/HTTP2 connection-level faults only.
+	// Avoid stream-scoped phrases (REFUSED_STREAM, cancel, timeout) which must
+	// not force-close the shared raw socket under other active streams.
 	s := err.Error()
 	return strings.Contains(s, "tls:") ||
 		strings.Contains(s, "x509:") ||
@@ -181,7 +189,9 @@ func isFatalConnErrorSlow(err error) bool {
 		strings.Contains(s, "transport closed") ||
 		strings.Contains(s, "server sent disconnect") ||
 		strings.Contains(s, "client connection force closed") ||
-		strings.Contains(s, "http2: Transport closing idle connection")
+		strings.Contains(s, "http2: Transport closing idle connection") ||
+		strings.Contains(s, "http2: client connection force closed") ||
+		strings.Contains(s, "http2: client connection lost")
 }
 
 func (c *DefaultDialerClient) markFatal(err error) {

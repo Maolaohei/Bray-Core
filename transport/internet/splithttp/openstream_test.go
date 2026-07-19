@@ -66,6 +66,26 @@ func TestOpenStream_Non200ReturnsError(t *testing.T) {
 }
 
 func TestOpenStream_DoErrorSurfacesAndFatalMarks(t *testing.T) {
+	// Hard connection loss (not bare EOF) must mark the dialer closed for eviction.
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, stdnet.ErrClosed
+	})
+	c := &DefaultDialerClient{
+		transportConfig: &Config{},
+		httpVersion:     "2",
+		client:          &http.Client{Transport: rt},
+	}
+	_, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !c.IsClosed() {
+		t.Fatal("hard conn death must mark dialer closed")
+	}
+}
+
+func TestOpenStream_BareEOFDoesNotMarkClosed(t *testing.T) {
+	// Multiplexed H2: one stream EOF must not force-close sibling streams.
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return nil, io.EOF
 	})
@@ -78,8 +98,8 @@ func TestOpenStream_DoErrorSurfacesAndFatalMarks(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !c.IsClosed() {
-		t.Fatal("EOF must mark dialer closed")
+	if c.IsClosed() {
+		t.Fatal("bare EOF must not mark dialer closed")
 	}
 }
 
@@ -127,7 +147,7 @@ func TestOpenStream_UploadOnlySuccessKeepsDialerOpen(t *testing.T) {
 
 func TestOpenStream_UploadOnlyFatalMarksClosed(t *testing.T) {
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return nil, io.EOF
+		return nil, stdnet.ErrClosed
 	})
 	c := &DefaultDialerClient{
 		transportConfig: &Config{},
@@ -141,7 +161,7 @@ func TestOpenStream_UploadOnlyFatalMarksClosed(t *testing.T) {
 		t.Fatal("expected fatal error")
 	}
 	if !c.IsClosed() {
-		t.Fatal("uploadOnly fatal must mark dialer closed")
+		t.Fatal("uploadOnly hard fault must mark dialer closed")
 	}
 }
 
