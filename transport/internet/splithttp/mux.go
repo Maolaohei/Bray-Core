@@ -661,7 +661,33 @@ const (
 	// Prevents stale state accumulation from NAT/LB changes, server rotation, and TLS session staleness.
 	// Connections with active streams will finish their work before closing.
 	maxConnectionAge = 20 * time.Minute
+
+	// xmuxBurstAbsMax caps soft-expand past steady maxConnections under full
+	// concurrency saturation. Absorbs short spikes without thrashing REALITY/TLS.
+	// Beyond this, GetXmuxClient over-admits onto the least-loaded active client.
+	xmuxBurstAbsMax = 16
 )
+
+// burstConnectionLimit returns the max pool size allowed when every active
+// client is at effectiveConcurrency. Steady target is effectiveConnections;
+// burst is min(16, max(steady*2, steady+2)). Unlimited steady (0) keeps
+// unlimited create behavior (return 0).
+func burstConnectionLimit(steady int32) int {
+	if steady <= 0 {
+		return 0
+	}
+	burst := int(steady * 2)
+	if alt := int(steady) + 2; alt > burst {
+		burst = alt
+	}
+	if burst > xmuxBurstAbsMax {
+		burst = xmuxBurstAbsMax
+	}
+	if burst < int(steady) {
+		burst = int(steady)
+	}
+	return burst
+}
 
 // healthCheckLoop periodically checks connection health and removes unhealthy ones.
 // Improvements over original:
@@ -1192,8 +1218,12 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		needNew = true
 	}
 
+	// overAdmit: when saturated past burst, reuse least-loaded Active client
+	// instead of creating unbounded REALITY/TLS connections.
+	overAdmit := false
+	effectiveConc := m.effectiveConcurrency()
+
 	if !needNew {
-		effectiveConc := m.effectiveConcurrency()
 		var best *XmuxClient
 		bestScore := int64(math.MaxInt64)
 		now := nowWall.UnixNano()
@@ -1217,8 +1247,37 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		}
 
 		if best == nil {
-			needNew = true
-		} else {
+			// All Active clients are at concurrency limit (or idle-evicted).
+			// Soft-expand only up to burst; beyond that over-admit onto H2.
+			burst := burstConnectionLimit(effectiveConns)
+			if burst == 0 || poolLen < burst {
+				needNew = true
+			} else {
+				overAdmit = true
+				// Prefer least inflight, then best score among Active clients.
+				bestScore = int64(math.MaxInt64)
+				var bestInflight int32 = math.MaxInt32
+				for _, c := range snap.s {
+					if c.state.Load() != StateActive {
+						continue
+					}
+					inf := c.activeStreams.Load()
+					sc := c.cachedScore.Load()
+					if inf < bestInflight || (inf == bestInflight && sc < bestScore) {
+						best = c
+						bestInflight = inf
+						bestScore = sc
+					}
+				}
+				if best == nil {
+					// No Active client left (all draining/closed) — must create.
+					needNew = true
+					overAdmit = false
+				}
+			}
+		}
+
+		if best != nil && !needNew {
 			// CAS loop to atomically decrement leftUsage
 			acquired := false
 			for {
@@ -1231,20 +1290,57 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 					m.pool.mu.RUnlock()
 					best = nil
 					bestScore = int64(math.MaxInt64)
+					// Reselect: respect concurrency unless over-admitting.
+					var bestInflight int32 = math.MaxInt32
 					for _, c := range snap.s {
 						if c.state.Load() != StateActive {
 							continue
 						}
-						if effectiveConc > 0 && c.activeStreams.Load() >= effectiveConc {
+						if !overAdmit && effectiveConc > 0 && c.activeStreams.Load() >= effectiveConc {
 							continue
 						}
-						if sc := c.cachedScore.Load(); sc < bestScore {
+						inf := c.activeStreams.Load()
+						sc := c.cachedScore.Load()
+						if overAdmit {
+							if inf < bestInflight || (inf == bestInflight && sc < bestScore) {
+								best = c
+								bestInflight = inf
+								bestScore = sc
+							}
+						} else if sc < bestScore {
 							best = c
 							bestScore = sc
 						}
 					}
 					if best == nil {
-						needNew = true
+						// Fall through to create/over-admit decision again.
+						burst := burstConnectionLimit(effectiveConns)
+						if burst == 0 || poolLen < burst {
+							needNew = true
+						} else {
+							// Try over-admit on any Active client.
+							overAdmit = true
+							bestInflight = math.MaxInt32
+							bestScore = int64(math.MaxInt64)
+							for _, c := range snap.s {
+								if c.state.Load() != StateActive {
+									continue
+								}
+								inf := c.activeStreams.Load()
+								sc := c.cachedScore.Load()
+								if inf < bestInflight || (inf == bestInflight && sc < bestScore) {
+									best = c
+									bestInflight = inf
+									bestScore = sc
+								}
+							}
+							if best == nil {
+								needNew = true
+								overAdmit = false
+								break
+							}
+							continue
+						}
 						break
 					}
 					continue
@@ -1281,10 +1377,47 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 	releaseSnap(snap)
 	snap = nil
 
-	// Phase 2: Create new connection (no lock held)
+	// Phase 2: Create new connection only when under burst cap.
+	// Re-check pool size under lock so concurrent creators cannot stampede past burst.
 	const maxAttempts = 2
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Burst gate before dial (best-effort under race).
+		if burst := burstConnectionLimit(m.effectiveConnections()); burst > 0 {
+			m.pool.mu.RLock()
+			cur := len(m.pool.clients)
+			var least *XmuxClient
+			var leastInf int32 = math.MaxInt32
+			leastScore := int64(math.MaxInt64)
+			for _, c := range m.pool.clients {
+				if c.state.Load() != StateActive {
+					continue
+				}
+				inf := c.activeStreams.Load()
+				sc := c.cachedScore.Load()
+				if inf < leastInf || (inf == leastInf && sc < leastScore) {
+					least = c
+					leastInf = inf
+					leastScore = sc
+				}
+			}
+			m.pool.mu.RUnlock()
+			if cur >= burst && least != nil {
+				m.lastActivity.Store(time.Now().UnixNano())
+				least.LastUsed.Store(time.Now().UnixNano())
+				m.RecordReuseHit()
+				if err := least.WaitForReady(ctx); err != nil {
+					errors.LogInfo(ctx, "XMUX: probe failed for burst-cap client, removing: ", err)
+					m.pool.mu.Lock()
+					m.pool.RemoveAndClose(least)
+					m.pool.mu.Unlock()
+					lastErr = fmt.Errorf("XMUX: probe failed: %w", err)
+					continue
+				}
+				return least, nil
+			}
+		}
+
 		conn := m.newConnFunc()
 		if conn == nil {
 			lastErr = errors.New("XMUX: newConnFunc returned nil")

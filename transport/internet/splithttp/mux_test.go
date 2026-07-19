@@ -77,8 +77,11 @@ func TestCMaxReuseTimes(t *testing.T) {
 }
 
 func TestMaxConcurrency(t *testing.T) {
+	// Unlimited connections (0) so only MaxConcurrency drives expansion.
+	// With a finite MaxConnections, burst+over-admit caps pool growth.
 	xmuxConfig := XmuxConfig{
 		MaxConcurrency: &RangeConfig{From: 2, To: 2},
+		MaxConnections: &RangeConfig{From: 0, To: 0},
 	}
 
 	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
@@ -100,8 +103,8 @@ func TestMaxConcurrency(t *testing.T) {
 
 func TestDefault(t *testing.T) {
 	// Bray-V2 browser-like nil defaults: concurrency 8-16, connections 2-4.
-	// Holding Borrow() without Release saturates per-conn concurrency and
-	// forces additional pool clients (still bounded by connection defaults).
+	// Holding Borrow() without Release saturates per-conn concurrency.
+	// Soft-expand is now capped at burst (min(16, max(steady*2, steady+2))).
 	xmuxConfig := XmuxConfig{}
 
 	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
@@ -117,9 +120,48 @@ func TestDefault(t *testing.T) {
 	}
 
 	n := len(xmuxClients)
-	// 64 held streams / max concurrency 16 => >=4 clients; pool soft-expands past maxConnections when saturated.
-	if n < 4 || n > 32 {
-		t.Errorf("expected 4-32 distinct clients under browser defaults with held streams, got %d", n)
+	// steady 2-4 => burst 4-8; absolute burst max 16. Beyond that, over-admit reuses.
+	if n < 4 || n > 16 {
+		t.Errorf("expected 4-16 distinct clients under burst-capped defaults, got %d", n)
+	}
+}
+
+func TestBurstCapOverAdmit(t *testing.T) {
+	// steady maxConnections=2, concurrency=1 => burst=min(16,max(4,4))=4.
+	// 20 held Borrow slots must not create more than burst clients.
+	xmuxConfig := XmuxConfig{
+		MaxConcurrency: &RangeConfig{From: 1, To: 1},
+		MaxConnections: &RangeConfig{From: 2, To: 2},
+	}
+	var created atomic.Int32
+	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
+		created.Add(1)
+		return &fakeRoundTripper{}
+	})
+	defer xmuxManager.Close()
+
+	clients := make(map[interface{}]struct{})
+	for i := 0; i < 20; i++ {
+		c, err := xmuxManager.GetXmuxClient(context.Background())
+		if err != nil || c == nil {
+			t.Fatalf("GetXmuxClient: %v", err)
+		}
+		if !c.Borrow() {
+			t.Fatal("Borrow failed on returned client")
+		}
+		clients[c] = struct{}{}
+	}
+	n := len(clients)
+	if n > 4 {
+		t.Fatalf("burst cap broken: got %d distinct clients, want <=4", n)
+	}
+	if n < 2 {
+		t.Fatalf("expected soft-expand at least to steady/burst, got %d", n)
+	}
+	// All 20 requests succeeded (over-admit after burst).
+	if created.Load() > 8 {
+		// preConnect/health may add a few; still must stay near burst.
+		t.Fatalf("too many connections created: %d", created.Load())
 	}
 }
 

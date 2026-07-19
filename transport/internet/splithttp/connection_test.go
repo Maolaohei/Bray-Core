@@ -31,13 +31,13 @@ func TestSplitConnDeadlineMethodsReturnNil(t *testing.T) {
 		localAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5678},
 	}
 
-	if err := conn.SetDeadline(time.Now()); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Errorf("SetDeadline returned error: %v", err)
 	}
-	if err := conn.SetReadDeadline(time.Now()); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Errorf("SetReadDeadline returned error: %v", err)
 	}
-	if err := conn.SetWriteDeadline(time.Now()); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Errorf("SetWriteDeadline returned error: %v", err)
 	}
 }
@@ -57,6 +57,53 @@ func TestSplitConnDeadlineZeroValue(t *testing.T) {
 	}
 	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
 		t.Errorf("SetWriteDeadline with zero time returned error: %v", err)
+	}
+}
+
+func TestSplitConnReadDeadlineTimesOut(t *testing.T) {
+	// Reader is a pipe that never gets data; deadline must surface net.Error timeout.
+	// This is the IdleRecovery hang class: H2 body is not net.Conn so SetReadDeadline
+	// used to be a silent no-op and Read blocked forever.
+	r, w := io.Pipe()
+	defer w.Close()
+	defer r.Close()
+
+	conn := &splitConn{reader: r, writer: w}
+	if err := conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 8)
+	start := time.Now()
+	n, err := conn.Read(buf)
+	elapsed := time.Since(start)
+	if n != 0 {
+		t.Fatalf("n=%d want 0", n)
+	}
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	ne, ok := err.(net.Error)
+	if !ok || !ne.Timeout() {
+		t.Fatalf("err=%v type=%T; want net.Error Timeout", err, err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("timeout took %v; expected ~50ms", elapsed)
+	}
+
+	// After timeout, delivering data must unblock subsequent Read (pending delivery).
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, _ = w.Write([]byte("ok"))
+	}()
+	n, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("Read after timeout: %v", err)
+	}
+	if string(buf[:n]) != "ok" {
+		t.Fatalf("got %q", string(buf[:n]))
 	}
 }
 

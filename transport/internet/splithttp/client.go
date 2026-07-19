@@ -61,6 +61,11 @@ type DefaultDialerClient struct {
 	onTTFB       atomic.Value // func(time.Duration)
 	onNewConn    atomic.Value // func(net.Conn)
 	onFatalError atomic.Value // func(error)
+
+	// liveConns tracks raw TCP/QUIC sockets created for this dialer so MarkDead/Close
+	// can force-close active H2 connections (CloseIdleConnections alone is not enough).
+	liveMu    sync.Mutex
+	liveConns map[stdnet.Conn]struct{}
 }
 
 func (c *DefaultDialerClient) IsClosed() bool {
@@ -189,6 +194,57 @@ func (c *DefaultDialerClient) markFatal(err error) {
 	}
 }
 
+// trackConn records a live raw socket and returns a wrapper that untracks on Close.
+// Used so MarkDead can force-close active H2 transports, not only idle ones.
+func (c *DefaultDialerClient) trackConn(conn stdnet.Conn) stdnet.Conn {
+	if conn == nil {
+		return nil
+	}
+	tc := &trackedConn{Conn: conn}
+	tc.onClose = func() {
+		c.liveMu.Lock()
+		delete(c.liveConns, tc)
+		c.liveMu.Unlock()
+	}
+	c.liveMu.Lock()
+	if c.liveConns == nil {
+		c.liveConns = make(map[stdnet.Conn]struct{})
+	}
+	c.liveConns[tc] = struct{}{}
+	c.liveMu.Unlock()
+	return tc
+}
+
+// forceCloseLiveConns closes every tracked raw socket. Safe under concurrent dial.
+func (c *DefaultDialerClient) forceCloseLiveConns() {
+	c.liveMu.Lock()
+	conns := make([]stdnet.Conn, 0, len(c.liveConns))
+	for conn := range c.liveConns {
+		conns = append(conns, conn)
+	}
+	c.liveConns = nil
+	c.liveMu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+type trackedConn struct {
+	stdnet.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (t *trackedConn) Close() error {
+	err := t.Conn.Close()
+	t.once.Do(func() {
+		if t.onClose != nil {
+			t.onClose()
+		}
+	})
+	return err
+}
+
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
 	t0 := time.Now()
 	var addrMu sync.Mutex
@@ -210,7 +266,10 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 	}
 	resultCh := make(chan streamResult, 1)
 
-	reqCtx := context.WithoutCancel(ctx)
+	// I1: open is cancelable without tying the long-lived stream to Dial's ctx.
+	// WithoutCancel keeps stream-one/stream-up alive after Dial returns; the child
+	// cancel lets us abort in-flight Do/dial when the parent cancels during open.
+	reqCtx, reqCancel := context.WithCancel(context.WithoutCancel(ctx))
 	reqCtx = httptrace.WithClientTrace(reqCtx, &httptrace.ClientTrace{
 		GotConn: func(connInfo httptrace.GotConnInfo) {
 			addrMu.Lock()
@@ -232,6 +291,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 
 	req, err := http.NewRequestWithContext(reqCtx, method, url, body)
 	if err != nil {
+		reqCancel()
 		errors.LogInfoInner(ctx, err, "failed to create HTTP request for "+url)
 		return nil, nil, nil, err
 	}
@@ -272,6 +332,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		if uploadOnly {
 			// stream-up: headers accepted; keep request body open for the pipe writer.
 			// Drain the (usually empty/idle) response in the background.
+			// Do NOT reqCancel here — cancel would abort the still-open request body.
 			go func() {
 				io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
@@ -290,7 +351,13 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 			return
 		}
 		rc := &WaitReadCloser{wait: make(chan struct{})}
-		rc.Set(resp.Body)
+		// Pure download: cancel reqCtx when body closes so open-phase resources free.
+		// stream-one (body != nil) must keep reqCtx alive for the bi-directional stream.
+		if body == nil {
+			rc.Set(&cancelOnClose{ReadCloser: resp.Body, cancel: reqCancel})
+		} else {
+			rc.Set(resp.Body)
+		}
 		addrMu.Lock()
 		rr, ll := gotRemote, gotLocal
 		addrMu.Unlock()
@@ -304,8 +371,9 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 
 	select {
 	case <-ctx.Done():
-		// Request uses WithoutCancel so the round-trip can finish cleanup; surface dial abort.
-		// Drain the result so a late success does not leak the response body.
+		// Abort the in-flight round-trip (RST_STREAM / dial cancel). Do not leave
+		// orphan Do/dial work holding H2 streams or TCP sockets after caller returns.
+		reqCancel()
 		go func() {
 			res := <-resultCh
 			if res.rc != nil {
@@ -318,10 +386,30 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		return nil, r, l, ctx.Err()
 	case res := <-resultCh:
 		if res.err != nil {
+			reqCancel()
 			return nil, res.remote, res.local, res.err
 		}
+		// Success: keep reqCtx alive for stream-one/stream-up. Pure download
+		// cancels via cancelOnClose when the response body is closed.
 		return res.rc, res.remote, res.local, nil
 	}
+}
+
+// cancelOnClose cancels a request context when the response body is closed.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (c *cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.once.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
+	})
+	return err
 }
 
 func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, payload buf.MultiBuffer) error {
@@ -449,11 +537,18 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 }
 
 // Close shuts down the underlying HTTP transport.
-// For HTTP/2: sends GOAWAY on idle connections, waits for active streams to finish.
-// For HTTP/1.1: closes idle connections.
+// For HTTP/2: force-closes tracked raw sockets (active streams included), then
+// clears idle pool entries. CloseIdleConnections alone leaves busy H2 conns alive.
+// For HTTP/1.1: closes idle connections after tracked sockets.
 // For HTTP/3: closes immediately (QUIC handles graceful shutdown internally).
 // For Happy Eyeballs: closes both H3 and H2 transports.
 func (c *DefaultDialerClient) Close() error {
+	c.closed.Store(true)
+	// Tear down live sockets first so blocked Read/Write on dead H2 streams unblock.
+	c.forceCloseLiveConns()
+	if c.client == nil || c.client.Transport == nil {
+		return nil
+	}
 	transport := c.client.Transport
 	switch t := transport.(type) {
 	case *happyEyeballsTransport:

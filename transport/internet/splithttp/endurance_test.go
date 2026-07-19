@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"io"
-	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -121,10 +120,14 @@ func TestXHTTP_NoDrop_Continuous(t *testing.T) {
 	if runtime.GOARCH == "arm64" {
 		t.Skip("arm64")
 	}
+	ResetGlobalDialer()
+	t.Cleanup(ResetGlobalDialer)
 
 	for _, profile := range networkProfiles {
 		t.Run(profile.Name, func(t *testing.T) {
+			ResetGlobalDialer()
 			testContinuousTransfer(t, profile, 30*time.Second, 0)
+			ResetGlobalDialer()
 		})
 	}
 }
@@ -140,10 +143,17 @@ func TestXHTTP_NoDrop_IdleRecovery(t *testing.T) {
 	if runtime.GOARCH == "arm64" {
 		t.Skip("arm64")
 	}
+	// Isolate from prior package tests that may have left global XMUX state.
+	ResetGlobalDialer()
+	t.Cleanup(ResetGlobalDialer)
 
 	for _, profile := range networkProfiles {
 		t.Run(profile.Name, func(t *testing.T) {
+			// Fresh XMUX map per profile so idle migration from one case
+			// cannot race the next profile's dials.
+			ResetGlobalDialer()
 			testIdleRecovery(t, profile)
+			ResetGlobalDialer()
 		})
 	}
 }
@@ -275,12 +285,13 @@ func testContinuousTransfer(t *testing.T, profile NetworkProfile, duration time.
 					return
 				}
 				buf := make([]byte, len(payload))
-				conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				// Hard deadline: splitConn honors this even on H2 bodies.
+				// A timeout is a real stall (not a soft retry): counting it as
+				// an error avoids desync if a late echo arrives after we move on.
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 				n, err := io.ReadFull(conn, buf)
+				_ = conn.SetReadDeadline(time.Time{})
 				if err != nil {
-					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						continue
-					}
 					totalErrors.Add(1)
 					return
 				}
@@ -348,22 +359,39 @@ func testIdleRecovery(t *testing.T, profile NetworkProfile) {
 	payload := make([]byte, 32*1024)
 	rand.Read(payload)
 
+	// echoRoundTrip writes then fully reads one payload under a hard deadline.
+	// splitConn now honors SetReadDeadline even when the download leg is an
+	// H2 body (not a net.Conn); without that, a stalled Phase 3 hang forever.
+	echoRoundTrip := func(phase string, i int) {
+		t.Helper()
+		if _, err := conn.Write(payload); err != nil {
+			if i >= 0 {
+				t.Fatalf("%s write error (i=%d): %v", phase, i, err)
+			}
+			t.Fatalf("%s write error: %v", phase, err)
+		}
+		buf := make([]byte, len(payload))
+		// Absolute deadline covers the full ReadFull of this payload.
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			if i >= 0 {
+				t.Fatalf("%s read error (i=%d): %v", phase, i, err)
+			}
+			t.Fatalf("%s read error: %v", phase, err)
+		}
+		// Clear so a late timer from a prior trip cannot poison the next.
+		_ = conn.SetReadDeadline(time.Time{})
+	}
+
 	// Phase 1: 持续传输 3s
 	t.Log("Phase 1: 持续传输 3s...")
 	start := time.Now()
 	for time.Since(start) < 3*time.Second {
-		if _, err := conn.Write(payload); err != nil {
-			t.Fatalf("Phase 1 write error: %v", err)
-		}
-		buf := make([]byte, len(payload))
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		if _, err := io.ReadFull(conn, buf); err != nil {
-			t.Fatalf("Phase 1 read error: %v", err)
-		}
+		echoRoundTrip("Phase 1", -1)
 	}
 	t.Log("  Phase 1 完成")
 
-	// Phase 2: 空闲 15s
+	// Phase 2: 空闲 15s (idle must not kill the logical session)
 	t.Log("Phase 2: 空闲 15s...")
 	time.Sleep(15 * time.Second)
 	t.Log("  Phase 2 完成")
@@ -372,14 +400,7 @@ func testIdleRecovery(t *testing.T, profile NetworkProfile) {
 	t.Log("Phase 3: 恢复传输...")
 	recoveryStart := time.Now()
 	for i := 0; i < 5; i++ {
-		if _, err := conn.Write(payload); err != nil {
-			t.Fatalf("Phase 3 write error (i=%d): %v", i, err)
-		}
-		buf := make([]byte, len(payload))
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		if _, err := io.ReadFull(conn, buf); err != nil {
-			t.Fatalf("Phase 3 read error (i=%d): %v", i, err)
-		}
+		echoRoundTrip("Phase 3", i)
 	}
 	recoveryTime := time.Since(recoveryStart)
 

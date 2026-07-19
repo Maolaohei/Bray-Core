@@ -467,7 +467,9 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			return nil, err
 		}
 
-		// Notify profiling: raw TCP socket before TLS/REALITY wrapping
+		// Track raw socket so MarkDead/Close can force-close active H2 connections.
+		// Wrap first so onNewConn (TCP_INFO profiling) sees the same conn object.
+		rawConn = dc.trackConn(rawConn)
 		if fn := dc.getOnNewConn(); fn != nil {
 			fn(rawConn)
 		}
