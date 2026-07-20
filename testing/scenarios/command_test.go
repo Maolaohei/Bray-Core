@@ -3,8 +3,6 @@ package scenarios
 import (
 	"context"
 	"fmt"
-	"io"
-	"strings"
 	"testing"
 	"time"
 
@@ -448,9 +446,20 @@ func TestCommanderAddRemoveUser(t *testing.T) {
 	common.Must(err)
 	defer CloseAllServers(servers)
 
-	if err := testTCPConn(clientPort, 1024, time.Second*5)(); err != io.EOF &&
-		/*We might wish to drain the connection*/
-		(err != nil && !strings.HasSuffix(err.Error(), "i/o timeout")) {
+	// Wait for both the client dokodemo and the commander API to accept TCP
+	// before asserting pre-auth failure. On Windows the 2s post-start sleep is
+	// not always enough and dials return connection-refused instead of the
+	// protocol-level close/timeout the test expects.
+	if !waitTCPListening(clientPort, 5*time.Second) {
+		t.Fatal("client inbound did not become ready")
+	}
+	if !waitTCPListening(cmdPort, 5*time.Second) {
+		t.Fatal("commander API did not become ready")
+	}
+
+	// Before the user is added, auth must fail. Accept EOF, read timeout, or
+	// connection refused (Windows process-start race / mid-handshake reset).
+	if err := testTCPConn(clientPort, 1024, time.Second*5)(); !isBenignPreAuthDialError(err) {
 		t.Fatal("expected error: ", err)
 	}
 

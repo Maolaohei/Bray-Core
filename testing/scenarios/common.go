@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -280,12 +281,20 @@ func testTCPConn2(conn net.Conn, payloadSize int, timeout time.Duration) func() 
 }
 
 func WaitConnAvailableWithTest(t *testing.T, testFunc func() error) bool {
+	// Windows CI runners are slower to bind/accept after process start, and
+	// Hyper-V excluded port ranges make first attempts fail more often.
+	maxAttempts := 10
+	sleep := 10 * time.Millisecond
+	if runtime.GOOS == "windows" {
+		maxAttempts = 30
+		sleep = 50 * time.Millisecond
+	}
 	for i := 1; ; i++ {
-		if i > 10 {
+		if i > maxAttempts {
 			t.Log("All attempts failed to test tcp conn")
 			return false
 		}
-		time.Sleep(time.Millisecond * 10)
+		time.Sleep(sleep)
 		if err := testFunc(); err != nil {
 			t.Log("err ", err)
 		} else {
@@ -294,4 +303,37 @@ func WaitConnAvailableWithTest(t *testing.T, testFunc func() error) bool {
 		}
 	}
 	return true
+}
+
+// waitTCPListening returns true once a TCP dial to 127.0.0.1:port succeeds.
+// Used by scenario tests that must not race process startup.
+func waitTCPListening(port net.Port, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	addr := &net.TCPAddr{IP: []byte{127, 0, 0, 1}, Port: int(port)}
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTCP("tcp", nil, addr)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// isBenignPreAuthDialError reports dial outcomes that are acceptable before a
+// VMess user has been added: peer closed (EOF), read timeout, or the Windows
+// connection-refused race when the inbound is not yet fully ready.
+func isBenignPreAuthDialError(err error) bool {
+	if err == nil || err == io.EOF {
+		return true
+	}
+	s := err.Error()
+	if strings.HasSuffix(s, "i/o timeout") {
+		return true
+	}
+	// Windows: "connectex: No connection could be made because the target
+	// machine actively refused it." / Unix: "connection refused".
+	return strings.Contains(s, "actively refused") ||
+		strings.Contains(s, "connection refused")
 }
