@@ -2,6 +2,7 @@ package splithttp
 
 import (
 	"context"
+	"errors"
 	"io"
 	stdnet "net"
 	"net/http"
@@ -325,3 +326,58 @@ func (f *fakeNetConn) RemoteAddr() stdnet.Addr          { return &stdnet.TCPAddr
 func (f *fakeNetConn) SetDeadline(time.Time) error      { return nil }
 func (f *fakeNetConn) SetReadDeadline(time.Time) error  { return nil }
 func (f *fakeNetConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestOpenStream_HeaderTimeoutWhenNoDeadline(t *testing.T) {
+	// RoundTrip hangs until request context cancels (simulates blackholed H2 after GotConn).
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	c := &DefaultDialerClient{
+		transportConfig: &Config{},
+		httpVersion:     "2",
+		client:          &http.Client{Transport: rt},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, _, _, err := c.OpenStream(ctx, "http://example/d", "sid", nil, false)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("OpenStream hung too long: %v", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		if !strings.Contains(err.Error(), "deadline") && !strings.Contains(err.Error(), "canceled") {
+			t.Fatalf("unexpected err: %v", err)
+		}
+	}
+	if c.IsClosed() {
+		t.Fatal("header timeout must not mark connection fatal by itself")
+	}
+}
+
+func TestXmuxClient_OpenHeaderTimeoutEvicts(t *testing.T) {
+	c := &XmuxClient{ready: make(chan struct{})}
+	close(c.ready)
+	c.state.Store(StateActive)
+	c.NoteOpenHeaderTimeout()
+	if c.state.Load() == StateClosed {
+		t.Fatal("first timeout should not MarkDead")
+	}
+	c.NoteOpenHeaderTimeout()
+	if c.state.Load() != StateClosed {
+		t.Fatal("second consecutive open-header timeout must MarkDead")
+	}
+	c2 := &XmuxClient{ready: make(chan struct{})}
+	close(c2.ready)
+	c2.state.Store(StateActive)
+	c2.NoteOpenHeaderTimeout()
+	c2.NoteOpenSuccess()
+	c2.NoteOpenHeaderTimeout()
+	if c2.state.Load() == StateClosed {
+		t.Fatal("success must reset open-header timeout counter")
+	}
+}

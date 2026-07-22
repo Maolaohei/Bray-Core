@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,6 +28,18 @@ const (
 	MaxAEADPayload   = 8192
 	OutBytesCapacity = 5 + MaxAEADPayload + 16
 )
+
+// ErrInvalidHeader is returned by DecodeHeader on bad framing.
+// Error() still contains "invalid header" for string-match callers.
+var ErrInvalidHeader = stderrors.New("invalid header")
+
+// bytesToString maps a byte slice to a string without allocation (read-only use).
+func bytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
 
 var OutBytesPool = sync.Pool{
 	New: func() any {
@@ -141,7 +154,7 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 	}
 	l, err := DecodeHeader(peerHeader[:]) // l: 17~16640
 	if err != nil {
-		if c.Client != nil && strings.Contains(err.Error(), "invalid header: ") { // client's 0-RTT
+		if c.Client != nil && (stderrors.Is(err, ErrInvalidHeader) || strings.Contains(err.Error(), "invalid header")) { // client's 0-RTT
 			c.Client.RWLock.Lock()
 			if bytes.HasPrefix(c.UnitedKey, c.Client.PfsKey) {
 				c.Client.Expire = time.Now() // expired
@@ -193,7 +206,7 @@ type AEAD struct {
 
 func NewAEAD(ctx, key []byte, useAES bool) (*AEAD, error) {
 	k := make([]byte, 32)
-	blake3.DeriveKey(k, string(ctx), key)
+	blake3.DeriveKey(k, bytesToString(ctx), key)
 	var aead cipher.AEAD
 	if useAES {
 		block, err := aes.NewCipher(k)
@@ -217,7 +230,8 @@ func NewAEAD(ctx, key []byte, useAES bool) (*AEAD, error) {
 func (a *AEAD) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 	if nonce == nil {
 		nonce = IncreaseNonce(a.Nonce[:])
-		a.IsMax = bytes.Equal(a.Nonce[:], MaxNonce)
+		// IsMax when all bytes are 0xff after increment (only full-carry case).
+		a.IsMax = a.Nonce[0] == 0xff && a.Nonce[11] == 0xff && nonceIsMax(a.Nonce[:])
 	}
 	return a.AEAD.Seal(dst, nonce, plaintext, additionalData)
 }
@@ -225,9 +239,19 @@ func (a *AEAD) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 func (a *AEAD) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
 	if nonce == nil {
 		nonce = IncreaseNonce(a.Nonce[:])
-		a.IsMax = bytes.Equal(a.Nonce[:], MaxNonce)
+		a.IsMax = a.Nonce[0] == 0xff && a.Nonce[11] == 0xff && nonceIsMax(a.Nonce[:])
 	}
 	return a.AEAD.Open(dst, nonce, ciphertext, additionalData)
+}
+
+// nonceIsMax is a short-circuiting equality vs MaxNonce (all 0xff).
+func nonceIsMax(n []byte) bool {
+	for i := range n {
+		if n[i] != 0xff {
+			return false
+		}
+	}
+	return true
 }
 
 func IncreaseNonce(nonce []byte) []byte {
@@ -264,7 +288,7 @@ func DecodeHeader(h []byte) (l int, err error) {
 		l = 0
 	}
 	if l < 17 || l > 16640 { // TLS 1.3 max record: 16384 + 256 (RFC 8446 §5.2)
-		err = errors.New("invalid header: " + fmt.Sprintf("%v", h[:5])) // DO NOT CHANGE: relied by client's Read()
+		err = fmt.Errorf("%w: %v", ErrInvalidHeader, h[:5]) // Error() contains "invalid header:" for string match
 	}
 	return
 }

@@ -651,43 +651,32 @@ func (c *Config) ApplyXPaddingToResponse(writer http.ResponseWriter, config XPad
 	}
 }
 
-// extractStandardXPadding reads padding from the stock-Xray locations:
-// Referer?x_padding (preferred) or URL?x_padding. Returns ("", "") when
-// neither location carries a value.
-func extractStandardXPadding(req *http.Request) (string, string) {
-	referrer := req.Header.Get("Referer")
-	if referrer != "" {
-		if referrerURL, err := url.Parse(referrer); err == nil {
-			if v := referrerURL.Query().Get("x_padding"); v != "" {
-				return v, PlacementQueryInHeader + "=Referer, key=x_padding"
-			}
-		}
+// extractBrayDefaultXPadding reads padding from Bray-only default locations.
+// Primary: request header "X-Padding". No stock Xray Referer?x_padding path.
+func extractBrayDefaultXPadding(req *http.Request) (string, string) {
+	if v := req.Header.Get("X-Padding"); v != "" {
+		return v, PlacementHeader + "=X-Padding"
 	}
-	if v := req.URL.Query().Get("x_padding"); v != "" {
-		return v, PlacementQuery + ", key=x_padding"
+	// Rare alternate: query ?xb= for middleboxes that strip custom headers.
+	if v := req.URL.Query().Get("xb"); v != "" {
+		return v, PlacementQuery + ", key=xb"
 	}
 	return "", ""
 }
 
-// ExtractXPaddingFromRequest extracts the x-padding value and its placement
+// ExtractXPaddingFromRequest extracts the padding value and its placement
 // descriptor from an incoming request.
 //
-// In standard mode (obfsMode=false) it reads only from the stock-Xray
-// locations (Referer?x_padding / URL?x_padding).
-//
-// In obfs mode (obfsMode=true) it first tries the operator-configured obfs
-// locations (cookie / custom header / custom query key). If none of those
-// carry a value, it falls back to the standard locations. This makes a Bray
-// server that has obfs enabled still accept padding from stock Xray clients
-// — the fallback is the exact same path a stock server would take, so the
-// wire behaviour is identical and no header/query cleanup is required.
+// Bray-only (obfsMode=false): header X-Padding (or query xb).
+// obfsMode=true: operator-configured locations first, then Bray default.
+// Stock Xray Referer?x_padding is intentionally NOT accepted.
 func (c *Config) ExtractXPaddingFromRequest(req *http.Request, obfsMode bool) (string, string) {
 	if req == nil {
 		return "", ""
 	}
 
 	if !obfsMode {
-		return extractStandardXPadding(req)
+		return extractBrayDefaultXPadding(req)
 	}
 
 	// obfsMode: try operator-configured locations first.
@@ -715,9 +704,7 @@ func (c *Config) ExtractXPaddingFromRequest(req *http.Request, obfsMode bool) (s
 		return queryValue, PlacementQuery + ", key=" + key
 	}
 
-	// Obfs miss: fall back to the standard locations so stock Xray clients
-	// keep working against this Bray server.
-	return extractStandardXPadding(req)
+	return extractBrayDefaultXPadding(req)
 }
 
 func (c *Config) IsPaddingValid(paddingValue string, from, to int32, method PaddingMethod) bool {

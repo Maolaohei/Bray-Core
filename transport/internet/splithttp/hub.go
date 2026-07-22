@@ -38,6 +38,7 @@ type requestHandler struct {
 	ln             *Listener
 	sessionMu      *sync.Mutex
 	sessions       sync.Map
+	sessionN       atomic.Int64 // O(1) live session count (Bray-only)
 	localAddr      net.Addr
 	socketSettings *internet.SocketConfig
 	stopCh         chan struct{}
@@ -112,12 +113,21 @@ func sessionRemoteIP(remoteAddr string) string {
 }
 
 func (h *requestHandler) sessionCount() int {
-	n := 0
-	h.sessions.Range(func(_, _ any) bool {
-		n++
-		return true
-	})
-	return n
+	n := h.sessionN.Load()
+	if n < 0 {
+		return 0
+	}
+	return int(n)
+}
+
+// deleteSession removes sessionId if still pointing at s and adjusts the counter.
+func (h *requestHandler) deleteSession(sessionId string, s *httpSession) {
+	if s == nil {
+		return
+	}
+	if h.sessions.CompareAndDelete(sessionId, s) {
+		h.sessionN.Add(-1)
+	}
 }
 
 func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *httpSession {
@@ -131,11 +141,8 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 		// Bind by IP only. Port changes are normal under NAT / multi-conn XMUX.
 		// Different IPs still force a replace to avoid cross-client session hijack.
 		if s.remoteIP != "" && remoteIP != "" && s.remoteIP != remoteIP {
-			errors.LogError(context.Background(),
-				"XHTTP session reuse across different source IPs rejected: ",
-				"sessionId=", sessionId,
-				", existing=", s.remoteIP,
-				", new=", remoteIP,
+			errors.LogDebug(context.Background(),
+				"XHTTP session reuse across different source IPs rejected",
 			)
 			// Fall through to slow path to create a new session.
 		} else {
@@ -154,15 +161,12 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 	if ok {
 		s := currentSessionAny.(*httpSession)
 		if s.remoteIP != "" && remoteIP != "" && s.remoteIP != remoteIP {
-			errors.LogError(context.Background(),
-				"XHTTP session reuse across different source IPs rejected (slow path): ",
-				"sessionId=", sessionId,
-				", existing=", s.remoteIP,
-				", new=", remoteIP,
+			errors.LogDebug(context.Background(),
+				"XHTTP session reuse across different source IPs rejected (slow path)",
 			)
 			// Old session belongs to a different client IP.
 			// Close its uploadQueue and replace with a fresh session.
-			h.sessions.CompareAndDelete(sessionId, s)
+			h.deleteSession(sessionId, s)
 			s.close()
 		} else {
 			if s.timer != nil {
@@ -173,9 +177,8 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 	}
 
 	if h.sessionCount() >= maxSessionsPerHandler {
-		errors.LogError(context.Background(),
-			"XHTTP session limit reached, rejecting sessionId=", sessionId,
-			", max=", maxSessionsPerHandler,
+		errors.LogDebug(context.Background(),
+			"XHTTP session limit reached, max=", maxSessionsPerHandler,
 		)
 		return nil
 	}
@@ -188,16 +191,17 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 	}
 
 	h.sessions.Store(sessionId, s)
+	h.sessionN.Add(1)
 
 	go func() {
 		defer s.timer.Stop()
 		select {
 		case <-s.timer.C:
-			h.sessions.CompareAndDelete(sessionId, s)
+			h.deleteSession(sessionId, s)
 			s.close()
 		case <-s.isFullyConnected.Wait():
 		case <-h.stopCh:
-			h.sessions.CompareAndDelete(sessionId, s)
+			h.deleteSession(sessionId, s)
 			s.close()
 		}
 	}()
@@ -208,13 +212,13 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	reqStart := time.Now()
 	if len(h.host) > 0 && !internet.IsValidHTTPHost(request.Host, h.host) {
-		errors.LogInfo(context.Background(), "failed to validate host, request:", request.Host, ", config:", h.host)
+		errors.LogDebug(context.Background(), "failed to validate host")
 		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	if !strings.HasPrefix(request.URL.Path, h.path) {
-		errors.LogInfo(context.Background(), "failed to validate path, request:", request.URL.Path, ", config:", h.path)
+		errors.LogDebug(context.Background(), "failed to validate path")
 		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -228,27 +232,22 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	}
 
 	h.config.WriteResponseHeader(writer, request.Method, request.Header)
-	// Response padding stays on the configured range; request-side adaptive
-	// padding is applied on the client. Keep server replies stable for CDN caches.
-	length := int(h.config.GetNormalizedXPaddingBytes().rand())
-	config := XPaddingConfig{Length: length}
-
+	// Bray-only: default response X-Padding is a known Xray/XHTTP fingerprint.
+	// Only stamp response padding when operator enabled obfs with custom placement.
 	if h.config.XPaddingObfsMode {
-		config.Placement = XPaddingPlacement{
-			Placement: h.config.XPaddingPlacement,
-			Key:       h.config.XPaddingKey,
-			Header:    h.config.XPaddingHeader,
+		length := int(h.config.GetNormalizedXPaddingBytes().rand())
+		config := XPaddingConfig{
+			Length: length,
+			Method: PaddingMethod(h.config.XPaddingMethod),
+			Placement: XPaddingPlacement{
+				Placement: h.config.XPaddingPlacement,
+				Key:       h.config.XPaddingKey,
+				Header:    h.config.XPaddingHeader,
+			},
 		}
-		config.Method = PaddingMethod(h.config.XPaddingMethod)
 		config.methodIdx = methodIndex(config.Method)
-	} else {
-		config.Placement = XPaddingPlacement{
-			Placement: PlacementHeader,
-			Header:    "X-Padding",
-		}
+		h.config.ApplyXPaddingToResponse(writer, config)
 	}
-
-	h.config.ApplyXPaddingToResponse(writer, config)
 
 	if request.Method == "OPTIONS" {
 		writer.WriteHeader(http.StatusOK)
@@ -265,11 +264,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	basePad := h.config.GetNormalizedXPaddingBytes()
 	acceptFrom, acceptTo := AcceptedPaddingRange(basePad.From, basePad.To)
-	paddingValue, paddingPlacement := h.config.ExtractXPaddingFromRequest(request, h.config.XPaddingObfsMode)
+	paddingValue, _ := h.config.ExtractXPaddingFromRequest(request, h.config.XPaddingObfsMode)
 
 	if !h.config.IsPaddingValid(paddingValue, acceptFrom, acceptTo, PaddingMethod(h.config.XPaddingMethod)) {
-		errors.LogInfo(context.Background(), "invalid padding ("+paddingPlacement+") length:", int32(len(paddingValue)))
-		writer.WriteHeader(http.StatusBadRequest)
+		errors.LogDebug(context.Background(), "invalid padding")
+		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
 	obfsPaddingAccepted := h.config.XPaddingObfsMode && paddingValue != ""
@@ -277,16 +276,24 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	sessionId, seqStr := h.config.ExtractMetaFromRequest(request, h.path)
 
 	if len(sessionId) > 256 {
-		errors.LogInfo(context.Background(), "sessionId too long: ", len(sessionId))
-		writer.WriteHeader(http.StatusBadRequest)
+		errors.LogDebug(context.Background(), "sessionId too long")
+		writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// Bray-only: reject unsigned / forged session IDs before upsertSession.
+	// Empty sessionId remains stream-one only (gated below).
+	if sessionId != "" && !verifySessionID(sessionId, h.config.sessionSecret()) {
+		errors.LogDebug(context.Background(), "invalid session MAC")
+		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	// Empty sessionId is stream-one shape only. Locked stream-up/packet-up reject it.
 	// (auto/empty config still allow stream-one for compatibility.)
 	if sessionId == "" && !ServerModeAllowsStreamOne(h.config.Mode) {
-		errors.LogInfo(context.Background(), "request without sessionId is not allowed in mode: ", h.config.Mode)
-		writer.WriteHeader(http.StatusBadRequest)
+		errors.LogDebug(context.Background(), "sessionId required for mode")
+		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
 
@@ -336,8 +343,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	if isUplinkRequest && sessionId != "" { // stream-up, packet-up
 		if seqStr == "" {
 			if !ServerModeAllowsStreamUp(h.config.Mode) {
-				errors.LogInfo(context.Background(), "stream-up mode is not allowed")
-				writer.WriteHeader(http.StatusBadRequest)
+				errors.LogDebug(context.Background(), "stream-up mode is not allowed")
+				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
 			httpSC := &httpServerConn{
@@ -350,14 +357,22 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			})
 			if err != nil {
 				errors.LogInfoInner(context.Background(), err, "failed to upload (PushReader)")
-				writer.WriteHeader(http.StatusConflict)
+				// Bray-only: do not leak stream-up conflict oracle (was 409).
+				writer.WriteHeader(http.StatusNotFound)
 			} else {
-				writer.Header().Set("X-Accel-Buffering", "no")
+				// Bray-only: X-Accel-Buffering opt-in via local control header x-bray-x-accel=1.
+				if h.config.Headers != nil {
+					if v, ok := h.config.Headers["x-bray-x-accel"]; ok && (v == "1" || strings.EqualFold(v, "true")) {
+						writer.Header().Set("X-Accel-Buffering", "no")
+					}
+				}
 				writer.Header().Set("Cache-Control", "no-store")
 				writer.WriteHeader(http.StatusOK)
 				scStreamUpServerSecs := h.config.GetNormalizedScStreamUpServerSecs()
-				hasLegacyRefererCompatMarker := request.Header.Get("Referer") != ""
-				if (hasLegacyRefererCompatMarker || obfsPaddingAccepted) && scStreamUpServerSecs.To > 0 {
+				// Bray-only: keep-alive padding on stream-up when client sent padding header
+				// (or legacy Referer still present from mixed configs).
+				hasPaddingMarker := request.Header.Get("X-Padding") != "" || request.Header.Get("Referer") != ""
+				if (hasPaddingMarker || obfsPaddingAccepted) && scStreamUpServerSecs.To > 0 {
 					go func() {
 						bp := paddingBytePool.Get().(*[]byte)
 						defer paddingBytePool.Put(bp)
@@ -389,8 +404,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 
 		if !ServerModeAllowsPacketUp(h.config.Mode) {
-			errors.LogInfo(context.Background(), "packet-up mode is not allowed")
-			writer.WriteHeader(http.StatusBadRequest)
+			errors.LogDebug(context.Background(), "packet-up mode is not allowed")
+			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 
@@ -408,8 +423,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			headerPayloadEncoded := strings.Join(headerPayloadChunks, "")
 			headerPayload, err = base64.RawURLEncoding.DecodeString(headerPayloadEncoded)
 			if err != nil {
-				errors.LogInfo(context.Background(), "Invalid base64 in header's payload: ", err.Error())
-				writer.WriteHeader(http.StatusBadRequest)
+				errors.LogDebug(context.Background(), "invalid base64 in header payload")
+				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
 		}
@@ -428,8 +443,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			cookiePayloadEncoded := strings.Join(cookiePayloadChunks, "")
 			cookiePayload, err = base64.RawURLEncoding.DecodeString(cookiePayloadEncoded)
 			if err != nil {
-				errors.LogInfo(context.Background(), "Invalid base64 in cookies' payload: ", err.Error())
-				writer.WriteHeader(http.StatusBadRequest)
+				errors.LogDebug(context.Background(), "invalid base64 in cookie payload")
+				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
 		}
@@ -438,8 +453,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		if dataPlacement == PlacementAuto || dataPlacement == PlacementBody {
 			var readErr error
 			if request.ContentLength > int64(scMaxEachPostBytes) {
-				errors.LogInfo(context.Background(), "Too large upload. scMaxEachPostBytes is set to ", scMaxEachPostBytes, "but request size exceed it. Adjust scMaxEachPostBytes on the server to be at least as large as client.")
-				writer.WriteHeader(http.StatusRequestEntityTooLarge)
+				errors.LogDebug(context.Background(), "upload exceeds scMaxEachPostBytes")
+				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
 			if request.ContentLength > 0 {
@@ -452,8 +467,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				bodyPayload, readErr = buf.ReadAllToBytes(io.LimitReader(request.Body, int64(scMaxEachPostBytes)+1))
 			}
 			if readErr != nil {
-				errors.LogInfoInner(context.Background(), readErr, "failed to read body payload")
-				writer.WriteHeader(http.StatusBadRequest)
+				errors.LogDebug(context.Background(), "failed to read body payload")
+				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
 		}
@@ -475,15 +490,15 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 
 		if len(payload) > scMaxEachPostBytes {
-			errors.LogInfo(context.Background(), "Too large upload. scMaxEachPostBytes is set to ", scMaxEachPostBytes, "but request size exceed it. Adjust scMaxEachPostBytes on the server to be at least as large as client.")
-			writer.WriteHeader(http.StatusRequestEntityTooLarge)
+			errors.LogDebug(context.Background(), "assembled payload exceeds scMaxEachPostBytes")
+			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 
 		seq, err := strconv.ParseUint(seqStr, 10, 64)
 		if err != nil {
-			errors.LogInfoInner(context.Background(), err, "failed to upload (ParseUint)")
-			writer.WriteHeader(http.StatusInternalServerError)
+			errors.LogDebug(context.Background(), "invalid packet-up seq")
+			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 
@@ -494,8 +509,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			Seq:     seq,
 		})
 		if err != nil {
-			errors.LogInfoInner(context.Background(), err, "failed to upload (PushPayload)")
-			writer.WriteHeader(http.StatusInternalServerError)
+			errors.LogDebug(context.Background(), "failed to upload (PushPayload)")
+			// Bray-only: queue-full / closed -> 404, not 500 (no liveness oracle).
+			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 
@@ -509,8 +525,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	} else if request.Method == "GET" || sessionId == "" { // stream-down, stream-one
 		// Locked stream-one: no sessioned download leg (that is stream-up/packet-up).
 		if sessionId != "" && NormalizeXHTTPMode(h.config.Mode) == "stream-one" {
-			errors.LogInfo(context.Background(), "sessioned download is not allowed in mode: stream-one")
-			writer.WriteHeader(http.StatusBadRequest)
+			errors.LogDebug(context.Background(), "sessioned download not allowed")
+			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 		// Locked packet-up/stream-up without session already rejected above.
@@ -521,20 +537,31 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			currentSession.isFullyConnected.Close()
 			defer func() {
 				currentSession.close()
-				h.sessions.CompareAndDelete(sessionId, currentSession)
+				h.deleteSession(sessionId, currentSession)
 			}()
 		}
 
-		// magic header instructs nginx + apache to not buffer response body
-		writer.Header().Set("X-Accel-Buffering", "no")
+		// Bray-only: X-Accel-Buffering is a classic reverse-proxy fingerprint.
+		// Only emit when operator opts in via local control header x-bray-x-accel=1.
+		if h.config.Headers != nil {
+			if v, ok := h.config.Headers["x-bray-x-accel"]; ok && (v == "1" || strings.EqualFold(v, "true")) {
+				writer.Header().Set("X-Accel-Buffering", "no")
+			}
+		}
 		// A web-compliant header telling all middleboxes to disable caching.
 		// Should be able to prevent overloading the cache, or stop CDNs from
 		// teeing the response stream into their cache, causing slowdowns.
 		writer.Header().Set("Cache-Control", "no-store")
 
+		// Bray-only: default text/event-stream is a classic XHTTP probe fingerprint.
+		// Operators can force SSE with Headers path or by leaving NoSSEHeader=false
+		// AND setting x-bray-sse=1 control header (never on wire; read from config.Headers).
 		if !h.config.NoSSEHeader {
-			// magic header to make the HTTP middle box consider this as SSE to disable buffer
-			writer.Header().Set("Content-Type", "text/event-stream")
+			if h.config.Headers != nil {
+				if v, ok := h.config.Headers["x-bray-sse"]; ok && (v == "1" || strings.EqualFold(v, "true")) {
+					writer.Header().Set("Content-Type", "text/event-stream")
+				}
+			}
 		}
 
 		writer.WriteHeader(http.StatusOK)
@@ -565,8 +592,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		conn.Close()
 	} else {
-		errors.LogInfo(context.Background(), "unsupported method: ", request.Method)
-		writer.WriteHeader(http.StatusMethodNotAllowed)
+		errors.LogDebug(context.Background(), "unsupported method")
+		writer.WriteHeader(http.StatusNotFound)
 	}
 }
 
@@ -617,6 +644,8 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 	}
 	l.config = streamSettings.ProtocolSettings.(*Config)
 	if l.config != nil {
+		// Bray-only: inject default x-bray-session-secret so client/server MAC match zero-config.
+		l.config.ensureDefaultSessionSecret()
 		if streamSettings.SocketSettings == nil {
 			streamSettings.SocketSettings = &internet.SocketConfig{}
 		}

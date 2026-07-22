@@ -26,6 +26,13 @@ import (
 
 const maxBufferPoolCap = 64 * 1024
 
+// defaultOpenStreamHeaderTimeout bounds how long OpenStream waits for response
+// headers when the caller's ctx has no deadline. Without this, a blackholed H2
+// stream (common under overloaded AI/SSE upstreams) blocks Dial forever and
+// starves the whole SOCKS accept path. The long-lived stream still uses
+// WithoutCancel after headers succeed.
+const defaultOpenStreamHeaderTimeout = 20 * time.Second
+
 var requestBuffPool = sync.Pool{
 	New: func() any {
 		b := new(bytes.Buffer)
@@ -379,8 +386,18 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		resultCh <- streamResult{rc: rc, remote: rr, local: ll}
 	}()
 
+	// Bound header wait: if caller already set a deadline, honor it; otherwise
+	// apply Bray default so blackholed H2 streams cannot pin Dial forever.
+	// Always derive from ctx so cancel still aborts the wait.
+	openWaitCtx := ctx
+	var openWaitCancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		openWaitCtx, openWaitCancel = context.WithTimeout(ctx, defaultOpenStreamHeaderTimeout)
+		defer openWaitCancel()
+	}
+
 	select {
-	case <-ctx.Done():
+	case <-openWaitCtx.Done():
 		// Abort the in-flight round-trip (RST_STREAM / dial cancel). Do not leave
 		// orphan Do/dial work holding H2 streams or TCP sockets after caller returns.
 		reqCancel()
@@ -393,7 +410,15 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		addrMu.Lock()
 		r, l := gotRemote, gotLocal
 		addrMu.Unlock()
-		return nil, r, l, ctx.Err()
+		errOut := openWaitCtx.Err()
+		if errOut == nil {
+			errOut = context.DeadlineExceeded
+		}
+		// Prefer caller's cancel reason when both fire.
+		if ctx.Err() != nil {
+			errOut = ctx.Err()
+		}
+		return nil, r, l, errOut
 	case res := <-resultCh:
 		if res.err != nil {
 			reqCancel()

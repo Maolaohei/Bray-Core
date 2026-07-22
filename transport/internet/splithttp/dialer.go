@@ -26,7 +26,6 @@ import (
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/transport/internet"
-	"github.com/xtls/xray-core/transport/internet/browser_dialer"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion/bbr"
 	"github.com/xtls/xray-core/transport/internet/hysteria/udphop"
@@ -156,7 +155,7 @@ const (
 func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient, error) {
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
 
-	if browser_dialer.HasBrowserDialer() && realityConfig == nil {
+	if false /* Bray-only: browser dialer disabled */ && realityConfig == nil {
 		return &BrowserDialerClient{transportConfig: streamSettings.ProtocolSettings.(*Config)}, nil, nil
 	}
 
@@ -201,7 +200,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		if probeHost == "" {
 			probeHost = dest.ServerName()
 		}
-		if browser_dialer.HasBrowserDialer() && realityCfg == nil {
+		if false /* Bray-only: browser dialer disabled */ && realityCfg == nil {
 			if !(probeScheme == "http" && dest.Port == 80) && !(probeScheme == "https" && dest.Port == 443) {
 				probeHost += ":" + dest.Port.String()
 			}
@@ -775,6 +774,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}
 
 	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
+	// Bray-only: inject default x-bray-session-secret so client/server MAC match zero-config.
+	if transportConfiguration != nil {
+		transportConfiguration.ensureDefaultSessionSecret()
+	}
 	// Wave-7: sticky TTL headers are per-entry at remember time (no process globals).
 	stickyModeTTL, _ := StickyTTLFromHeaders(transportConfiguration.Headers)
 	var requestURL url.URL
@@ -794,7 +797,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	if requestURL.Host == "" {
 		requestURL.Host = dest.ServerName()
 	}
-	if browser_dialer.HasBrowserDialer() && realityConfig == nil {
+	if false /* Bray-only: browser dialer disabled */ && realityConfig == nil {
 		// For Browser Dialer's optimized IP and non-standard port
 		if !(requestURL.Scheme == "http" && dest.Port == 80) && !(requestURL.Scheme == "https" && dest.Port == 443) {
 			requestURL.Host += ":" + dest.Port.String()
@@ -814,7 +817,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}
 
 	// Browser dialer cannot open bi-dir stream bodies; prefer packet-up for auto.
-	preferPacket := browser_dialer.HasBrowserDialer() && realityConfig == nil
+	preferPacket := false /* Bray-only: browser dialer disabled */ && realityConfig == nil
 	initialMode := ResolveInitialModeOpts(transportConfiguration.Mode, realityConfig != nil, transportConfiguration.DownloadSettings != nil, preferPacket)
 	allowModeDegrade := ShouldAttemptModeDegrade(transportConfiguration.Mode, transportConfiguration.Headers)
 	// Explicit stream modes under browser still fail closed unless degrade is on.
@@ -886,7 +889,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if requestURL2.Host == "" {
 			requestURL2.Host = dest2.ServerName()
 		}
-		if browser_dialer.HasBrowserDialer() && realityConfig2 == nil {
+		if false /* Bray-only: browser dialer disabled */ && realityConfig2 == nil {
 			// For Browser Dialer's optimized IP and non-standard port
 			if !(requestURL2.Scheme == "http" && dest2.Port == 80) && !(requestURL2.Scheme == "https" && dest2.Port == 443) {
 				requestURL2.Host += ":" + dest2.Port.String()
@@ -969,6 +972,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				// Count LeftRequests only after a successful open (Wave-7).
 				if xmuxClient != nil {
 					xmuxClient.LeftRequests.Add(-1)
+					xmuxClient.NoteOpenSuccess()
 				}
 				return true, false, nil
 			}
@@ -979,6 +983,11 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
 				if oerr != nil {
 					return false, false, oerr
+				}
+				if xmuxClient2 != nil {
+					xmuxClient2.NoteOpenSuccess()
+				} else if xmuxClient != nil {
+					xmuxClient.NoteOpenSuccess()
 				}
 			}
 
@@ -1012,6 +1021,16 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if openErr != nil {
 			cleanup()
 			lastErr = openErr
+			// Header-wait timeout: accumulate toward MarkDead so a blackholed H2
+			// (GotConn reused, headers never arrive) is rotated out of the pool.
+			if openErr == context.DeadlineExceeded || stderrors.Is(openErr, context.DeadlineExceeded) {
+				if xmuxClient != nil {
+					xmuxClient.NoteOpenHeaderTimeout()
+				}
+				if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
+					xmuxClient2.NoteOpenHeaderTimeout()
+				}
+			}
 			// Sticky: clear affinity when the sticky mode itself fails (Wave-7).
 			if allowModeDegrade && StickyModeEnabled(transportConfiguration.Headers) {
 				NoteStickyModeFailure(stickyKey, mode)

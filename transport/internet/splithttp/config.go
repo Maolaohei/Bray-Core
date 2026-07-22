@@ -509,10 +509,12 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 		config.Method = PaddingMethod(c.XPaddingMethod)
 		config.methodIdx = methodIndex(config.Method)
 	} else {
+		// Bray-only default wire: avoid stock Xray Referer?x_padding fingerprint.
+		// Both ends use header "X-Padding" (not query/Referer) unless obfs mode.
 		config.Placement = XPaddingPlacement{
-			Placement: PlacementQueryInHeader,
-			Key:       "x_padding",
-			Header:    "Referer",
+			Placement: PlacementHeader,
+			Key:       "X-Padding",
+			Header:    "X-Padding",
 			RawURL:    rawURL,
 		}
 	}
@@ -521,7 +523,8 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 	c.ApplyMetaToRequest(request, sessionId, "")
 
 	if request.Body != nil && !c.NoGRPCHeader { // stream-up/one
-		request.Header.Set("Content-Type", "application/grpc")
+		// Bray-only: application/grpc is a common XHTTP stream fingerprint.
+		request.Header.Set("Content-Type", "application/octet-stream")
 	}
 }
 
@@ -587,10 +590,11 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		config.Method = PaddingMethod(c.XPaddingMethod)
 		config.methodIdx = methodIndex(config.Method)
 	} else {
+		// Bray-only default wire: header X-Padding (both ends).
 		config.Placement = XPaddingPlacement{
-			Placement: PlacementQueryInHeader,
-			Key:       "x_padding",
-			Header:    "Referer",
+			Placement: PlacementHeader,
+			Key:       "X-Padding",
+			Header:    "X-Padding",
 			RawURL:    rawURL,
 		}
 	}
@@ -730,11 +734,10 @@ func (c *Config) GenerateSessionID() string {
 		for i := range id {
 			id[i] = table[rand.N(len(table))]
 		}
-		return string(id)
-	} else {
-		uuid := uuid.New()
-		return uuid.String()
+		return signSessionID(string(id), c.sessionSecret())
 	}
+	uuid := uuid.New()
+	return signSessionID(uuid.String(), c.sessionSecret())
 }
 
 func appendToPath(path, value string) string {

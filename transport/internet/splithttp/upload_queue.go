@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/xtls/xray-core/common/errors"
 )
@@ -34,11 +35,18 @@ func NewPacket(reader io.ReadCloser, payload []byte, seq uint64) *Packet {
 }
 
 func ReleasePacket(p *Packet) {
+	if p == nil {
+		return
+	}
 	p.Reader = nil
 	p.Payload = nil
 	p.Seq = 0
 	PacketPool.Put(p)
 }
+
+// maxSeqGapWait is how long Read will wait for a missing nextSeq before
+// aborting the session stream. Prevents a lost packet from stalling forever.
+const maxSeqGapWait = 2 * time.Second
 
 type uploadQueue struct {
 	reader          io.ReadCloser
@@ -49,6 +57,9 @@ type uploadQueue struct {
 	nextSeq         uint64
 	closed          atomic.Bool
 	maxPackets      int
+	// gapSince is wall time when we first observed a hole at nextSeq.
+	// Zero means no outstanding gap.
+	gapSince time.Time
 }
 
 func NewUploadQueue(maxPackets int) *uploadQueue {
@@ -76,16 +87,14 @@ func (h *uploadQueue) Push(p Packet) error {
 	if p.Reader != nil {
 		h.nomore = true
 	}
-	// Prefer non-blocking when the queue still has capacity; otherwise block
-	// under the same mutex so Close cannot interleave with the send.
-	// Read() does not take writeCloseMutex, so a full queue still drains.
+	// Bray-only: never block the HTTP handler on a full queue (DoS pin).
+	// Caller maps this error to a uniform 404; client retries on a new session.
 	select {
 	case h.pushedPackets <- p:
 		return nil
 	default:
+		return errors.New("packet queue full")
 	}
-	h.pushedPackets <- p
-	return nil
 }
 
 func (h *uploadQueue) Close() error {
@@ -128,6 +137,7 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 			n := 0
 
 			if packet.Seq == h.nextSeq {
+				h.gapSince = time.Time{}
 				copy(b, packet.Payload)
 				n = min(len(b), len(packet.Payload))
 
@@ -147,12 +157,32 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 				if h.heap.Len() > h.maxPackets {
 					return 0, errors.New("packet queue is too large")
 				}
-				h.heap.push(packet)
-				packet2, more := <-h.pushedPackets
-				if !more {
-					return 0, io.EOF
+				// Start / extend gap timer while waiting for nextSeq.
+				now := time.Now()
+				if h.gapSince.IsZero() {
+					h.gapSince = now
+				} else if now.Sub(h.gapSince) > maxSeqGapWait {
+					// Lost packet: close the stream rather than corrupt order
+					// by skipping (security + correctness over silent gap fill).
+					return 0, errors.New("packet sequence gap timeout waiting for seq=", h.nextSeq)
 				}
-				h.heap.push(packet2)
+				h.heap.push(packet)
+				// Bounded wait so a permanent hole cannot stall forever.
+				waitLeft := maxSeqGapWait - now.Sub(h.gapSince)
+				if waitLeft < 0 {
+					waitLeft = 0
+				}
+				timer := time.NewTimer(waitLeft)
+				select {
+				case packet2, more := <-h.pushedPackets:
+					timer.Stop()
+					if !more {
+						return 0, io.EOF
+					}
+					h.heap.push(packet2)
+				case <-timer.C:
+					return 0, errors.New("packet sequence gap timeout waiting for seq=", h.nextSeq)
+				}
 			}
 			// packet.Seq < h.nextSeq: duplicate, skip and continue
 		}

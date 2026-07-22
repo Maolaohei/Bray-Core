@@ -73,6 +73,15 @@ const (
 	// to complete. If the probe doesn't finish within this time, the connection is
 	// considered broken and removed from the pool.
 	probeTimeout = 10 * time.Second
+
+	// overAdmitHardMult / overAdmitHardFloor cap streams on one client when
+	// GetXmuxClient over-admits past MaxConcurrency. Prevents a wedged H2
+	// session (e.g. long AI SSE) from absorbing unbounded Dial traffic.
+	overAdmitHardMult  = 4
+	overAdmitHardFloor = 32
+
+	// openTimeoutEvictAfter consecutive header-open timeouts mark the client dead.
+	openTimeoutEvictAfter = 2
 )
 
 // XmuxClientPool is a read-write separated connection pool.
@@ -177,6 +186,10 @@ type XmuxClient struct {
 	confidence   atomic.Int32 // 0-100, how much we trust the quality data
 	consecDrops  atomic.Int32 // consecutive quality drops, for drain
 
+	// openHeaderTimeouts counts consecutive OpenStream header-wait timeouts.
+	// After openTimeoutEvictAfter, MarkDead so the next Dial rotates off a wedged H2.
+	openHeaderTimeouts atomic.Int32
+
 	// V2.1: behavior learning for adaptive scheduling
 	learner *quality.NetworkLearner // tracks link behavior patterns
 
@@ -227,6 +240,28 @@ func (c *XmuxClient) Release() {
 	c.activeStreams.Add(-1)
 	c.recomputeScore()
 	c.tryClose()
+}
+
+// NoteOpenHeaderTimeout records an OpenStream header-wait timeout.
+// After openTimeoutEvictAfter consecutive timeouts, the client is MarkDead so
+// subsequent traffic rotates instead of pinballing onto a blackholed H2 session.
+func (c *XmuxClient) NoteOpenHeaderTimeout() {
+	if c == nil {
+		return
+	}
+	n := c.openHeaderTimeouts.Add(1)
+	if n >= openTimeoutEvictAfter {
+		errors.LogInfo(context.Background(), "XMUX: open-header timeout x", n, ", marking client dead")
+		c.MarkDead()
+	}
+}
+
+// NoteOpenSuccess clears the open-header timeout counter after a healthy open.
+func (c *XmuxClient) NoteOpenSuccess() {
+	if c == nil {
+		return
+	}
+	c.openHeaderTimeouts.Store(0)
 }
 
 // MarkDead immediately transitions to Closed state.
@@ -755,6 +790,15 @@ func (m *XmuxManager) healthCheckTick() {
 			i++
 			continue
 		}
+		// Exhausted reuse budget / lifetime: drain when idle (moved from Get).
+		if c.leftUsage.Load() == 0 ||
+			c.LeftRequests.Load() <= 0 ||
+			(c.UnreusableAt != time.Time{} && now.After(c.UnreusableAt)) {
+			errors.LogDebug(context.Background(), "XMUX: health-check draining exhausted xmuxClient")
+			c.maybeDrain()
+			m.pool.RemoveAt(i)
+			continue
+		}
 		// Idle eviction: only evict if NO active streams AND idle for too long
 		if lastUsed := c.LastUsed.Load(); lastUsed > 0 && now.Sub(time.Unix(0, lastUsed)) > clientIdleTimeout {
 			errors.LogDebug(context.Background(), "XMUX: health-check removing idle xmuxClient, lastUsed=", time.Unix(0, lastUsed).Format(time.RFC3339))
@@ -1110,6 +1154,12 @@ func (m *XmuxManager) probeConnection(conn XmuxConn, xmuxClient *XmuxClient) {
 		xmuxClient.MarkDead() // Fast Eviction: probe failed, mark dead immediately
 		return
 	}
+	// Bray-only: health probes must carry the same X-Padding as data streams so
+	// passive observers cannot separate probe HEAD from real traffic by missing
+	// padding, and so the hub does not treat probes as invalid-padding probes.
+	if bdc.transportConfig != nil {
+		bdc.transportConfig.FillStreamRequest(req, "", "")
+	}
 	resp, err := bdc.client.Do(req)
 	if err != nil {
 		errors.LogDebug(context.Background(), "XMUX: probeConnection Do failed: ", err)
@@ -1184,30 +1234,10 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		return nil, errors.New("XMUX: newConnFunc returned nil")
 	}
 
-	// Phase 1: single write-lock prune pass, then select on a snapshot.
-	m.pool.mu.Lock()
+	// Phase 1: RLock snapshot only. Prune of dead/exhausted clients is owned by
+	// healthCheckTick so Get stays off the write-lock hot path (Bray-only).
 	nowWall := time.Now()
-	for i := 0; i < len(m.pool.clients); {
-		c := m.pool.clients[i]
-		if c.state.Load() != StateActive {
-			c.closeConn()
-			m.pool.RemoveAt(i)
-			continue
-		}
-		if c.XmuxConn.IsClosed() ||
-			c.leftUsage.Load() == 0 ||
-			c.LeftRequests.Load() <= 0 ||
-			(c.UnreusableAt != time.Time{} && nowWall.After(c.UnreusableAt)) {
-			if c.XmuxConn.IsClosed() {
-				c.MarkDead()
-			} else {
-				c.maybeDrain()
-			}
-			m.pool.RemoveAt(i)
-			continue
-		}
-		i++
-	}
+	m.pool.mu.RLock()
 	effectiveConns := m.effectiveConnections()
 	poolLen := len(m.pool.clients)
 	var snap *xmuxSnap
@@ -1215,7 +1245,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		snap = acquireSnap(poolLen)
 		snap.s = m.pool.snapshotInto(snap.s)
 	}
-	m.pool.mu.Unlock()
+	m.pool.mu.RUnlock()
 
 	needNew := false
 	if poolLen == 0 {
@@ -1234,7 +1264,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		bestScore := int64(math.MaxInt64)
 		now := nowWall.UnixNano()
 		for _, c := range snap.s {
-			if c.state.Load() != StateActive {
+			if !xmuxClientReusable(c, nowWall) {
 				continue
 			}
 			// Idle eviction: only skip if NO active streams AND idle for too long.
@@ -1260,11 +1290,15 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				needNew = true
 			} else {
 				overAdmit = true
-				// Prefer least inflight, then best score among Active clients.
+				// Prefer least inflight, then best score among Active clients
+				// still under the over-admit hard cap.
 				bestScore = int64(math.MaxInt64)
 				var bestInflight int32 = math.MaxInt32
 				for _, c := range snap.s {
-					if c.state.Load() != StateActive {
+					if !xmuxClientReusable(c, nowWall) {
+						continue
+					}
+					if !underOverAdmitCap(c, effectiveConc) {
 						continue
 					}
 					inf := c.activeStreams.Load()
@@ -1276,7 +1310,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 					}
 				}
 				if best == nil {
-					// No Active client left (all draining/closed) — must create.
+					// All Active clients closed or past hard cap — must create.
 					needNew = true
 					overAdmit = false
 				}
@@ -1299,7 +1333,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 					// Reselect: respect concurrency unless over-admitting.
 					var bestInflight int32 = math.MaxInt32
 					for _, c := range snap.s {
-						if c.state.Load() != StateActive {
+						if !xmuxClientReusable(c, nowWall) {
 							continue
 						}
 						if !overAdmit && effectiveConc > 0 && c.activeStreams.Load() >= effectiveConc {
@@ -1308,6 +1342,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 						inf := c.activeStreams.Load()
 						sc := c.cachedScore.Load()
 						if overAdmit {
+							if !underOverAdmitCap(c, effectiveConc) {
+								continue
+							}
 							if inf < bestInflight || (inf == bestInflight && sc < bestScore) {
 								best = c
 								bestInflight = inf
@@ -1324,12 +1361,15 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 						if burst == 0 || poolLen < burst {
 							needNew = true
 						} else {
-							// Try over-admit on any Active client.
+							// Try over-admit on any Active client under hard cap.
 							overAdmit = true
 							bestInflight = math.MaxInt32
 							bestScore = int64(math.MaxInt64)
 							for _, c := range snap.s {
-								if c.state.Load() != StateActive {
+								if !xmuxClientReusable(c, nowWall) {
+									continue
+								}
+								if !underOverAdmitCap(c, effectiveConc) {
 									continue
 								}
 								inf := c.activeStreams.Load()
@@ -1395,8 +1435,14 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 			var least *XmuxClient
 			var leastInf int32 = math.MaxInt32
 			leastScore := int64(math.MaxInt64)
+			// Use effective concurrency hard-cap so a single wedged H2 cannot
+			// absorb every Dial under burst saturation.
+			effConc := m.effectiveConcurrency()
 			for _, c := range m.pool.clients {
 				if c.state.Load() != StateActive {
+					continue
+				}
+				if !underOverAdmitCap(c, effConc) {
 					continue
 				}
 				inf := c.activeStreams.Load()
@@ -1444,6 +1490,49 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 	return nil, lastErr
 }
 
+
+// xmuxClientReusable reports whether a client may be scheduled by GetXmuxClient.
+// Closed / exhausted / past UnreusableAt clients are skipped (pruned by health later).
+func xmuxClientReusable(c *XmuxClient, nowWall time.Time) bool {
+	if c == nil || c.state.Load() != StateActive {
+		return false
+	}
+	if c.XmuxConn != nil && c.XmuxConn.IsClosed() {
+		return false
+	}
+	if c.leftUsage.Load() == 0 || c.LeftRequests.Load() <= 0 {
+		return false
+	}
+	if c.UnreusableAt != (time.Time{}) && nowWall.After(c.UnreusableAt) {
+		return false
+	}
+	return true
+}
+
+// overAdmitHardCap is the absolute max activeStreams allowed on one client
+// when over-admitting past effectiveConcurrency. 0 concurrency means unlimited.
+func overAdmitHardCap(effectiveConc int32) int32 {
+	if effectiveConc <= 0 {
+		return 0
+	}
+	capN := effectiveConc * overAdmitHardMult
+	if capN < overAdmitHardFloor {
+		capN = overAdmitHardFloor
+	}
+	return capN
+}
+
+// underOverAdmitCap reports whether client c may take another over-admitted stream.
+func underOverAdmitCap(c *XmuxClient, effectiveConc int32) bool {
+	if c == nil {
+		return false
+	}
+	capN := overAdmitHardCap(effectiveConc)
+	if capN <= 0 {
+		return true
+	}
+	return c.activeStreams.Load() < capN
+}
 // scoreClient computes a scheduling score for a connection.
 // Lower score = better candidate.
 //
@@ -1475,6 +1564,25 @@ func scoreClient(c *XmuxClient) int64 {
 	}
 
 	score := inflight*10000 + rttMs*10
+
+	// Bray quality term: lower qualityScore (0-100) raises scheduling cost.
+	// Weight modestly so RTT/inflight remain primary; confidence scales it.
+	qs := int64(c.qualityScore.Load())
+	if qs < 0 {
+		qs = 0
+	} else if qs > 100 {
+		qs = 100
+	}
+	// Only apply when confidence is non-trivial (probe has run).
+	if conf0 := int64(c.confidence.Load()); conf0 >= 20 {
+		// (100-qs)*40 -> 0..4000; scaled by conf later via combinedFixed path below
+		// Apply a base quality penalty independent of retrans/loss samples.
+		qPen := (100 - qs) * 20 // 0..2000
+		if conf0 < 80 {
+			qPen = qPen * conf0 / 80
+		}
+		score += qPen
+	}
 
 	// V2.0: confidence-weighted penalties (fixed-point ×100)
 	conf := int64(c.confidence.Load())
