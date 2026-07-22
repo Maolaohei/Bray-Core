@@ -99,6 +99,27 @@ func TestAdaptivePaddingRange_JitterBreaksBucket(t *testing.T) {
 	}
 }
 
+// TestAdaptivePaddingRange_BulkShrink verifies Bray-only bulk posts shrink
+// the upper padding bound while remaining within [0, baseTo].
+func TestAdaptivePaddingRange_BulkShrink(t *testing.T) {
+	baseFrom, baseTo := int32(100), int32(1000)
+	from, to := AdaptivePaddingRange(baseFrom, baseTo, 8192)
+	if from < baseFrom {
+		t.Fatalf("bulk from=%d < baseFrom", from)
+	}
+	if to > baseTo {
+		t.Fatalf("bulk to=%d > baseTo", to)
+	}
+	if to >= baseTo {
+		t.Fatalf("bulk path should shrink upper bound, to=%d baseTo=%d", to, baseTo)
+	}
+	// Medium-large still uses full base range.
+	from2, to2 := AdaptivePaddingRange(baseFrom, baseTo, 4096)
+	if from2 != baseFrom || to2 != baseTo {
+		t.Fatalf("mid-large want full range got [%d,%d]", from2, to2)
+	}
+}
+
 // TestGeneratePadding_StrictModeByteVariation verifies that strict mode
 // returns different byte patterns for the same length across multiple calls
 // (at least for tokenish, where samples differ).
@@ -139,10 +160,11 @@ func TestGeneratePadding_StrictModeLengthCorrect(t *testing.T) {
 	}
 }
 
-// TestExtractXPadding_ObfsFallback verifies the three obfs-mode scenarios:
-//  1. obfs hit -> returns obfs location
-//  2. obfs miss + standard has value -> falls back to standard location
-//  3. both empty -> returns ("", "")
+// TestExtractXPadding_ObfsFallback verifies Bray-only extract order:
+//  1. obfs hit -> returns configured location
+//  2. obfs miss + X-Padding -> Bray default fallback
+//  3. stock Referer?x_padding is intentionally rejected
+//  4. empty -> ("", "")
 func TestExtractXPadding_ObfsFallback(t *testing.T) {
 	cfg := &Config{
 		XPaddingObfsMode:  true,
@@ -159,24 +181,32 @@ func TestExtractXPadding_ObfsFallback(t *testing.T) {
 		t.Fatalf("case1: got (%q,%q) want obfs cookie hit", v, p)
 	}
 
-	// Case 2: obfs miss + Referer?x_padding present -> standard fallback.
+	// Case 2: obfs miss + Bray default X-Padding -> fallback.
 	req2, _ := http.NewRequest("GET", "https://example.com/path", nil)
-	req2.Header.Set("Referer", "https://example.com/ref?x_padding=STDVAL")
+	req2.Header.Set("X-Padding", "STDVAL")
 	v, p = cfg.ExtractXPaddingFromRequest(req2, true)
-	if v != "STDVAL" || !strings.Contains(p, "Referer") {
-		t.Fatalf("case2: got (%q,%q) want standard Referer fallback", v, p)
+	if v != "STDVAL" || !strings.Contains(p, "X-Padding") {
+		t.Fatalf("case2: got (%q,%q) want Bray X-Padding fallback", v, p)
 	}
 
-	// Case 3: both empty -> ("", "").
+	// Case 3: stock Referer?x_padding must not authenticate.
 	req3, _ := http.NewRequest("GET", "https://example.com/path", nil)
+	req3.Header.Set("Referer", "https://example.com/ref?x_padding=LEGACY")
 	v, p = cfg.ExtractXPaddingFromRequest(req3, true)
 	if v != "" || p != "" {
-		t.Fatalf("case3: got (%q,%q) want empty", v, p)
+		t.Fatalf("case3: stock Referer accepted (%q,%q)", v, p)
+	}
+
+	// Case 4: both empty -> ("", "").
+	req4, _ := http.NewRequest("GET", "https://example.com/path", nil)
+	v, p = cfg.ExtractXPaddingFromRequest(req4, true)
+	if v != "" || p != "" {
+		t.Fatalf("case4: got (%q,%q) want empty", v, p)
 	}
 }
 
-// TestExtractXPadding_StandardModeUnchanged verifies non-obfs mode still
-// reads only from standard locations.
+// TestExtractXPadding_StandardModeUnchanged verifies non-obfs mode reads only
+// Bray defaults (X-Padding / xb), not stock x_padding or obfs cookies.
 func TestExtractXPadding_StandardModeUnchanged(t *testing.T) {
 	cfg := &Config{
 		XPaddingObfsMode:  false,
@@ -185,20 +215,29 @@ func TestExtractXPadding_StandardModeUnchanged(t *testing.T) {
 		XPaddingPlacement: PlacementQueryInHeader,
 	}
 
-	// Standard location (URL query) carries padding.
-	u, _ := url.Parse("https://example.com/path?x_padding=URLVAL")
-	req, _ := http.NewRequest("GET", u.String(), nil)
+	// Bray default header carries padding.
+	req, _ := http.NewRequest("GET", "https://example.com/path", nil)
+	req.Header.Set("X-Padding", "HDRVAL")
 	v, p := cfg.ExtractXPaddingFromRequest(req, false)
-	if v != "URLVAL" {
-		t.Fatalf("standard URL query: got %q want URLVAL", v)
+	if v != "HDRVAL" {
+		t.Fatalf("Bray header: got %q want HDRVAL", v)
 	}
 	_ = p
 
-	// Obfs cookie present but should be ignored in standard mode.
-	req.AddCookie(&http.Cookie{Name: "obfs_key", Value: "COOKIEVAL"})
-	v, _ = cfg.ExtractXPaddingFromRequest(req, false)
-	if v != "URLVAL" {
-		t.Fatalf("standard mode must ignore obfs cookie: got %q want URLVAL", v)
+	// Stock URL query x_padding is not accepted.
+	u, _ := url.Parse("https://example.com/path?x_padding=URLVAL")
+	req2, _ := http.NewRequest("GET", u.String(), nil)
+	v, _ = cfg.ExtractXPaddingFromRequest(req2, false)
+	if v != "" {
+		t.Fatalf("stock x_padding must be ignored: got %q", v)
+	}
+
+	// Obfs cookie present but ignored in standard mode; xb query works.
+	req3, _ := http.NewRequest("GET", "https://example.com/path?xb=ALTVAL", nil)
+	req3.AddCookie(&http.Cookie{Name: "obfs_key", Value: "COOKIEVAL"})
+	v, _ = cfg.ExtractXPaddingFromRequest(req3, false)
+	if v != "ALTVAL" {
+		t.Fatalf("standard mode xb: got %q want ALTVAL", v)
 	}
 }
 

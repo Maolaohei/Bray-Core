@@ -12,7 +12,6 @@ import (
 	"net/url"
 	reflect "reflect"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1249,7 +1248,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 					// Assign seq at launch (not after success) so concurrent
 					// POSTs use contiguous numbers; retries reuse this seqStr.
-					seqStr := strconv.FormatInt(seq, 10)
+					seqStr := formatSeqInt64(seq)
 					seq++
 
 					inflight.Add(1)

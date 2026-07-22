@@ -519,9 +519,23 @@ func AdaptivePaddingRange(baseFrom, baseTo int32, payloadSize int) (from, to int
 		// Medium packets: reduce padding to ~40-70% of base.
 		from = max(20, baseFrom*2/5)
 		to = max(100, baseTo*7/10) + jitter
-	default:
-		// Large packets: use full base range, no shrink.
+	case payloadSize < 8192:
+		// Large packets: keep full base range for camouflage.
 		return baseFrom, baseTo
+	default:
+		// Bray-only bulk path (full scMaxEachPostBytes chunks): keep a
+		// non-trivial floor so traffic still looks padded, but cap the upper
+		// bound so 100KB+ posts are not inflated by hundreds of padding
+		// bytes on every POST. Still within [0, baseTo].
+		from = max(baseFrom, max(32, baseFrom/2))
+		to = max(from, min(baseTo, max(from+64, baseTo/4)+jitter))
+		if to > baseTo {
+			to = baseTo
+		}
+		if from > to {
+			from = to
+		}
+		return from, to
 	}
 
 	// Clamp: preserve the invariant to ⊆ [0, baseTo]. The max(...) floors

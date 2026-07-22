@@ -6,6 +6,7 @@ package splithttp
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"time"
 
@@ -23,12 +24,12 @@ const packetUploadRetryBase = 25 * time.Millisecond
 
 // packetUploadDefaultWindow is the default number of concurrent POSTs per
 // logical connection. Server reorder buffer (scMaxBufferedPosts, default 64)
-// absorbs reordering; 8 hides typical RTT without flooding the edge.
-const packetUploadDefaultWindow = 8
+// absorbs reordering; 12 fills BDP better on mid-RTT paths without flooding.
+const packetUploadDefaultWindow = 12
 
 // packetUploadMaxWindow hard-caps client in-flight posts regardless of server
 // buffer size (H1 pool, memory, and CDN concurrency friendliness).
-const packetUploadMaxWindow = 16
+const packetUploadMaxWindow = 24
 
 // durableLocal reuses modest durable snapshots for postPacketReliable.
 // Store *durableLocal so Put never captures a stack-local slice header.
@@ -88,6 +89,39 @@ func freeDurable(b []byte, kind int, dl *durableLocal) {
 	}
 }
 
+// formatSeqInt64 formats a non-negative sequence without strconv heap allocs
+// on the packet-up hot path (seq is monotonic and almost always small).
+func formatSeqInt64(seq int64) string {
+	if seq < 0 {
+		// Defensive: packet-up never uses negative seq; keep a rare fallback.
+		return strconv.FormatInt(seq, 10)
+	}
+	if seq < int64(len(seqSmallCache)) {
+		return seqSmallCache[seq]
+	}
+	var buf [20]byte
+	i := len(buf)
+	n := uint64(seq)
+	for {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+		if n == 0 {
+			break
+		}
+	}
+	return string(buf[i:])
+}
+
+// seqSmallCache covers the common first N posts per stream without alloc.
+var seqSmallCache = func() [4096]string {
+	var a [4096]string
+	for i := 0; i < len(a); i++ {
+		a[i] = strconv.FormatInt(int64(i), 10)
+	}
+	return a
+}()
+
 // packetUploadWindow returns the client POST in-flight window.
 // It never exceeds half of the server's reorder capacity so misordered
 // bursts still fit in upload_queue without "packet queue is too large".
@@ -109,12 +143,12 @@ func packetUploadWindow(scMaxBufferedPosts int, rtt time.Duration) int {
 	case rtt >= 200*time.Millisecond:
 		w = packetUploadMaxWindow
 	case rtt >= 80*time.Millisecond:
-		w = 12
+		w = 18
 	case rtt >= 20*time.Millisecond:
-		w = 8
+		w = 12
 	case rtt > 0:
 		// Very low RTT: less concurrency needed; still pipeline a little.
-		w = 6
+		w = 8
 	}
 	if w > maxW {
 		return maxW

@@ -152,21 +152,31 @@ func TestPacketUploadWindow(t *testing.T) {
 	if got := packetUploadWindow(1, 0); got != 1 {
 		t.Fatalf("tiny buffer=%d", got)
 	}
+	// half of 1000 = 500, still capped by default window when rtt unknown
 	if got := packetUploadWindow(1000, 0); got != packetUploadDefaultWindow {
 		t.Fatalf("large buffered default=%d", got)
 	}
-	if got := packetUploadWindow(64, 10*time.Millisecond); got != 6 {
+	if got := packetUploadWindow(64, 10*time.Millisecond); got != 8 {
 		t.Fatalf("low rtt=%d", got)
 	}
-	if got := packetUploadWindow(64, 100*time.Millisecond); got != 12 {
+	if got := packetUploadWindow(64, 100*time.Millisecond); got != 18 {
 		t.Fatalf("mid rtt=%d", got)
 	}
 	if got := packetUploadWindow(64, 250*time.Millisecond); got != packetUploadMaxWindow {
 		t.Fatalf("high rtt=%d", got)
 	}
-	// server buffer still caps high-RTT growth
+	// server buffer still caps high-RTT growth (half of 8 = 4)
 	if got := packetUploadWindow(8, 250*time.Millisecond); got != 4 {
 		t.Fatalf("high rtt capped by buffer=%d", got)
+	}
+}
+
+func TestFormatSeqInt64(t *testing.T) {
+	for _, seq := range []int64{0, 1, 9, 10, 99, 100, 999, 1000, 4095, 4096, 123456789} {
+		want := strconv.FormatInt(seq, 10)
+		if got := formatSeqInt64(seq); got != want {
+			t.Fatalf("seq=%d got=%q want=%q", seq, got, want)
+		}
 	}
 }
 
@@ -214,4 +224,28 @@ func TestPostPacketReliable_ConcurrentSlots(t *testing.T) {
 	}
 	close(s.block)
 	wg.Wait()
+}
+
+func BenchmarkGetRequestHeader(b *testing.B) {
+	c := &Config{
+		Headers: map[string]string{
+			"User-Agent": "BrayBench/1.0",
+			"Accept":     "*/*",
+		},
+	}
+	// Warm cache
+	_ = c.GetRequestHeader()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		h := c.GetRequestHeader()
+		h.Set("X-Padding", "x")
+	}
+}
+
+func BenchmarkFormatSeqInt64(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = formatSeqInt64(int64(i % 10000))
+	}
 }

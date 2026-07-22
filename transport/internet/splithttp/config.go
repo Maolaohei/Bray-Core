@@ -182,21 +182,34 @@ func (c *Config) GetNormalizedQuery() string {
 }
 
 // cloneHeaderShallow builds a request-local http.Header from an immutable base.
-// The outer map and each values slice are new, so Set/Add/Del are safe; string
-// values are shared (immutable). Avoids http.Header.Clone's deeper bookkeeping.
+// Outer map is always new. Single-value non-Cookie slices are shared (Set replaces
+// the entry). Multi-value and Cookie slices are copied so Add/append cannot poison
+// the cache. Avoids http.Header.Clone's deeper bookkeeping.
 func cloneHeaderShallow(src http.Header) http.Header {
 	if src == nil {
 		return make(http.Header)
 	}
 	dst := make(http.Header, len(src))
 	for k, vv := range src {
-		if len(vv) == 0 {
+		switch len(vv) {
+		case 0:
 			dst[k] = nil
-			continue
+		case 1:
+			// Cookie may be Header.Add'd (AddCookie / multi cookies); give it
+			// exclusive capacity so append never mutates the cached base.
+			if k == "Cookie" {
+				cp := make([]string, 1, 2)
+				cp[0] = vv[0]
+				dst[k] = cp
+			} else {
+				// Set replaces the whole entry; sharing the 1-elem slice is safe.
+				dst[k] = vv
+			}
+		default:
+			cp := make([]string, len(vv))
+			copy(cp, vv)
+			dst[k] = cp
 		}
-		cp := make([]string, len(vv))
-		copy(cp, vv)
-		dst[k] = cp
 	}
 	return dst
 }
