@@ -16,6 +16,7 @@ import (
 	core "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/proxy/freedom"
 	"github.com/xtls/xray-core/transport/internet"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -206,6 +207,14 @@ func (c *InboundDetourConfig) Build() (*core.InboundHandlerConfig, error) {
 		return nil, errors.New("failed to build inbound handler for protocol ", c.Protocol).Base(err)
 	}
 
+	// Bray-only: derive XHTTP session MAC from VLESS UUID so operators need not
+	// configure a second shared secret. Explicit x-bray-session-secret still wins.
+	if strings.EqualFold(c.Protocol, "vless") && receiverSettings.StreamSettings != nil {
+		if msg, ok := ts.(proto.Message); ok {
+			injectBraySessionSeedFromVLESS(receiverSettings.StreamSettings, msg)
+		}
+	}
+
 	return &core.InboundHandlerConfig{
 		Tag:              c.Tag,
 		ReceiverSettings: serial.ToTypedMessage(receiverSettings),
@@ -367,6 +376,13 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 	ts, err := rawConfig.(Buildable).Build()
 	if err != nil {
 		return nil, errors.New("failed to build outbound handler for protocol ", c.Protocol).Base(err)
+	}
+
+	// Bray-only: derive XHTTP session MAC from VLESS UUID (same as inbound).
+	if strings.EqualFold(c.Protocol, "vless") && senderSettings.StreamSettings != nil {
+		if msg, ok := ts.(proto.Message); ok {
+			injectBraySessionSeedFromVLESS(senderSettings.StreamSettings, msg)
+		}
 	}
 
 	if fc, ok := ts.(*freedom.Config); ok && fc.DomainStrategy != internet.DomainStrategy_AS_IS {

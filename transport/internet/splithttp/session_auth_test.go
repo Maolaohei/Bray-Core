@@ -73,6 +73,54 @@ func TestSessionAuth_ExplicitSecret(t *testing.T) {
 	}
 }
 
+func TestSessionAuth_UUIDDerived(t *testing.T) {
+	const uuidA = "550e8400-e29b-41d4-a716-446655440000"
+	const uuidB = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	client := &Config{
+		Headers: map[string]string{
+			BraySessionUUIDHeader: uuidA,
+		},
+	}
+	// Server multi-user: both UUIDs accepted
+	server := &Config{
+		Headers: map[string]string{
+			BraySessionUUIDHeader: uuidA + "," + uuidB,
+		},
+	}
+	id := client.GenerateSessionID()
+	if !VerifySessionIDExported(id, server) {
+		t.Fatal("server must accept client UUID-derived MAC")
+	}
+	// Peer with only other UUID must reject
+	other := &Config{Headers: map[string]string{BraySessionUUIDHeader: uuidB}}
+	if VerifySessionIDExported(id, other) {
+		t.Fatal("different UUID seed must reject")
+	}
+	// Case / whitespace normalized
+	serverCase := &Config{Headers: map[string]string{BraySessionUUIDHeader: "  " + strings.ToUpper(uuidA) + "  "}}
+	if !VerifySessionIDExported(id, serverCase) {
+		t.Fatal("UUID seed must be case-insensitive")
+	}
+	// Explicit secret still wins over UUID seed
+	mixed := &Config{Headers: map[string]string{
+		BraySessionUUIDHeader:  uuidA,
+		BraySessionSecretHeader: "override",
+	}}
+	idMixed := mixed.GenerateSessionID()
+	if VerifySessionIDExported(idMixed, client) {
+		t.Fatal("explicit secret must not verify under UUID-only peer")
+	}
+	sameOverride := &Config{Headers: map[string]string{BraySessionSecretHeader: "override"}}
+	if !VerifySessionIDExported(idMixed, sameOverride) {
+		t.Fatal("explicit secret peers must match")
+	}
+	// Wire strip: UUID control header must not leave process
+	reqH := client.GetRequestHeader()
+	if reqH.Get(BraySessionUUIDHeader) != "" || reqH.Get(BraySessionSecretHeader) != "" {
+		t.Fatal("session control headers must not be sent on wire")
+	}
+}
+
 func TestUploadQueue_GapTimeout(t *testing.T) {
 	q := NewUploadQueue(10)
 	common.Must(q.Push(Packet{Payload: []byte("b"), Seq: 1}))
@@ -125,6 +173,12 @@ func TestSessionAuth_DefaultHeaderInjected(t *testing.T) {
 	if !ok || got != DefaultBraySessionSecret {
 		t.Fatalf("want default header %q=%q, got ok=%v val=%q", BraySessionSecretHeader, DefaultBraySessionSecret, ok, got)
 	}
+	// UUID seed present: do NOT inject default secret
+	cUUID := &Config{Headers: map[string]string{BraySessionUUIDHeader: "550e8400-e29b-41d4-a716-446655440000"}}
+	_ = cUUID.GenerateSessionID()
+	if cUUID.Headers[BraySessionSecretHeader] == DefaultBraySessionSecret {
+		t.Fatal("default secret must not be injected when UUID seed is present")
+	}
 	// Explicit secret must be preserved (sessionSecret path must not overwrite).
 	c2 := &Config{Headers: map[string]string{BraySessionSecretHeader: "custom-secret"}}
 	_ = c2.GenerateSessionID()
@@ -149,8 +203,6 @@ func TestSessionAuth_DefaultMatchesBothEnds(t *testing.T) {
 		t.Fatalf("client default missing: %q", client.Headers[BraySessionSecretHeader])
 	}
 	if server.Headers[BraySessionSecretHeader] != DefaultBraySessionSecret {
-		// server may not have been forced through GenerateSessionID; verify via Verify is enough
-		// but VerifySessionIDExported calls sessionSecret which injects
 		_ = VerifySessionIDExported(id, server)
 	}
 	if server.Headers[BraySessionSecretHeader] != DefaultBraySessionSecret {

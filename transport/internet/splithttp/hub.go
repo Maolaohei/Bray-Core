@@ -283,7 +283,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	// Bray-only: reject unsigned / forged session IDs before upsertSession.
 	// Empty sessionId remains stream-one only (gated below).
-	if sessionId != "" && !verifySessionID(sessionId, h.config.sessionSecret()) {
+	if sessionId != "" && !verifySessionIDAny(sessionId, h.config.sessionSecrets()) {
 		errors.LogDebug(context.Background(), "invalid session MAC")
 		writer.WriteHeader(http.StatusNotFound)
 		return

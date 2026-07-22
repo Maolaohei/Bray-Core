@@ -13,6 +13,12 @@ import (
 // Bray session IDs are rawID + "." + base64url(HMAC-SHA256(secret, rawID)[:8]).
 // Clients always generate signed IDs; servers reject unsigned or bad MACs so
 // unauthenticated session creation cannot fill the hub map.
+//
+// Secret resolution (Bray-only, never on wire):
+//  1. explicit headers["x-bray-session-secret"]  (operator override)
+//  2. headers["x-bray-session-uuid"] one or more UUIDs (comma-separated),
+//     each derived via SHA-256(domain||uuid) — injected from VLESS id at conf build
+//  3. DefaultBraySessionSecret (non-VLESS / missing UUID zero-config fallback)
 const (
 	sessionMACDomain   = "bray-xhttp-session-v1"
 	sessionMACTagBytes = 8
@@ -22,8 +28,13 @@ const (
 	// Client and server must share the same value so session MAC verifies.
 	BraySessionSecretHeader = "x-bray-session-secret"
 
-	// DefaultBraySessionSecret is injected when the header is absent.
-	// Bray-only zero-config: both ends use this unless operators override.
+	// BraySessionUUIDHeader carries one or more VLESS UUIDs used to derive the
+	// default session MAC key(s). Local-only; never sent on wire.
+	// Multiple UUIDs (inbound multi-user) are comma-separated; verify accepts any.
+	BraySessionUUIDHeader = "x-bray-session-uuid"
+
+	// DefaultBraySessionSecret is injected when neither explicit secret nor UUID
+	// seed is present. Bray-only zero-config for non-VLESS or incomplete configs.
 	DefaultBraySessionSecret = "bray-default-session-key"
 )
 
@@ -32,16 +43,19 @@ const (
 // host field asymmetry must not desync MAC verification.
 var fixedBraySessionSecret = deriveSessionSecret([]byte(DefaultBraySessionSecret), "", "")
 
-var sessionSecretCache sync.Map // *Config -> []byte
+var sessionSecretCache sync.Map // *Config -> [][]byte
 
-// ensureDefaultSessionSecret writes DefaultBraySessionSecret into c.Headers when
-// no non-empty x-bray-session-secret is present. Safe to call on Dial/Listen and
-// from sessionSecret(); never overwrites an explicit operator value.
+// ensureDefaultSessionSecret fills zero-config auth material when the operator
+// did not set an explicit secret or UUID seed. Safe to call on Dial/Listen and
+// from sessionSecrets(); never overwrites operator values.
 func (c *Config) ensureDefaultSessionSecret() {
 	if c == nil {
 		return
 	}
 	if lookupSessionSecretHeader(c.Headers) != "" {
+		return
+	}
+	if len(lookupSessionUUIDSeeds(c.Headers)) > 0 {
 		return
 	}
 	if c.Headers == nil {
@@ -75,27 +89,92 @@ func lookupSessionSecretHeader(headers map[string]string) string {
 	return ""
 }
 
-func (c *Config) sessionSecret() []byte {
+func lookupSessionUUIDSeeds(headers map[string]string) []string {
+	if headers == nil {
+		return nil
+	}
+	raw := ""
+	if s, ok := headers[BraySessionUUIDHeader]; ok {
+		raw = s
+	} else if s, ok := headers["X-Bray-Session-Uuid"]; ok {
+		raw = s
+	} else {
+		for k, v := range headers {
+			if strings.EqualFold(k, BraySessionUUIDHeader) {
+				raw = v
+				break
+			}
+		}
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		u := normalizeSessionUUID(p)
+		if u == "" {
+			continue
+		}
+		if _, ok := seen[u]; ok {
+			continue
+		}
+		seen[u] = struct{}{}
+		out = append(out, u)
+	}
+	return out
+}
+
+func normalizeSessionUUID(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return ""
+	}
+	// Keep UUID-looking strings as-is after lowercasing; still accept non-UUID
+	// seeds so conf-layer can pass any stable id string.
+	return s
+}
+
+// sessionSecrets returns all MAC keys accepted for verify. The first entry is
+// the primary key used for signing new session IDs on the client.
+func (c *Config) sessionSecrets() [][]byte {
 	if c == nil {
-		return fixedBraySessionSecret
+		return [][]byte{fixedBraySessionSecret}
 	}
 	c.ensureDefaultSessionSecret()
 	if v, ok := sessionSecretCache.Load(c); ok {
-		return v.([]byte)
+		return v.([][]byte)
 	}
-	var secret []byte
-	if s := lookupSessionSecretHeader(c.Headers); s != "" {
+	secrets := resolveSessionSecrets(c.Headers)
+	actual, _ := sessionSecretCache.LoadOrStore(c, secrets)
+	return actual.([][]byte)
+}
+
+func resolveSessionSecrets(headers map[string]string) [][]byte {
+	if s := lookupSessionSecretHeader(headers); s != "" {
 		if s == DefaultBraySessionSecret {
-			secret = fixedBraySessionSecret
-		} else {
-			secret = deriveSessionSecret([]byte(s), "", "")
+			return [][]byte{fixedBraySessionSecret}
 		}
+		return [][]byte{deriveSessionSecret([]byte(s), "", "")}
 	}
-	if secret == nil {
-		secret = fixedBraySessionSecret
+	if uuids := lookupSessionUUIDSeeds(headers); len(uuids) > 0 {
+		out := make([][]byte, 0, len(uuids))
+		for _, u := range uuids {
+			out = append(out, deriveSessionSecretFromUUID(u))
+		}
+		return out
 	}
-	actual, _ := sessionSecretCache.LoadOrStore(c, secret)
-	return actual.([]byte)
+	return [][]byte{fixedBraySessionSecret}
+}
+
+func (c *Config) sessionSecret() []byte {
+	secrets := c.sessionSecrets()
+	if len(secrets) == 0 {
+		return fixedBraySessionSecret
+	}
+	return secrets[0]
 }
 
 func deriveSessionSecret(explicit []byte, host, path string) []byte {
@@ -109,6 +188,20 @@ func deriveSessionSecret(explicit []byte, host, path string) []byte {
 		h.Write([]byte{0})
 		h.Write([]byte(path))
 	}
+	return h.Sum(nil)
+}
+
+// deriveSessionSecretFromUUID binds the MAC key to a VLESS account id so
+// operators need not configure a second shared secret. Domain tag differs from
+// explicit secrets so a raw UUID string used as x-bray-session-secret does not
+// collide with UUID-seed derivation.
+func deriveSessionSecretFromUUID(uuidStr string) []byte {
+	h := sha256.New()
+	h.Write([]byte(sessionMACDomain))
+	h.Write([]byte{0})
+	h.Write([]byte("uuid"))
+	h.Write([]byte{0})
+	h.Write([]byte(normalizeSessionUUID(uuidStr)))
 	return h.Sum(nil)
 }
 
@@ -145,6 +238,23 @@ func verifySessionID(sessionId string, secret []byte) bool {
 	return subtle.ConstantTimeCompare([]byte(tag), []byte(want)) == 1
 }
 
+// verifySessionIDAny accepts a sessionId signed by any of the provided secrets.
+// Used on multi-user inbounds where each VLESS UUID yields a distinct key.
+func verifySessionIDAny(sessionId string, secrets [][]byte) bool {
+	if sessionId == "" {
+		return true
+	}
+	if len(secrets) == 0 {
+		return verifySessionID(sessionId, fixedBraySessionSecret)
+	}
+	for _, secret := range secrets {
+		if verifySessionID(sessionId, secret) {
+			return true
+		}
+	}
+	return false
+}
+
 // appendSeqTag binds packet-up seq into a short MAC for optional anti-injection.
 // Kept for future wire upgrade; currently unused on the public path.
 func appendSeqTag(seq uint64, secret []byte) string {
@@ -156,10 +266,10 @@ func appendSeqTag(seq uint64, secret []byte) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:4])
 }
 
-// VerifySessionIDExported is a test/helper wrapper around verifySessionID.
+// VerifySessionIDExported is a test/helper wrapper around verifySessionIDAny.
 func VerifySessionIDExported(sessionId string, c *Config) bool {
 	if c == nil {
 		return verifySessionID(sessionId, fixedBraySessionSecret)
 	}
-	return verifySessionID(sessionId, c.sessionSecret())
+	return verifySessionIDAny(sessionId, c.sessionSecrets())
 }
