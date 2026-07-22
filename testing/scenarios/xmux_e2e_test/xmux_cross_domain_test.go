@@ -183,7 +183,7 @@ func TestCrossDomainCertificateMismatch(t *testing.T) {
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				RootCAs:    buildCertPool(t, sites[1].certPEM), // site-b's cert
-				ServerName: sites[0].Host,                       // connecting to site-a
+				ServerName: sites[0].Host,                      // connecting to site-a
 			},
 			DisableKeepAlives: true,
 		},
@@ -202,7 +202,7 @@ func TestCrossDomainCertificateMismatch(t *testing.T) {
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				RootCAs:    buildCertPool(t, sites[0].certPEM), // site-a's cert
-				ServerName: sites[0].Host,                        // connecting to site-a
+				ServerName: sites[0].Host,                      // connecting to site-a
 			},
 			DisableKeepAlives: true,
 		},

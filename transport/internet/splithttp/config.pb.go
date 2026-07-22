@@ -199,9 +199,9 @@ type Config struct {
 	// NOTE: manually added to match config.proto field 31; rawDesc is not
 	// updated (ProtoReflect() won't enumerate this field), but struct-level
 	// access, JSON, and wire serialization all work correctly.
-	XPaddingStrictMinPadding bool                   `protobuf:"varint,31,opt,name=xPaddingStrictMinPadding,proto3" json:"xPaddingStrictMinPadding,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	XPaddingStrictMinPadding bool `protobuf:"varint,31,opt,name=xPaddingStrictMinPadding,proto3" json:"xPaddingStrictMinPadding,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *Config) Reset() {

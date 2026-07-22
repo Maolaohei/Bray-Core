@@ -38,7 +38,8 @@ var (
 )
 
 // TestXMUXCrossDomainViaProxy tests XMUX with a full proxy chain:
-//   HTTP client → Xray client (XMUX) → Xray server → HTTP test servers
+//
+//	HTTP client → Xray client (XMUX) → Xray server → HTTP test servers
 //
 // Two test HTTP servers return different bodies.
 // If XMUX incorrectly shares connections across domains,
@@ -138,7 +139,7 @@ func TestXMUXCrossDomainViaProxy(t *testing.T) {
 						Show:        true,
 						Fingerprint: "chrome",
 						ServerName:  "www.microsoft.com",
-						PublicKey:    testPubKey,
+						PublicKey:   testPubKey,
 						ShortId:     shortIds[0],
 						SpiderX:     "/",
 					})},

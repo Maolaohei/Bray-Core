@@ -93,7 +93,7 @@ func buildStressProxy(t *testing.T, serverPort, clientPort xraynet.Port) func() 
 					SecuritySettings: []*serial.TypedMessage{serial.ToTypedMessage(&reality.Config{
 						Show: true, Dest: "www.microsoft.com:443",
 						ServerNames: []string{"www.microsoft.com"},
-						PrivateKey: testPrivKey, ShortIds: shortIds, Type: "tcp",
+						PrivateKey:  testPrivKey, ShortIds: shortIds, Type: "tcp",
 					})},
 				},
 			}),
