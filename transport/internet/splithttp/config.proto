@@ -53,4 +53,11 @@ message Config {
   string sessionIDTable = 28;
   RangeConfig sessionIDLength = 29;
   int32 scSessionTtlSecs = 30;
+  // xPaddingStrictMinPadding: when true, the client always picks padding
+  // lengths from the full [xPaddingBytes.From, xPaddingBytes.To] range
+  // regardless of payload size, and the server validates against the same
+  // range. This hides payload-size information from observers at the cost of
+  // slightly more bandwidth on small packets, and is wire-compatible with
+  // stock Xray peers (padding is always >= the configured base minimum).
+  bool xPaddingStrictMinPadding = 31;
 }

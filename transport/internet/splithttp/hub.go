@@ -240,6 +240,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			Header:    h.config.XPaddingHeader,
 		}
 		config.Method = PaddingMethod(h.config.XPaddingMethod)
+		config.methodIdx = methodIndex(config.Method)
 	} else {
 		config.Placement = XPaddingPlacement{
 			Placement: PlacementHeader,

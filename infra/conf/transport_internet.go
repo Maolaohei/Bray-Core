@@ -216,11 +216,12 @@ type SplitHTTPConfig struct {
 	Mode                 string            `json:"mode"`
 	Headers              map[string]string `json:"headers"`
 	XPaddingBytes        Int32Range        `json:"xPaddingBytes"`
-	XPaddingObfsMode     bool              `json:"xPaddingObfsMode"`
-	XPaddingKey          string            `json:"xPaddingKey"`
-	XPaddingHeader       string            `json:"xPaddingHeader"`
-	XPaddingPlacement    string            `json:"xPaddingPlacement"`
-	XPaddingMethod       string            `json:"xPaddingMethod"`
+	XPaddingObfsMode          bool              `json:"xPaddingObfsMode"`
+	XPaddingKey               string            `json:"xPaddingKey"`
+	XPaddingHeader            string            `json:"xPaddingHeader"`
+	XPaddingPlacement         string            `json:"xPaddingPlacement"`
+	XPaddingMethod            string            `json:"xPaddingMethod"`
+	XPaddingStrictMinPadding  bool              `json:"xPaddingStrictMinPadding"`
 	UplinkHTTPMethod     string            `json:"uplinkHTTPMethod"`
 	SessionIDPlacement   string            `json:"sessionIDPlacement"`
 	SessionIDKey         string            `json:"sessionIDKey"`
@@ -420,11 +421,12 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		Mode:                 c.Mode,
 		Headers:              c.Headers,
 		XPaddingBytes:        newRangeConfig(c.XPaddingBytes),
-		XPaddingObfsMode:     c.XPaddingObfsMode,
-		XPaddingKey:          c.XPaddingKey,
-		XPaddingHeader:       c.XPaddingHeader,
-		XPaddingPlacement:    c.XPaddingPlacement,
-		XPaddingMethod:       c.XPaddingMethod,
+		XPaddingObfsMode:          c.XPaddingObfsMode,
+		XPaddingKey:               c.XPaddingKey,
+		XPaddingHeader:            c.XPaddingHeader,
+		XPaddingPlacement:         c.XPaddingPlacement,
+		XPaddingMethod:            c.XPaddingMethod,
+		XPaddingStrictMinPadding:  c.XPaddingStrictMinPadding,
 		UplinkHTTPMethod:     c.UplinkHTTPMethod,
 		SessionIDPlacement:   c.SessionIDPlacement,
 		SeqPlacement:         c.SeqPlacement,

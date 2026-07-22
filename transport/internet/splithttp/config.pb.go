@@ -190,6 +190,16 @@ type Config struct {
 	SessionIDTable       string                 `protobuf:"bytes,28,opt,name=sessionIDTable,proto3" json:"sessionIDTable,omitempty"`
 	SessionIDLength      *RangeConfig           `protobuf:"bytes,29,opt,name=sessionIDLength,proto3" json:"sessionIDLength,omitempty"`
 	ScSessionTtlSecs     int32                  `protobuf:"varint,30,opt,name=scSessionTtlSecs,proto3" json:"scSessionTtlSecs,omitempty"`
+	// xPaddingStrictMinPadding: when true, padding lengths are always drawn
+	// from the full [xPaddingBytes.From, xPaddingBytes.To] range regardless of
+	// payload size, and the server validates against the same range. This
+	// hides payload-size information from observers and is wire-compatible with
+	// stock Xray peers (padding is always >= the configured base minimum).
+	//
+	// NOTE: manually added to match config.proto field 31; rawDesc is not
+	// updated (ProtoReflect() won't enumerate this field), but struct-level
+	// access, JSON, and wire serialization all work correctly.
+	XPaddingStrictMinPadding bool                   `protobuf:"varint,31,opt,name=xPaddingStrictMinPadding,proto3" json:"xPaddingStrictMinPadding,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -425,6 +435,20 @@ func (x *Config) GetSessionIDLength() *RangeConfig {
 		return x.SessionIDLength
 	}
 	return nil
+}
+
+func (x *Config) GetScSessionTtlSecs() int32 {
+	if x != nil {
+		return x.ScSessionTtlSecs
+	}
+	return 0
+}
+
+func (x *Config) GetXPaddingStrictMinPadding() bool {
+	if x != nil {
+		return x.XPaddingStrictMinPadding
+	}
+	return false
 }
 
 var File_transport_internet_splithttp_config_proto protoreflect.FileDescriptor

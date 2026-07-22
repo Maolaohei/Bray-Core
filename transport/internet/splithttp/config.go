@@ -507,6 +507,7 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 			RawURL:    rawURL,
 		}
 		config.Method = PaddingMethod(c.XPaddingMethod)
+		config.methodIdx = methodIndex(config.Method)
 	} else {
 		config.Placement = XPaddingPlacement{
 			Placement: PlacementQueryInHeader,
@@ -554,9 +555,26 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 	}
 
 	basePad := c.GetNormalizedXPaddingBytes()
-	from, to := AdaptivePaddingRange(basePad.From, basePad.To, payloadLen)
+	var from, to int32
+	var strict bool
+	if c.XPaddingStrictMinPadding {
+		// Strict mode: padding is always drawn from the full [base.From,
+		// base.To] range regardless of payload size. This hides
+		// payload-size information from observers and is wire-compatible
+		// with stock Xray peers (padding is always >= the configured
+		// base minimum).
+		from, to = StrictPaddingRange(basePad.From, basePad.To)
+		strict = true
+	} else {
+		// Non-strict (default): adaptive range shrinks padding for small
+		// payloads to save bandwidth. The lower bound may dip below
+		// base.From, so the server must accept the adaptive floor — this
+		// is NOT wire-compatible with stock Xray peers that only know
+		// about [base.From, base.To].
+		from, to = AdaptivePaddingRange(basePad.From, basePad.To, payloadLen)
+	}
 	length := int((&RangeConfig{From: from, To: to}).rand())
-	config := XPaddingConfig{Length: length}
+	config := XPaddingConfig{Length: length, Strict: strict}
 	rawURL := requestURLString(request)
 
 	if c.XPaddingObfsMode {
@@ -567,6 +585,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 			RawURL:    rawURL,
 		}
 		config.Method = PaddingMethod(c.XPaddingMethod)
+		config.methodIdx = methodIndex(config.Method)
 	} else {
 		config.Placement = XPaddingPlacement{
 			Placement: PlacementQueryInHeader,
