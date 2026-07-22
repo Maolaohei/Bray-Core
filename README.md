@@ -14,7 +14,7 @@ Bray-Core 是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的兼容增�
 
 ## 定位
 
-- **兼容优先**：VLESS / XHTTP / REALITY 等与上游配置互通；客户端与服务端可混用（增强能力在本端生效）。
+- **破坏兼容**：由于改动较大现版本已不兼容原版。
 - **传输智能**：在 TCP 观测、XMUX 连接池、Happy Eyeballs、DNS 缓存等路径上做调度与容错，而不是改写应用层协议语义。
 - **REALITY 摊销**：服务端在安全约束下复用目标指纹观测结果，降低对伪装站点（RA）的重复拨号与握手成本。
 
@@ -40,7 +40,7 @@ git checkout v1       # 仅当需要旧线行为时
 
 ## Bray 完全体（main）相对 v1 的要点
 
-在保持 VLESS / XHTTP / REALITY **协议与配置兼容** 的前提下，`main` 额外强化：
+额外强化：
 
 | 能力 | 说明 |
 |------|------|
@@ -97,7 +97,8 @@ git checkout v1       # 仅当需要旧线行为时
 
 | 平台 | 说明 |
 |------|------|
-| Windows | [v2rayN（配套修改版）](https://github.com/Maolaohei/v2rayN) — 将编译产物替换到客户端 `bin/xray`（或对应内核目录） |
+| Windows | <del>[v2rayN（配套修改版已放弃维护）](https://github.com/Maolaohei/v2rayN) — 将编译产物替换到客户端 `bin/xray`（或对应内核目录）</del> |
+| Windows | [v2rayN（原版版）](https://github.com/2dust/v2rayN) — 将编译产物替换到客户端 `bin/xray`（或对应内核目录） |
 | Android | [v2rayNG（Bray-Core 内核发布）](https://github.com/Maolaohei/v2rayNG/releases) |
 | 通用 | 任意兼容 Xray 配置的客户端，均可替换为 Bray-Core 二进制 |
 
