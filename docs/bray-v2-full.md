@@ -2,7 +2,7 @@
 
 Branch: `main` (formerly feature branch `Bray-V2`; legacy line is `v1`)
 Audience: operators + core maintainers
-Principle: **compatibility first, performance second, recovery always opt-in or auto-safe**.
+Principle: **Bray client↔server only; performance and recovery without upstream-compat compromises**.
 
 ## Branch policy (2026-07)
 
@@ -23,6 +23,8 @@ Bray-V2 is not a new protocol. It is a **hardened stack** on XHTTP + REALITY Amo
 2. **Graceful degradation** when CDN/edge/GFW breaks long streams or L2.
 3. **Observability** so failures are countable, not tribal knowledge.
 4. **No wire fingerprint** from Bray control headers (`x-bray-*` client-local only).
+5. **Session MAC** on XHTTP session ids (HMAC; key from VLESS UUID by default).
+6. **Packet-up hotpath**: RTT-scaled window (default 12 / max 24) and chunk size under `scMaxEachPostBytes`.
 
 ## Stack map
 
@@ -60,7 +62,7 @@ Post-review hardening on the mode cascade / sticky / multi-endpoint path (defaul
 6. **P3 Multi-EP errors**: empty race list / nil dialFn return dedicated errors (not `context.Canceled`).
 ## Optimization matrix (compat / perf / risk)
 
-| Lever | Compat | Perf (good path) | Recovery value | Default |
+| Lever | Bray-only stack | Perf (good path) | Recovery value | Default |
 |-------|--------|------------------|----------------|---------|
 | XMUX browser defaults | high | high reuse | medium | on (overridable) |
 | REALITY L2 amortize | high | high HS save | high | on (gated) |
@@ -74,6 +76,17 @@ Post-review hardening on the mode cascade / sticky / multi-endpoint path (defaul
 | H3 Happy Eyeballs | high | H3 win latency | medium | when ALPN h3 |
 | XMUX fatal open evict | high | faster rotate | medium | on |
 | Control header strip | critical | n/a | fingerprint | always |
+
+## Bray-only data plane (post Wave-7)
+
+| Item | Behavior |
+|------|----------|
+| Session MAC | `raw.tag`; server rejects unsigned/bad MAC |
+| Secret source | UUID-derived by default; explicit secret optional; fallback `bray-default-session-key` |
+| Packet-up window | default 12, max 24, half of `scMaxBufferedPosts` cap |
+| Packet-up chunk | RTT ladder ~256KB / 512KB / configured max; never > `scMaxEachPostBytes` |
+| Open hang | header-wait timeout accumulates toward MarkDead |
+| Upstream Xray | **not supported** as peer on `main` |
 
 ## Operator presets
 
@@ -91,6 +104,8 @@ See `docs/presets/README.md`.
 
 | Header | Wave | Effect |
 |--------|------|--------|
+| `x-bray-session-secret` | bray-only | Optional explicit session MAC seed (override). **Usually omit** — VLESS UUID is derived automatically. |
+| `x-bray-session-uuid` | bray-only | One or more VLESS UUIDs (comma-separated) used to derive MAC key(s). Injected at conf build for VLESS. |
 | `x-bray-mode-degrade` | 2/3 | Allow cascade for explicit modes |
 | `x-bray-multi-endpoint` | 2/3 | Enable endpoint race |
 | `x-bray-endpoints` | 2/3 | Extra `host:port` list |
@@ -99,7 +114,7 @@ See `docs/presets/README.md`.
 | `x-bray-sticky-mode-ttl` | 6 | Optional mode sticky TTL (`10m` / `30s` / minutes int) |
 | `x-bray-sticky-endpoint-ttl` | 6 | Optional endpoint sticky TTL |
 
-Never appear on the wire (`GetRequestHeader` strips `x-bray-*`).
+Never appear on the wire (`GetRequestHeader` strips `x-bray-*`). Session MAC material is process-local only; on TLS/REALITY paths observers see ciphertext only.
 
 ## Observability APIs
 

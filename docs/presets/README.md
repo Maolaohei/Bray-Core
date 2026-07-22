@@ -1,8 +1,9 @@
 # Bray-V2 Wave-1 Transport Presets
 
-Zero-config defaults remain compatible with Xray configs. These presets are
-**recommended starting points** for operators; copy fields into your existing
-`streamSettings` rather than requiring new protocol fields.
+These presets are **recommended starting points** for Bray client **and** Bray
+server. JSON shape still looks like Xray `streamSettings`, but **`main` is
+Bray-only**: both ends should run Bray-Core. Session MAC is UUID-derived by
+default (no extra `x-bray-session-secret` required for VLESS).
 
 ## 1) Direct REALITY + XHTTP (RA)
 
@@ -198,3 +199,10 @@ Green-zone VLESS hardening (default-safe):
 - Encoding invalid-user errors no longer echo full UUIDs into logs.
 - Encryption header/AEAD/XorConn covered by unit tests (no wire-format change).
 - `OutBytesCapacity = 5+8192+16` documented next to the write chunk limit.
+
+## Bray-only auth notes
+
+- Prefer **no** manual x-bray-session-secret when using VLESS: MAC key is derived from the account UUID on both ends.
+- All x-bray-* keys are **local control** and are stripped before the request hits the wire.
+- Packet-up defaults (window/chunk) are automatic; tune scMaxEachPostBytes / scMaxBufferedPosts only if you know the edge limits.
+

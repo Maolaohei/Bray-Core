@@ -1,13 +1,20 @@
 # Bray-Core Changelog
 
-基于 [Xray-core](https://github.com/XTLS/Xray-core) 的兼容增强分支变更记录。  
+基于 [Xray-core](https://github.com/XTLS/Xray-core) 的 **Bray 专属魔改**变更记录。  
 基线版本以 `core` 包中的版本号为准（当前 **26.6.22**）。REALITY 独立版本见 [Maolaohei/REALITY Releases](https://github.com/Maolaohei/REALITY/releases)。
+
+**兼容策略（2026-07 起）**：`main` 默认 **Bray 客户端 ↔ Bray 服务端**；不再承诺与上游 Xray 内核互访兼容。
 
 格式大致遵循 [Keep a Changelog](https://keepachangelog.com/) 语义：新增 / 变更 / 修复 / 文档。
 
 ---
 
 ## [Unreleased]
+
+### 文档
+
+- 重写 `README.md`：明确 **Bray-only**、Session MAC / UUID 派生、`x-bray-*` 本地控制头、packet-up 窗口与 RTT chunk、OpenStream 防挂死与数据面性能摘要；移除「与上游双向协议兼容」表述。
+- 本文件补充 Bray-only 安全与性能提交摘要。
 
 ### 变更
 
@@ -17,8 +24,30 @@
 - **`v1`**：原 `main` 线冻结为回滚/对比分支（升级前基线）。
 - 文档：`docs/bray-v2-full.md`、`docs/presets/`、各 wave 说明中的 Branch 字段已改为指向 `main`。
 
-### 修复
+### 新增 / 安全（Bray-only）
 
+#### XHTTP Session MAC（UUID 派生，零额外配置）
+
+- Session id：`raw + "." + base64url(HMAC-SHA256(secret, raw)[:8])`；服务端拒收未签名或错误 MAC，降低 hub 被未认证灌满风险。
+- 密钥解析顺序：显式 `x-bray-session-secret` → `x-bray-session-uuid`（VLESS UUID，可多用户逗号分隔）→ 默认种子 `bray-default-session-key`。
+- 所有 `x-bray-*` 控制头仅本地配置注入，`GetRequestHeader` **永不发送到线上**。
+- 相关提交：`fbaae44d` / `737c38e0` 一线（rebase 后 SHA 以仓库为准）。
+
+#### OpenStream / XMUX 防挂死
+
+- OpenStream 等响应头超时累计后 MarkDead，驱逐黑洞 H2，减轻「内核无响应需重启」类故障。
+- XMUX open 超时与坏会话驱逐策略保留 hard cap（over-admit 等），避免单连接拖垮池。
+
+### 性能（数据面，稳定优先）
+
+#### packet-up / hotpath（2026-07-23）
+
+- **窗口**：默认 in-flight 12，RTT 放大上限 24，硬顶不超过 `scMaxBufferedPosts/2`（`b45291b8` 等）。
+- **chunk**：`packetUploadChunkSize` 按 RTT 选择约 256KB / 512KB / 满配置；`rtt==0` 冷启动保持配置上限；永不超 `scMaxEachPostBytes`（`293c0d66`）。
+- **减配**：`formatSeqInt64` 零堆分配、共享单值 header 切片、大包 X-Padding 上界收缩。
+- **splitConn deadline**：Read/Write 中间缓冲改 `bytespool`，超时语义与 partial read re-park 不变（`293c0d66`）。
+
+### 修复
 
 #### XMUX 连接池 panic 修复（`GetXmuxClient` nil pointer dereference）
 
@@ -29,11 +58,6 @@
 - **probe 超时**：`probeConnection` 从 `context.Background()`（无超时）改为 `context.WithTimeout(ctx, 10s)`，避免服务器半开时 probe 挂死。
 - **资源清理**：`Dial()` 中多个 error return 路径统一用 `cleanup()` 函数处理 `reader.Close()` + `conn.Close()`，`conn.Close()` 的 `onClose` 回调负责 Release 已 Borrow 的 XMUX client。
 - **性能优化**：`addToPool` 直接返回 `*XmuxClient`，Phase 2 省掉一次 `pool.mu.RLock()` + pool 遍历。
-
-### 文档
-
-- 重写项目 `README.md`：对齐当前基线、REALITY v0.5.5 / L2 默认摊销、客户端替换方式与构建说明；移除过时的 “REALITY v3” 版本矩阵与营销式路线图表述。
-- 本文件补充 2026-07 可靠性相关变更摘要。
 
 ---
 
@@ -77,66 +101,3 @@
 ### 依赖
 
 - 常规依赖升级（含 `golang.org/x/net` 等），详见对应 chore 提交。
-
----
-
-## 2026-06 — 基线与传输增强（历史摘要）
-
-> 以下为 2026-06 前后相对上游的能力与修复摘要，供对照；细节以当时提交为准。
-
-### 基线
-
-| 项目 | 数值 |
-|------|------|
-| 上游基线 | Xray-core v26.6.22 |
-| 协议兼容 | 与上游配置/协议面兼容 |
-
-### 传输与调度
-
-| 方向 | 说明 |
-|------|------|
-| XMUX | 多路复用连接池、min-inflight / RTT 与质量评分调度、优雅排空与健康检查 |
-| Happy Eyeballs v3 | 历史失败率与质量感知的并行拨号与选路 |
-| Warmup | 连接/DNS 预热与健康检查管道 |
-| TCP 默认策略 | 支持平台上更积极的 socket 默认（如 BBR、NODELAY 等，依 OS） |
-| Transport Intelligence | TCP_INFO / 估算 RTT → 质量评分 → 行为分类 → 调度与池规模（AIMD） |
-
-### REALITY（子模块演进，至 2026-06）
-
-| 方向 | 说明 |
-|------|------|
-| 指纹与缓存 | TLS 1.3 目标观测、profile 持久化、HotSwap、SWR、负缓存、引用计数保护 |
-| 证书链 | 更大证书链容量以兼容更多目标站点 |
-| 后续（2026-07） | 见上文 L2 摊销 / zero-dial |
-
-### 安全与协议扩展（摘要）
-
-| 方向 | 说明 |
-|------|------|
-| 随机数与 padding | 密码学安全随机池、相关 padding 热路径优化 |
-| NetBridge | 配套客户端入站桥接 |
-| 反代头 | XHTTP / WS / HTTPUpgrade / gRPC 等路径对 `trustedXForwardedFor` 的校验策略 |
-| 其他 | WireGuard 可维护性重构、Loopback sniffing、若干关闭/泄漏类修复 |
-
-### 已知审计项
-
-历史缺陷审计快照见 [`DEFECT_REPORT.md`](DEFECT_REPORT.md)（**2026-06-27**）。该文件为当时审计记录，不保证与当前主干一一对应；修复状态以提交历史与测试为准。
-
----
-
-## 性能数据说明
-
-历史 README / 文档中曾收录局部 micro-benchmark（buffer、XMUX 调度、VLESS decode 等）。这些数字高度依赖 CPU、Go 版本与编译参数，**不应视为跨版本 SLA**。若需对比，请在同一机器上对目标提交重新执行：
-
-```bash
-go test -bench=. -benchmem ./transport/internet/splithttp/ ./proxy/vless/encoding/ ./common/buf/
-```
-
----
-
-## 链接
-
-- 仓库：<https://github.com/Maolaohei/Bray-Core>
-- REALITY：<https://github.com/Maolaohei/REALITY>
-- 上游：<https://github.com/XTLS/Xray-core>
-- 架构文档：[`docs/architecture-connection-lifecycle.md`](docs/architecture-connection-lifecycle.md)

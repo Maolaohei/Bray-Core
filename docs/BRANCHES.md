@@ -2,7 +2,7 @@
 
 | Branch | Tip role |
 |--------|----------|
-| **main** | Default product line. Bray fully-hardened XHTTP + REALITY Amortize stack (historical feature branch name: `Bray-V2`, Waves 1–7). |
+| **main** | Default product line. Bray fully-hardened XHTTP + REALITY Amortize stack (historical feature branch name: `Bray-V2`, Waves 1–7) plus Bray-only session MAC / packet-up perf. **Not upstream-compatible as a peer.** |
 | **v1** | Frozen snapshot of the previous `main` line before promotion. Use for rollback or A/B comparison. |
 
 ## Operator notes

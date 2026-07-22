@@ -1,6 +1,7 @@
 # Bray-Core
 
-Bray-Core 是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的兼容增强分支，面向复杂网络环境下的传输层稳定性、连接调度与 REALITY 握手开销优化。协议与配置面保持与上游一致，可直接替换客户端/服务端内核二进制使用。
+Bray-Core 是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的 **Bray 专属魔改内核**：以 **VLESS + XHTTP + XMUX + REALITY** 为核心栈，面向复杂网络下的稳定性、调度与性能。  
+**当前 `main` 默认只保证 Bray 客户端 ↔ Bray 服务端互通**；为性能/安全做的协议侧加固已与上游 Xray 行为分叉，**不再承诺与上游内核互访兼容**。
 
 | 项目 | 当前状态 |
 |------|----------|
@@ -9,25 +10,26 @@ Bray-Core 是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的兼容增�
 | 模块路径 | `github.com/xtls/xray-core` |
 | REALITY | [Maolaohei/REALITY](https://github.com/Maolaohei/REALITY) **v0.5.5**（子模块 `./REALITY`） |
 | 默认 REALITY 摊销 | **L2**（证据充分后 zero-dial；不满足条件时回退 L1/L0） |
+| 兼容策略 | **Bray-only**（两端均须本仓库内核 / 配套客户端） |
 
 ---
 
 ## 定位
 
-- **破坏兼容**：由于改动较大现版本已不兼容原版。
-- **传输智能**：在 TCP 观测、XMUX 连接池、Happy Eyeballs、DNS 缓存等路径上做调度与容错，而不是改写应用层协议语义。
-- **REALITY 摊销**：服务端在安全约束下复用目标指纹观测结果，降低对伪装站点（RA）的重复拨号与握手成本。
+- **Bray-only**：session MAC、packet-up 窗口/分片、padding/指纹加固、OpenStream 超时驱逐等按 Bray 两端语义设计；不要假设能挂原版 Xray 对端。
+- **传输智能**：TCP 观测、XMUX 连接池、Happy Eyeballs、DNS 缓存、mode cascade / sticky / multi-endpoint。
+- **REALITY 摊销**：服务端在安全约束下复用目标指纹观测，降低对伪装站点（RA）的重复拨号成本。
+- **数据面性能**：packet-up RTT 自适应窗口与 chunk、零分配 seq、共享 header、deadline 路径 `bytespool`、大包 padding 收缩等（见下方「近期性能」）。
 
 推荐组合：**VLESS + XHTTP（stream-one / stream-up / packet-up）+ REALITY**。
 
 ---
 
-
 ## 分支策略
 
 | 分支 | 说明 |
 |------|------|
-| **`main`** | **当前默认主干** = Bray 完全体（原功能分支 `Bray-V2`，Wave 1–7）。克隆 / CI / 发版均以此为准。 |
+| **`main`** | **当前默认主干** = Bray 完全体（原功能分支 `Bray-V2`，Wave 1–7 + 后续 Bray-only 安全/性能）。克隆 / CI / 发版均以此为准。 |
 | **`v1`** | 升级前的旧主干快照（原 `main`），仅用于回滚与对比。 |
 
 ```bash
@@ -38,9 +40,7 @@ git checkout v1       # 仅当需要旧线行为时
 
 详细能力见 [`docs/bray-v2-full.md`](docs/bray-v2-full.md) 与 [`docs/presets/README.md`](docs/presets/README.md)。
 
-## Bray 完全体（main）相对 v1 的要点
-
-额外强化：
+## Bray 完全体（main）要点
 
 | 能力 | 说明 |
 |------|------|
@@ -48,8 +48,11 @@ git checkout v1       # 仅当需要旧线行为时
 | Mode cascade | auto 等路径下 stream-one → stream-up → packet-up；失败可自愈 |
 | Sticky | 记住 last-good mode / multi-endpoint 赢家（TTL，可 opt-out） |
 | Multi-endpoint | 可选多落地竞速（`x-bray-multi-endpoint` + endpoints） |
-| 坏会话驱逐 | fatal open 时 MarkDead；cascade 时刷新 HTTP/XMUX client |
-| 可观测 | `bray-v2>>>` 指标与比率；控制头 `x-bray-*` 仅本地、不上线 |
+| 坏会话驱逐 | fatal open 时 MarkDead；OpenStream 等 header 超时累计后驱逐黑洞 H2；cascade 时刷新 HTTP/XMUX client |
+| Session MAC | XHTTP session id 带 HMAC；密钥优先由 **VLESS UUID 派生**，无需额外配置 |
+| 可观测 | `bray-v2>>>` 指标与比率；控制头 `x-bray-*` **仅本地配置注入，永不出现在线上 HTTP** |
+
+---
 
 ## 主要能力
 
@@ -63,11 +66,11 @@ git checkout v1       # 仅当需要旧线行为时
 | 负缓存退避 | 探测失败指数退避，避免对目标站点无效重试 |
 | 证书链容量 | 支持更大证书链，兼容更多目标站点 |
 | 摊销模式 L0/L1/L2 | L0 全量实拨；L1 可复用 R1–R6；**L2（默认）**在证据门槛满足后 zero-dial |
-| L2 安全边界 | 不缓存不可安全复用的 R0；证据不足、失败窗口触发时自动降级，避免客户端/服务端状态错位 |
+| L2 安全边界 | 不缓存不可安全复用的 R0；证据不足、失败窗口触发时自动降级 |
 
 相关发布说明：[REALITY v0.5.5](https://github.com/Maolaohei/REALITY/releases/tag/v0.5.5)
 
-### XHTTP / XMUX
+### XHTTP / XMUX（Bray-only 数据面）
 
 | 能力 | 说明 |
 |------|------|
@@ -76,6 +79,11 @@ git checkout v1       # 仅当需要旧线行为时
 | 身份隔离 | `MuxKey` 含 `OriginalDomain` 等目的地身份，避免同 IP 多域名串池 |
 | H1 上传池 | 有界 idle 池；写后跟踪未读响应并在复用前排空，失败连接不回池 |
 | HTTP/2 身份 | 缓存连接按 TLS/主机身份隔离，降低串站风险 |
+| Session MAC | `sessionId = raw + "." + base64url(HMAC-SHA256(secret, raw)[:8])`；服务端拒收未签名/错误 MAC，防 hub 被未认证冲垮 |
+| Packet-up 窗口 | 默认 in-flight **12**，RTT 放大上限 **24**，且不超过 `scMaxBufferedPosts/2` |
+| Packet-up chunk | 按 RTT 选择 POST body 上限（约 256KB / 512KB / 满配置）；`rtt==0` 冷启动不砍；**永不超** `scMaxEachPostBytes` |
+| 热路径减配 | `formatSeqInt64` 无堆分配、共享单值 header 切片、大包 X-Padding 收缩、splitConn deadline 缓冲走 `bytespool` |
+| OpenStream 防挂死 | 等响应头超时可累计并 MarkDead，避免黑洞 H2 占池导致内核「无响应」 |
 
 ### 出站拨号与 DNS
 
@@ -93,16 +101,34 @@ git checkout v1       # 仅当需要旧线行为时
 
 ---
 
+## Headers / `x-bray-*` 说明（常见疑问）
+
+配置里的 `headers` / `x-bray-*` **不是**「再造一套用户口令」，也 **不会** 原样出现在公网 HTTP 上。
+
+| 名称 | 作用 | 是否上线（明文可见） | 是否要手配 |
+|------|------|----------------------|------------|
+| `headers` 普通项 | 伪装用 HTTP 请求头（如 User-Agent） | 会进入 TLS 内的 HTTP 明文；有 TLS/REALITY 时链路加密，中间人看不到明文内容 | 按伪装需要 |
+| `x-bray-session-secret` | 本地控制：session MAC 密钥材料（显式覆盖） | **不上线**（`GetRequestHeader` 剥离所有 `x-bray-*`） | **通常不需要** |
+| `x-bray-session-uuid` | 本地控制：用 VLESS UUID 派生 MAC 密钥（多用户可逗号分隔） | **不上线** | 走 VLESS 时由配置链路注入即可 |
+| `x-bray-mode-degrade` / `x-bray-multi-endpoint` / sticky TTL 等 | 本地控制：级联、多落地、粘滞策略 | **不上线** | 高级场景 opt-in |
+| 默认回退 `bray-default-session-key` | 无 UUID、无显式 secret 时的零配置种子 | 不上线；仅用于本机派生 | 自动注入 |
+
+**和 UUID 的关系**：VLESS UUID 仍是代理层账号身份。Session MAC 是 **XHTTP 传输层** 对 `sessionId` 的签名，防止未认证客户端灌满服务端 session hub。Bray 默认从 **同一 VLESS UUID 派生** MAC 密钥，因此 **不必** 再手工配一份 `x-bray-session-secret`；仅在非 VLESS 或要对多入站强制统一密钥时才写显式 secret。
+
+**中间人能否看到 session secret？**  
+不能：secret 与 `x-bray-*` 控制头只在本机配置与进程内使用；线上只有已签名的 session 路径分量等，且外层通常还有 TLS/REALITY。
+
+---
+
 ## 客户端与替换内核
 
 | 平台 | 说明 |
 |------|------|
-| Windows | <del>[v2rayN（配套修改版已放弃维护）](https://github.com/Maolaohei/v2rayN) — 将编译产物替换到客户端 `bin/xray`（或对应内核目录）</del> |
-| Windows | [v2rayN（原版版）](https://github.com/2dust/v2rayN) — 将编译产物替换到客户端 `bin/xray`（或对应内核目录） |
+| Windows | [v2rayN（原版）](https://github.com/2dust/v2rayN) — 将编译产物替换到客户端 `bin/xray`（或对应内核目录）。**对端服务端须为 Bray-Core**。 |
 | Android | [v2rayNG（Bray-Core 内核发布）](https://github.com/Maolaohei/v2rayNG/releases) |
-| 通用 | 任意兼容 Xray 配置的客户端，均可替换为 Bray-Core 二进制 |
+| 通用 | 任意能换 Xray 二进制的客户端；**客户端与服务端都请使用本仓库构建** |
 
-服务端与客户端均可独立升级；仅当使用本仓库 REALITY 摊销等增强时，对应端需使用本内核及配套 REALITY 子模块版本。
+> 历史配套修改版 v2rayN 仓库不再作为默认推荐路径；以替换内核 + Bray 服务端为准。
 
 ---
 
@@ -134,31 +160,40 @@ sysctl -w net.core.wmem_max=16777216
 
 ---
 
-## 兼容性
+## 兼容性（Bray-only）
 
 | 场景 | 预期 |
 |------|------|
-| 上游 Xray 客户端 → Bray 服务端 | 协议兼容 |
-| Bray 客户端 → 上游 Xray 服务端 | 协议兼容 |
-| 配置 JSON / 分享链接 | 与上游字段兼容；未识别字段按实现忽略或报错策略与上游一致 |
+| **Bray 客户端 → Bray 服务端** | **支持（唯一正式保证）** |
+| 上游 Xray 客户端 → Bray 服务端 | **不保证**（session MAC、padding/指纹、XMUX 等可能拒绝或行为不一致） |
+| Bray 客户端 → 上游 Xray 服务端 | **不保证** |
+| 配置 JSON 外形 | 仍尽量沿用 Xray 字段，便于替换二进制；**语义以 Bray 为准** |
 | 平台 | Linux / Windows / macOS / Android 等 Go 支持的目标 |
 
-说明：传输层增强（XMUX 策略、REALITY L2 等）只影响本端行为；对端为上游实现时，连接仍按标准 REALITY / XHTTP 语义工作，但不会获得本端独有摊销或调度收益。
+若你仍持有仅上游内核的一端，请升级到 Bray-Core，或使用历史分支 `v1` 自行评估（`v1` 也不再接收大型行为变更）。
 
 ---
 
-## 近期可靠性相关变更（摘要）
+## 近期变更摘要
 
-下列项已合入主干，详细条目见 [CHANGELOG.md](CHANGELOG.md)：
+下列项已合入 `main`（细节见 [CHANGELOG.md](CHANGELOG.md) 与提交说明）：
 
-1. **HTTPS 证书串站（内核路径）**  
-   VLESS 保留 `OriginalDomain`；XMUX / H2 缓存按目的地身份隔离；MultiBuffer 所有权与 DNS 缓存记录生命周期修复，避免随机出现错误对端证书。
-2. **XHTTP H1 上传连接池**  
-   响应排空、致命错误判定、有界池，降低半死连接与上传抖动。
-3. **DNS**  
-   取消上下文噪声与缓存 UAF 类问题处理；双栈查询路径改进。
-4. **REALITY L2**  
-   子模块升级至 v0.5.5 摊销实现；默认 L2，证据与失败窗口约束下的 zero-dial。
+### 可靠性 / 安全（Bray-only）
+
+1. **HTTPS 证书串站**：`OriginalDomain`、MuxKey / H2 身份隔离、MultiBuffer 与 DNS 缓存生命周期。
+2. **XHTTP H1 上传池**：响应排空、致命错误判定、有界池。
+3. **Session MAC**：UUID 派生或显式 secret；拒绝未签名 session；`x-bray-*` 永不发送。
+4. **OpenStream / XMUX 防挂死**：header 等待超时累计 → MarkDead，降低「核无响应需重启」类卡死。
+5. **REALITY L2**：默认摊销 + 证据/失败窗口降级。
+
+### 性能（数据面，稳定优先）
+
+1. **packet-up window**：默认 12 / 上限 24，RTT 缩放，半缓冲硬顶。
+2. **packet-up chunk**：RTT 档位 256KB / 512KB / 满配置；不超服务器 `scMaxEachPostBytes`。
+3. **零分配 seq + 共享 header + 大包 padding 收缩**。
+4. **splitConn deadline**：Read/Write 中间缓冲 `bytespool` 复用。
+
+**未强行改动的取舍**：XMUX 选路大重构、REALITY 握手路径再抠微秒、服务端 body 所有权硬进 pool 等高回归风险项保持不动。
 
 本地 HTTPS 代理若叠加系统/浏览器 MITM（例如部分 DNS/广告拦截的 HTTPS 解密），会表现为独立 CA 签发的证书，属于链路外侧因素，与上述内核串站修复无关。
 
@@ -169,11 +204,14 @@ sysctl -w net.core.wmem_max=16777216
 | 文档 | 内容 |
 |------|------|
 | [CHANGELOG.md](CHANGELOG.md) | 版本与变更记录 |
+| [docs/README.md](docs/README.md) | 文档索引 |
+| [docs/bray-v2-full.md](docs/bray-v2-full.md) | Bray 完全体总览 |
+| [docs/presets/README.md](docs/presets/README.md) | 传输预设与控制头 |
 | [docs/architecture-connection-lifecycle.md](docs/architecture-connection-lifecycle.md) | XMUX / 连接生命周期架构 |
 | [SECURITY.md](SECURITY.md) | 安全策略 |
 | [REALITY](https://github.com/Maolaohei/REALITY) | 独立 REALITY 实现与发布 |
 
-问题反馈与讨论请使用本仓库 GitHub Issues。提交缺陷时请尽量附带：客户端/内核版本、传输组合（如 VLESS+XHTTP+REALITY）、XHTTP mode、是否可稳定复现、以及证书 CN/SAN 或服务端日志片段。
+问题反馈请使用本仓库 GitHub Issues。提交时请尽量附带：客户端/内核版本、传输组合（如 VLESS+XHTTP+REALITY）、XHTTP mode、是否可稳定复现、以及证书 CN/SAN 或服务端日志片段。
 
 ---
 
