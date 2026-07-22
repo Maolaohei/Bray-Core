@@ -180,6 +180,33 @@ func TestFormatSeqInt64(t *testing.T) {
 	}
 }
 
+func TestPacketUploadChunkSize(t *testing.T) {
+	const cfg int32 = 1000000
+	if got := packetUploadChunkSize(cfg, 0); got != cfg {
+		t.Fatalf("unknown rtt must keep configured: %d", got)
+	}
+	if got := packetUploadChunkSize(cfg, 10*time.Millisecond); got != packetUploadChunkLow {
+		t.Fatalf("low rtt=%d", got)
+	}
+	if got := packetUploadChunkSize(cfg, 50*time.Millisecond); got != packetUploadChunkLow {
+		t.Fatalf("mid-low rtt=%d", got)
+	}
+	if got := packetUploadChunkSize(cfg, 100*time.Millisecond); got != packetUploadChunkMid {
+		t.Fatalf("mid rtt=%d", got)
+	}
+	if got := packetUploadChunkSize(cfg, 250*time.Millisecond); got != cfg {
+		t.Fatalf("high rtt must use full ceiling: %d", got)
+	}
+	// Never exceed configured, even when floors are higher.
+	if got := packetUploadChunkSize(16*1024, 10*time.Millisecond); got != 16*1024 {
+		t.Fatalf("tiny config must win: %d", got)
+	}
+	// Server-side safety: negative/zero passthrough.
+	if got := packetUploadChunkSize(0, 100*time.Millisecond); got != 0 {
+		t.Fatalf("zero=%d", got)
+	}
+}
+
 func TestPacketUploadLaunchInterval(t *testing.T) {
 	if got := packetUploadLaunchIntervalMs(30, false, false); got != 30 {
 		t.Fatalf("idle=%d", got)

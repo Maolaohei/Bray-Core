@@ -280,3 +280,63 @@ func TestSplitConnCloseNilWriterAndReader(t *testing.T) {
 		t.Fatal("onClose not called")
 	}
 }
+
+
+func TestSplitConnWriteDeadlineTimesOut(t *testing.T) {
+	// Unbuffered pipe: write with short deadline should time out while peer
+	// is not reading, then succeed after clearing deadline and draining.
+	r, w := io.Pipe()
+	defer w.Close()
+	defer r.Close()
+
+	conn := &splitConn{reader: r, writer: w}
+	if err := conn.SetWriteDeadline(time.Now().Add(40 * time.Millisecond)); err != nil {
+		t.Fatalf("SetWriteDeadline: %v", err)
+	}
+
+	// Drain only after the deadline path has been exercised.
+	startDrain := make(chan struct{})
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		<-startDrain
+		buf := make([]byte, 64*1024)
+		for {
+			_, err := r.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	start := time.Now()
+	_, err := conn.Write(make([]byte, 64*1024))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Log("write completed before deadline; skip timeout assert")
+	} else {
+		ne, ok := err.(net.Error)
+		if !ok || !ne.Timeout() {
+			t.Fatalf("err=%v type=%T want net.Error Timeout", err, err)
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Fatalf("timeout took %v", elapsed)
+		}
+	}
+
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear deadline: %v", err)
+	}
+	close(startDrain)
+
+	// Completes timed-out in-flight write (if any), then accepts a new one.
+	if _, err := conn.Write([]byte("ok")); err != nil {
+		t.Fatalf("write after timeout path: %v", err)
+	}
+	_ = w.Close()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain goroutine stuck")
+	}
+}

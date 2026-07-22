@@ -159,6 +159,55 @@ func packetUploadWindow(scMaxBufferedPosts int, rtt time.Duration) int {
 	return w
 }
 
+// packet-up chunk floors/caps. Always clamped by configured scMaxEachPostBytes.
+// Low RTT: smaller chunks cut TTFB and memory per in-flight POST.
+// High RTT: larger chunks fill BDP with the existing window.
+const (
+	packetUploadChunkMin   int32 = 32 * 1024
+	packetUploadChunkLow   int32 = 256 * 1024
+	packetUploadChunkMid   int32 = 512 * 1024
+)
+
+// packetUploadChunkSize chooses an effective max POST body size.
+// configuredMax is the operator/config ceiling (must never be exceeded).
+// rtt==0 keeps configuredMax so cold starts stay compatible.
+func packetUploadChunkSize(configuredMax int32, rtt time.Duration) int32 {
+	if configuredMax <= 0 {
+		return configuredMax
+	}
+	target := configuredMax
+	switch {
+	case rtt <= 0:
+		// Unknown RTT: honor config ceiling (stable default).
+		return configuredMax
+	case rtt >= 200*time.Millisecond:
+		target = configuredMax
+	case rtt >= 80*time.Millisecond:
+		if configuredMax > packetUploadChunkMid {
+			target = packetUploadChunkMid
+		}
+	case rtt >= 20*time.Millisecond:
+		if configuredMax > packetUploadChunkLow {
+			target = packetUploadChunkLow
+		}
+	default:
+		// Very low RTT: keep medium posts for fewer round-trips than tiny chunks.
+		if configuredMax > packetUploadChunkLow {
+			target = packetUploadChunkLow
+		}
+	}
+	if target < packetUploadChunkMin && configuredMax >= packetUploadChunkMin {
+		target = packetUploadChunkMin
+	}
+	if target > configuredMax {
+		target = configuredMax
+	}
+	if target < 1 {
+		target = 1
+	}
+	return target
+}
+
 // packetUploadLaunchIntervalMs returns how long to wait before launching the
 // next POST. Configured pacing is kept for small/idle writes (camouflage);
 // when more data is already queued (backlog / full-size chunk), skip pacing

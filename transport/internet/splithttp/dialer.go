@@ -1106,7 +1106,15 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			xmuxClient.LeftRequests.Add(-1)
 		}
 
-		maxUploadSize := scMaxEachPostBytes.rand()
+		// Seed RTT once for both chunk size and in-flight window.
+		// rtt==0 => keep configured post size + default window (cold start safe).
+		var seedRTT time.Duration
+		if xmuxClient != nil {
+			seedRTT = xmuxClient.GetRTT()
+		}
+		configuredMax := scMaxEachPostBytes.rand()
+		// Bray-only: RTT-aware chunk, hard-capped by scMaxEachPostBytes (server max).
+		maxUploadSize := packetUploadChunkSize(configuredMax, seedRTT)
 		uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(max(0, maxUploadSize-buf.Size)))
 
 		// Pre-compute URL string once to avoid per-packet allocation in upload loop.
@@ -1117,15 +1125,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			maxUploadSize,
 		}
 
-		// Reliable packet-up: limited in-flight window (default 8, RTT-scaled).
+		// Reliable packet-up: limited in-flight window (RTT-scaled, half-buffer capped).
 		// Seq is assigned at launch so concurrent POSTs stay contiguous; each
 		// POST still retries the same seq on transient failure. Server
 		// upload_queue reorders by seq (scMaxBufferedPosts).
-		// Seed window from XMUX RTT when available (0 keeps default 8).
-		var seedRTT time.Duration
-		if xmuxClient != nil {
-			seedRTT = xmuxClient.GetRTT()
-		}
 		uploadWindow := packetUploadWindow(transportConfiguration.GetNormalizedScMaxBufferedPosts(), seedRTT)
 		go func() {
 			var seq int64

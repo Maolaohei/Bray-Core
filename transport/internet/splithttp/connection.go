@@ -5,6 +5,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/xtls/xray-core/common/bytespool"
 )
 
 // timeoutError is returned when a splitConn deadline elapses. It implements
@@ -21,6 +23,23 @@ type ioResult struct {
 	n    int
 	err  error
 	data []byte
+	// pooled is the full deadline buffer backing data (or write snapshot).
+	// Freed only after the in-flight op is fully consumed by the caller.
+	pooled []byte
+}
+
+func freeIOResult(r ioResult) {
+	if r.pooled != nil {
+		bytespool.Free(r.pooled[:cap(r.pooled)])
+	}
+}
+
+func allocDeadlineBuf(n int) []byte {
+	if n <= 0 {
+		return nil
+	}
+	b := bytespool.Alloc(int32(n))
+	return b[:n]
 }
 
 type splitConn struct {
@@ -72,18 +91,20 @@ func (c *splitConn) Write(b []byte) (int, error) {
 	}
 
 	// Copy so the caller's buffer is not raced if we time out mid-write.
-	payload := make([]byte, len(b))
+	// bytespool-backed; freed only after Write completes (or result is taken).
+	payload := allocDeadlineBuf(len(b))
 	copy(payload, b)
 	ch := make(chan ioResult, 1)
 	go func() {
 		n, err := c.writer.Write(payload)
-		ch <- ioResult{n: n, err: err}
+		ch <- ioResult{n: n, err: err, pooled: payload}
 	}()
 
 	timer := time.NewTimer(rem)
 	defer timer.Stop()
 	select {
 	case r := <-ch:
+		freeIOResult(r)
 		return r.n, r.err
 	case <-timer.C:
 		c.pendingWrite = ch
@@ -111,6 +132,7 @@ func (c *splitConn) awaitWrite(b []byte) (int, error) {
 	select {
 	case r := <-ch:
 		c.pendingWrite = nil
+		freeIOResult(r)
 		// Prior write completed; report that result (do not re-write b).
 		return r.n, r.err
 	case <-timeout:
@@ -146,15 +168,16 @@ func (c *splitConn) Read(b []byte) (int, error) {
 	}
 
 	// Intermediate buffer: on timeout the in-flight Read must not write into b.
-	buf := make([]byte, len(b))
+	raw := allocDeadlineBuf(len(b))
 	ch := make(chan ioResult, 1)
 	go func() {
-		n, err := c.reader.Read(buf)
+		n, err := c.reader.Read(raw)
 		var data []byte
 		if n > 0 {
-			data = buf[:n]
+			data = raw[:n]
 		}
-		ch <- ioResult{n: n, err: err, data: data}
+		// Always keep pooled until the result is fully delivered to the caller.
+		ch <- ioResult{n: n, err: err, data: data, pooled: raw}
 	}()
 
 	timer := time.NewTimer(rem)
@@ -164,6 +187,7 @@ func (c *splitConn) Read(b []byte) (int, error) {
 		if r.n > 0 {
 			copy(b, r.data)
 		}
+		freeIOResult(r)
 		return r.n, r.err
 	case <-timer.C:
 		c.pendingRead = ch
@@ -194,13 +218,15 @@ func (c *splitConn) awaitRead(b []byte) (int, error) {
 		if r.n > 0 {
 			n := copy(b, r.data)
 			if n < r.n {
-				// Caller buffer smaller than pending; re-park remainder.
+				// Caller buffer smaller than pending; re-park remainder with
+				// the same pooled backing buffer (freed only when fully drained).
 				rest := make(chan ioResult, 1)
-				rest <- ioResult{n: r.n - n, err: r.err, data: r.data[n:]}
+				rest <- ioResult{n: r.n - n, err: r.err, data: r.data[n:], pooled: r.pooled}
 				c.pendingRead = rest
 				return n, nil
 			}
 		}
+		freeIOResult(r)
 		return r.n, r.err
 	case <-timeout:
 		return 0, errTimeout
