@@ -1490,7 +1490,6 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 	return nil, lastErr
 }
 
-
 // xmuxClientReusable reports whether a client may be scheduled by GetXmuxClient.
 // Closed / exhausted / past UnreusableAt clients are skipped (pruned by health later).
 func xmuxClientReusable(c *XmuxClient, nowWall time.Time) bool {
@@ -1533,6 +1532,7 @@ func underOverAdmitCap(c *XmuxClient, effectiveConc int32) bool {
 	}
 	return c.activeStreams.Load() < capN
 }
+
 // scoreClient computes a scheduling score for a connection.
 // Lower score = better candidate.
 //

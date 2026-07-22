@@ -103,7 +103,7 @@ func TestSessionAuth_UUIDDerived(t *testing.T) {
 	}
 	// Explicit secret still wins over UUID seed
 	mixed := &Config{Headers: map[string]string{
-		BraySessionUUIDHeader:  uuidA,
+		BraySessionUUIDHeader:   uuidA,
 		BraySessionSecretHeader: "override",
 	}}
 	idMixed := mixed.GenerateSessionID()
