@@ -69,10 +69,17 @@ func TestDokodemoTCP(t *testing.T) {
 	common.Must(err)
 	defer CloseServer(server)
 
-	clientPortRange := uint32(5)
-	retry := 1
-	clientPort := uint32(tcp.PickPort())
-	for {
+	// Port range is inclusive (From..To). Pick a contiguous free block rather
+	// than assuming PickPort()+N are free; always close failed client procs.
+	const clientPortCount = 6 // range value 5 => 6 ports inclusive
+	clientPortRange := uint32(clientPortCount - 1)
+	var clientPort uint32
+	for retry := 1; ; retry++ {
+		base, err := pickFreeTCPPortRange(clientPortCount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clientPort = uint32(base)
 		clientConfig := &core.Config{
 			App: []*serial.TypedMessage{
 				serial.ToTypedMessage(&log.Config{
@@ -110,16 +117,17 @@ func TestDokodemoTCP(t *testing.T) {
 			},
 		}
 
-		server, _ := InitializeServerConfig(clientConfig)
-		if server != nil && WaitConnAvailableWithTest(t, testTCPConn(net.Port(clientPort), 1024, time.Second*2)) {
-			defer CloseServer(server)
+		client, _ := InitializeServerConfig(clientConfig)
+		if client != nil && WaitConnAvailableWithTest(t, testTCPConn(net.Port(clientPort), 1024, time.Second*2)) {
+			defer CloseServer(client)
 			break
 		}
-		retry++
-		if retry > 5 {
+		if client != nil {
+			CloseServer(client)
+		}
+		if retry >= 5 {
 			t.Fatal("All attempts failed to start client")
 		}
-		clientPort = uint32(tcp.PickPort())
 	}
 
 	for port := clientPort; port <= clientPort+clientPortRange; port++ {
@@ -169,10 +177,15 @@ func TestDokodemoUDP(t *testing.T) {
 	common.Must(err)
 	defer CloseServer(server)
 
-	clientPortRange := uint32(3)
-	retry := 1
-	clientPort := uint32(udp.PickPort())
-	for {
+	const clientPortCount = 4 // range value 3 => 4 ports inclusive
+	clientPortRange := uint32(clientPortCount - 1)
+	var clientPort uint32
+	for retry := 1; ; retry++ {
+		base, err := pickFreeUDPPortRange(clientPortCount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clientPort = uint32(base)
 		clientConfig := &core.Config{
 			Inbound: []*core.InboundHandlerConfig{
 				{
@@ -204,16 +217,17 @@ func TestDokodemoUDP(t *testing.T) {
 			},
 		}
 
-		server, _ := InitializeServerConfig(clientConfig)
-		if server != nil && WaitConnAvailableWithTest(t, testUDPConn(net.Port(clientPort), 1024, time.Second*2)) {
-			defer CloseServer(server)
+		client, _ := InitializeServerConfig(clientConfig)
+		if client != nil && WaitConnAvailableWithTest(t, testUDPConn(net.Port(clientPort), 1024, time.Second*2)) {
+			defer CloseServer(client)
 			break
 		}
-		retry++
-		if retry > 5 {
+		if client != nil {
+			CloseServer(client)
+		}
+		if retry >= 5 {
 			t.Fatal("All attempts failed to start client")
 		}
-		clientPort = uint32(udp.PickPort())
 	}
 
 	var errg errgroup.Group

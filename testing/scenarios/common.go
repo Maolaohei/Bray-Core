@@ -283,8 +283,9 @@ func testTCPConn2(conn net.Conn, payloadSize int, timeout time.Duration) func() 
 func WaitConnAvailableWithTest(t *testing.T, testFunc func() error) bool {
 	// Windows CI runners are slower to bind/accept after process start, and
 	// Hyper-V excluded port ranges make first attempts fail more often.
-	maxAttempts := 10
-	sleep := 10 * time.Millisecond
+	// Linux/macOS GitHub runners also need headroom under parallel packages.
+	maxAttempts := 20
+	sleep := 25 * time.Millisecond
 	if runtime.GOOS == "windows" {
 		maxAttempts = 30
 		sleep = 50 * time.Millisecond
@@ -336,4 +337,82 @@ func isBenignPreAuthDialError(err error) bool {
 	// machine actively refused it." / Unix: "connection refused".
 	return strings.Contains(s, "actively refused") ||
 		strings.Contains(s, "connection refused")
+}
+
+// pickFreeTCPPortRange returns a contiguous block of free TCP ports on
+// 127.0.0.1 of length count (inclusive From..To = From+count-1). A single
+// PickPort() only proves one free port; dokodemo multi-port inbounds need the
+// whole range free or the xray subprocess binds partially and probes refuse.
+func pickFreeTCPPortRange(count int) (net.Port, error) {
+	if count < 1 {
+		count = 1
+	}
+	const attempts = 64
+	for i := 0; i < attempts; i++ {
+		base := tcpPickPort()
+		from := int(base)
+		listeners := make([]net.Listener, 0, count)
+		ok := true
+		for off := 0; off < count; off++ {
+			ln, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", from+off))
+			if err != nil {
+				ok = false
+				break
+			}
+			listeners = append(listeners, ln)
+		}
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
+		if ok {
+			return net.Port(from), nil
+		}
+	}
+	return 0, errors.New("unable to pick free TCP port range of size ", count)
+}
+
+// pickFreeUDPPortRange is the UDP counterpart of pickFreeTCPPortRange.
+func pickFreeUDPPortRange(count int) (net.Port, error) {
+	if count < 1 {
+		count = 1
+	}
+	const attempts = 64
+	for i := 0; i < attempts; i++ {
+		base := udpPickPort()
+		from := int(base)
+		conns := make([]*net.UDPConn, 0, count)
+		ok := true
+		for off := 0; off < count; off++ {
+			c, err := net.ListenUDP("udp4", &net.UDPAddr{
+				IP:   []byte{127, 0, 0, 1},
+				Port: from + off,
+			})
+			if err != nil {
+				ok = false
+				break
+			}
+			conns = append(conns, c)
+		}
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		if ok {
+			return net.Port(from), nil
+		}
+	}
+	return 0, errors.New("unable to pick free UDP port range of size ", count)
+}
+
+func tcpPickPort() net.Port {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	common.Must(err)
+	defer listener.Close()
+	return net.Port(listener.Addr().(*net.TCPAddr).Port)
+}
+
+func udpPickPort() net.Port {
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: []byte{127, 0, 0, 1}, Port: 0})
+	common.Must(err)
+	defer c.Close()
+	return net.Port(c.LocalAddr().(*net.UDPAddr).Port)
 }

@@ -227,7 +227,11 @@ func TestSocksBridageUDP(t *testing.T) {
 		}
 
 		server, _ := InitializeServerConfig(serverConfig)
-		if server != nil && WaitConnAvailableWithTest(t, testUDPConn(dokodemoPort, 1024, time.Second*2)) {
+		// Require both SOCKS TCP and dokodemo UDP to be ready; otherwise the
+		// client bridge can race a half-started server under CI load.
+		if server != nil &&
+			waitTCPListening(serverPort, 2*time.Second) &&
+			WaitConnAvailableWithTest(t, testUDPConn(dokodemoPort, 1024, time.Second*2)) {
 			defer CloseServer(server)
 			break
 		}
@@ -280,7 +284,7 @@ func TestSocksBridageUDP(t *testing.T) {
 	defer CloseServer(server)
 
 	if !WaitConnAvailableWithTest(t, testUDPConn(clientPort, 1024, time.Second*2)) {
-		t.Fail()
+		t.Fatal("client UDP bridge not ready")
 	}
 }
 
@@ -347,7 +351,9 @@ func TestSocksBridageUDPWithRouting(t *testing.T) {
 		}
 
 		server, _ := InitializeServerConfig(serverConfig)
-		if server != nil && WaitConnAvailableWithTest(t, testUDPConn(dokodemoPort, 1024, time.Second*2)) {
+		if server != nil &&
+			waitTCPListening(serverPort, 2*time.Second) &&
+			WaitConnAvailableWithTest(t, testUDPConn(dokodemoPort, 1024, time.Second*2)) {
 			defer CloseServer(server)
 			break
 		}
@@ -394,7 +400,7 @@ func TestSocksBridageUDPWithRouting(t *testing.T) {
 	defer CloseServer(server)
 
 	if !WaitConnAvailableWithTest(t, testUDPConn(clientPort, 1024, time.Second*2)) {
-		t.Fail()
+		t.Fatal("client UDP bridge not ready")
 	}
 }
 
