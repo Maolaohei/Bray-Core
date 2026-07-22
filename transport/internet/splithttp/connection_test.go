@@ -281,7 +281,6 @@ func TestSplitConnCloseNilWriterAndReader(t *testing.T) {
 	}
 }
 
-
 func TestSplitConnWriteDeadlineTimesOut(t *testing.T) {
 	// Unbuffered pipe: write with short deadline should time out while peer
 	// is not reading, then succeed after clearing deadline and draining.

@@ -163,9 +163,9 @@ func packetUploadWindow(scMaxBufferedPosts int, rtt time.Duration) int {
 // Low RTT: smaller chunks cut TTFB and memory per in-flight POST.
 // High RTT: larger chunks fill BDP with the existing window.
 const (
-	packetUploadChunkMin   int32 = 32 * 1024
-	packetUploadChunkLow   int32 = 256 * 1024
-	packetUploadChunkMid   int32 = 512 * 1024
+	packetUploadChunkMin int32 = 32 * 1024
+	packetUploadChunkLow int32 = 256 * 1024
+	packetUploadChunkMid int32 = 512 * 1024
 )
 
 // packetUploadChunkSize chooses an effective max POST body size.
