@@ -16,7 +16,7 @@ func TestMetricsOutput(t *testing.T) {
 	}
 
 	var callCount atomic.Int32
-	m := NewXmuxManager(xmuxConfig, func() XmuxConn {
+	m := NewXmuxManager(&xmuxConfig, func() XmuxConn {
 		id := callCount.Add(1)
 		return &mockConn{id: int(id)}
 	})

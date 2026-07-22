@@ -47,6 +47,18 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 		minClientVer = []byte{26, 3, 27}
 	}
 
+	// Replay protection: the REALITY library already treats an unset (0)
+	// MaxTimeDiff as 90s but emits a startup WARNING and leaves the window
+	// implicit. Set the same 90s here explicitly so logs stay clean and the
+	// anti-replay window is deterministic. This is behavior-neutral versus the
+	// library default (same accept/reject decision). The Bray config field is an
+	// unsigned millisecond count, so operators tune the window with a positive
+	// value; 0 always means the 90s default.
+	maxTimeDiff := time.Duration(c.MaxTimeDiff) * time.Millisecond
+	if c.MaxTimeDiff == 0 {
+		maxTimeDiff = 90 * time.Second
+	}
+
 	config := &reality.Config{
 		DialContext: dialer.DialContext,
 
@@ -58,7 +70,7 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 		PrivateKey:   c.PrivateKey,
 		MinClientVer: minClientVer,
 		MaxClientVer: c.MaxClientVer,
-		MaxTimeDiff:  time.Duration(c.MaxTimeDiff) * time.Millisecond,
+		MaxTimeDiff:  maxTimeDiff,
 
 		NextProtos:             nil, // should be nil
 		SessionTicketsDisabled: true,

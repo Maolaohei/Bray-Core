@@ -180,6 +180,15 @@ var tokenishCache struct {
 
 func init() {
 	tokenishCache.items = make(map[int]string)
+	// Small-length band (<32): AdaptivePaddingRange shrinks padding for small
+	// payloads down to ~10 bytes, and RangeConfig.rand can pick any integer in
+	// that band. Pre-cache these hot lengths so they skip the per-request
+	// huffman-adjust loop. Cached content is deterministic per length, which is
+	// safe: padding lives inside the TLS/REALITY tunnel, so only its wire length
+	// (not its bytes) is observable — same as the multiples-of-32 band below.
+	for huffmanLen := 1; huffmanLen < 32; huffmanLen++ {
+		tokenishCache.items[huffmanLen] = generateTokenishPaddingBase62Raw(huffmanLen)
+	}
 	for i := 0; i < 32; i++ {
 		huffmanLen := 32 + i*32
 		s := generateTokenishPaddingBase62Raw(huffmanLen)
@@ -283,7 +292,10 @@ func GeneratePadding(method PaddingMethod, length int) string {
 	case PaddingMethodRepeatX:
 		return generateRepeatX(length)
 	case PaddingMethodTokenish:
-		if length >= 32 && length <= 1024 && (length-32)%32 == 0 {
+		// Fast-path the cached bands: the small-length band (<32) and the
+		// multiples-of-32 band up to 1024 are pre-generated in init.
+		if (length >= 1 && length < 32) ||
+			(length >= 32 && length <= 1024 && (length-32)%32 == 0) {
 			return getOrGenTokenish(length)
 		}
 		paddingValue := generateTokenishPaddingBase62Raw(length)

@@ -21,7 +21,7 @@ func TestMaxConnections(t *testing.T) {
 		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}
 
-	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
+	xmuxManager := NewXmuxManager(&xmuxConfig, func() XmuxConn {
 		return &fakeRoundTripper{}
 	})
 	defer xmuxManager.Close()
@@ -53,7 +53,7 @@ func TestCMaxReuseTimes(t *testing.T) {
 		CMaxReuseTimes: &RangeConfig{From: 2, To: 2},
 	}
 
-	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
+	xmuxManager := NewXmuxManager(&xmuxConfig, func() XmuxConn {
 		return &fakeRoundTripper{}
 	})
 
@@ -84,7 +84,7 @@ func TestMaxConcurrency(t *testing.T) {
 		MaxConnections: &RangeConfig{From: 0, To: 0},
 	}
 
-	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
+	xmuxManager := NewXmuxManager(&xmuxConfig, func() XmuxConn {
 		return &fakeRoundTripper{}
 	})
 	defer xmuxManager.Close()
@@ -107,7 +107,7 @@ func TestDefault(t *testing.T) {
 	// Soft-expand is now capped at burst (min(16, max(steady*2, steady+2))).
 	xmuxConfig := XmuxConfig{}
 
-	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
+	xmuxManager := NewXmuxManager(&xmuxConfig, func() XmuxConn {
 		return &fakeRoundTripper{}
 	})
 	defer xmuxManager.Close()
@@ -135,7 +135,7 @@ func TestBurstCapOverAdmit(t *testing.T) {
 		MaxConnections: &RangeConfig{From: 2, To: 2},
 	}
 	var created atomic.Int32
-	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
+	xmuxManager := NewXmuxManager(&xmuxConfig, func() XmuxConn {
 		created.Add(1)
 		return &fakeRoundTripper{}
 	})
@@ -172,7 +172,7 @@ func TestConcurrentPoolAccess(t *testing.T) {
 	}
 
 	var connCount atomic.Int32
-	xmuxManager := NewXmuxManager(xmuxConfig, func() XmuxConn {
+	xmuxManager := NewXmuxManager(&xmuxConfig, func() XmuxConn {
 		connCount.Add(1)
 		return &fakeRoundTripper{}
 	})

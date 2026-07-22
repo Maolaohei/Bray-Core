@@ -386,7 +386,7 @@ func (c *XmuxClient) StopProfilingLocked() {
 }
 
 type XmuxManager struct {
-	xmuxConfig   XmuxConfig
+	xmuxConfig   *XmuxConfig
 	concurrency  int32 // base concurrency (from config)
 	connections  int32 // base connections (from config)
 	newConnFunc  func() XmuxConn
@@ -435,7 +435,13 @@ type XmuxManager struct {
 // NewXmuxManager creates a manager and starts background pool loops.
 // Optional probeURL is the HEAD probe target for real dial warm-up; pass it
 // at construction time so preConnectLoop never races a later field write.
-func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn, probeURL ...string) *XmuxManager {
+//
+// xmuxConfig is held by pointer (protobuf messages carry an internal mutex and
+// must never be copied by value). A nil config is treated as all-defaults.
+func NewXmuxManager(xmuxConfig *XmuxConfig, newConnFunc func() XmuxConn, probeURL ...string) *XmuxManager {
+	if xmuxConfig == nil {
+		xmuxConfig = &XmuxConfig{}
+	}
 	probe := ""
 	if len(probeURL) > 0 {
 		probe = probeURL[0]

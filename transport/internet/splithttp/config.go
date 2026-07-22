@@ -292,13 +292,19 @@ func (c *Config) GetRequestCookiesWithPayload(payload []byte) []*http.Cookie {
 }
 
 func (c *Config) WriteResponseHeader(writer http.ResponseWriter, requestMethod string, requestHeader http.Header) {
-	// CORS headers for the browser dialer
-	if origin := requestHeader.Get("Origin"); origin == "" {
-		writer.Header().Set("Access-Control-Allow-Origin", "*")
-	} else {
-		// Chrome says: The value of the 'Access-Control-Allow-Origin' header in the response must not be the wildcard '*' when the request's credentials mode is 'include'.
-		writer.Header().Set("Access-Control-Allow-Origin", origin)
+	// Only emit CORS headers when the request actually carries an Origin (a real
+	// cross-origin browser request via the browser dialer). Non-browser clients
+	// never inspect CORS, and a real static origin / CDN would not stamp an
+	// unconditional "Access-Control-Allow-Origin: *" onto every response — doing
+	// so is a constant, camouflage-breaking fingerprint. Stay silent otherwise.
+	origin := requestHeader.Get("Origin")
+	if origin == "" {
+		return
 	}
+
+	// Chrome says: The value of the 'Access-Control-Allow-Origin' header in the response must not be the wildcard '*' when the request's credentials mode is 'include'.
+	// Echo the request Origin instead of the wildcard.
+	writer.Header().Set("Access-Control-Allow-Origin", origin)
 
 	if c.GetNormalizedSessionPlacement() == PlacementCookie ||
 		c.GetNormalizedSeqPlacement() == PlacementCookie ||

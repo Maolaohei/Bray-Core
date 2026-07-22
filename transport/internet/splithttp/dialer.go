@@ -177,10 +177,9 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	if !found {
 		transportConfig := streamSettings.ProtocolSettings.(*Config)
-		var xmuxConfig XmuxConfig
-		if transportConfig.Xmux != nil {
-			xmuxConfig = *transportConfig.Xmux
-		}
+		// Share the proto by pointer; never copy it by value (it carries an
+		// internal mutex). Nil means all-defaults, handled by NewXmuxManager.
+		xmuxConfig := transportConfig.Xmux
 
 		// Build probe URL before starting XmuxManager background loops so
 		// preConnectLoop/newXmuxClient never race a later probeURL write.
