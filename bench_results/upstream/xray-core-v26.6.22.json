@@ -1,0 +1,145 @@
+{
+  "label": "Xray-core v26.6.22 (local i5-13600KF Windows amd64, 2026-06-24)",
+  "source": "bench_results/COMPARISON_REPORT.md historical snapshot",
+  "note": "Fixed external reference. CI self-baseline is separate (bench_results/base_*.txt). Positive delta vs upstream means Bray better (lower ns/op or higher MB/s).",
+  "metrics": {
+    "NewBuffer": {
+      "unit": "ns/op",
+      "value": 47.15,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "NewBufferStack": {
+      "unit": "ns/op",
+      "value": 30.06,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "Write2": {
+      "unit": "ns/op",
+      "value": 1.52,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "Write8": {
+      "unit": "ns/op",
+      "value": 1.814,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "Write32": {
+      "unit": "ns/op",
+      "value": 1.834,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "WriteByte2": {
+      "unit": "ns/op",
+      "value": 1.146,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "WriteByte8": {
+      "unit": "ns/op",
+      "value": 4.18,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "Copy": {
+      "unit": "ns/op",
+      "value": 98.13,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "SplitBytes": {
+      "unit": "ns/op",
+      "value": 159.4,
+      "higher_is_better": false,
+      "suite_hint": "buf"
+    },
+    "ChaCha20": {
+      "unit": "MB/s",
+      "value": 625.0,
+      "higher_is_better": true,
+      "suite_hint": "crypto"
+    },
+    "ChaCha20IETF": {
+      "unit": "MB/s",
+      "value": 624.0,
+      "higher_is_better": true,
+      "suite_hint": "crypto"
+    },
+    "AESEncryption": {
+      "unit": "MB/s",
+      "value": 1006.0,
+      "higher_is_better": true,
+      "suite_hint": "crypto"
+    },
+    "AESDecryption": {
+      "unit": "MB/s",
+      "value": 1148.0,
+      "higher_is_better": true,
+      "suite_hint": "crypto"
+    },
+    "Roll1": {
+      "unit": "ns/op",
+      "value": 0.102,
+      "higher_is_better": false,
+      "suite_hint": "dice"
+    },
+    "Roll20": {
+      "unit": "ns/op",
+      "value": 6.28,
+      "higher_is_better": false,
+      "suite_hint": "dice"
+    },
+    "Intn1": {
+      "unit": "ns/op",
+      "value": 6.48,
+      "higher_is_better": false,
+      "suite_hint": "dice"
+    },
+    "Intn20": {
+      "unit": "ns/op",
+      "value": 6.29,
+      "higher_is_better": false,
+      "suite_hint": "dice"
+    },
+    "Int63": {
+      "unit": "ns/op",
+      "value": 5.21,
+      "higher_is_better": false,
+      "suite_hint": "dice"
+    },
+    "Int31": {
+      "unit": "ns/op",
+      "value": 5.03,
+      "higher_is_better": false,
+      "suite_hint": "dice"
+    },
+    "ReadUint16": {
+      "unit": "ns/op",
+      "value": 11.12,
+      "higher_is_better": false,
+      "suite_hint": "serial"
+    },
+    "WriteUint64": {
+      "unit": "ns/op",
+      "value": 9.19,
+      "higher_is_better": false,
+      "suite_hint": "serial"
+    },
+    "Concat": {
+      "unit": "ns/op",
+      "value": 59.65,
+      "higher_is_better": false,
+      "suite_hint": "serial"
+    },
+    "FrameWrite": {
+      "unit": "ns/op",
+      "value": 47.93,
+      "higher_is_better": false,
+      "suite_hint": "mux"
+    }
+  }
+}

@@ -1,146 +1,167 @@
-# Bray-Core Benchmark Comparison Report (2026-06-24)
+# Bray-Core Benchmark Comparison Report
 
-**Test Environment**: i5-13600KF, Windows, amd64, Go 1.26  
-**Baseline**: Xray-core v26.6.22 | **Bray-Core**: v26.6.22 (upstream synced)
+**Last human snapshot**: 2026-06-24 · **Environment**: i5-13600KF, Windows amd64, Go 1.26  
+**Baseline label**: Xray-core / Bray-Core **v26.6.22** (pre Bray-only packet-up wave)
+
+> CI 每次 push/PR 会生成新的表格报告（`bench_results/report.md` + `summary.svg`）。  
+> 本文件保留**可对比的历史快照**；无法在同配置下复现的旧吞吐数字已标注为 **not comparable**。
+
+**图例**
+
+| Trend | 含义 |
+|-------|------|
+| 🟢 | improved（延迟更低 / 吞吐更高，≥3%） |
+| ⚪ | stable（±3% 噪声带） |
+| 🔴 | slower（≥3%） |
+| 🆕 | 无 baseline / 首次观测 |
+
+**Delta 约定**：`Delta` **为正 = 更好**。
 
 ---
 
 ## 1. Common Modules: Bray vs Upstream Xray-core
 
-| Benchmark | Upstream (ns/op) | Run 1 (ns/op) | Run 2 (ns/op) | Delta vs Upstream | Trend |
-|-----------|-----------------|--------------|--------------|-------------------|-------|
+| Benchmark | Upstream | Run1 | Run2 | Delta vs Upstream | Trend |
+|-----------|---------:|-----:|-----:|------------------:|-------|
 | **common/buf** | | | | | |
-| NewBuffer | 47.15 | 40.27 | 43.13 | **-8.5%** | stable |
-| NewBufferStack | 30.06 | 25.78 | 28.16 | **-6.3%** | stable |
-| Write2 | 1.520 | 1.507 | 1.525 | ~0 | stable |
-| Write8 | 1.814 | 1.805 | 1.817 | ~0 | stable |
-| Write32 | 1.834 | 1.826 | 1.813 | ~0 | stable |
-| WriteByte2 | 1.146 | 1.141 | 1.140 | ~0 | stable |
-| WriteByte8 | 4.180 | 4.185 | 4.114 | ~0 | stable |
-| Copy | 98.13 | 93.59 | 90.71 | **-7.6%** | **improved** |
-| SplitBytes | 159.4 | 169.7 | 156.0 | -2.1% | **improved** |
+| `NewBuffer` | 47.15 ns/op | 40.27 | 43.13 | **+8.5%** | 🟢 |
+| `NewBufferStack` | 30.06 ns/op | 25.78 | 28.16 | **+6.3%** | 🟢 |
+| `Write2` | 1.520 ns/op | 1.507 | 1.525 | ~0 | ⚪ |
+| `Write8` | 1.814 ns/op | 1.805 | 1.817 | ~0 | ⚪ |
+| `Write32` | 1.834 ns/op | 1.826 | 1.813 | ~0 | ⚪ |
+| `WriteByte2` | 1.146 ns/op | 1.141 | 1.140 | ~0 | ⚪ |
+| `WriteByte8` | 4.180 ns/op | 4.185 | 4.114 | ~0 | ⚪ |
+| `Copy` | 98.13 ns/op | 93.59 | 90.71 | **+7.6%** | 🟢 |
+| `SplitBytes` | 159.4 ns/op | 169.7 | 156.0 | +2.1% | ⚪ |
 | **common/crypto** | | | | | |
-| ChaCha20 | 625 MB/s | 624 MB/s | 598 MB/s | ~0 | stable |
-| ChaCha20IETF | 624 MB/s | 619 MB/s | 605 MB/s | ~0 | stable |
-| AES Encryption | 1006 MB/s | 1008 MB/s | 1004 MB/s | ~0 | stable |
-| AES Decryption | 1148 MB/s | 1151 MB/s | 1141 MB/s | ~0 | stable |
+| `ChaCha20` | 625 MB/s | 624 | 598 | ~0 | ⚪ |
+| `ChaCha20IETF` | 624 MB/s | 619 | 605 | ~0 | ⚪ |
+| `AES Encryption` | 1006 MB/s | 1008 | 1004 | ~0 | ⚪ |
+| `AES Decryption` | 1148 MB/s | 1151 | 1141 | ~0 | ⚪ |
 | **common/dice** | | | | | |
-| Roll1 | 0.102 | 0.102 | 0.109 | ~0 | stable |
-| Roll20 | 6.28 | 6.29 | 6.46 | ~0 | stable |
-| Intn1 | 6.48 | 6.47 | 6.53 | ~0 | stable |
-| Intn20 | 6.29 | 6.29 | 6.30 | ~0 | stable |
-| Int63 | 5.21 | 5.20 | 5.17 | ~0 | stable |
-| Int31 | 5.03 | 5.03 | 5.03 | ~0 | stable |
+| `Roll1` | 0.102 ns/op | 0.102 | 0.109 | ~0 | ⚪ |
+| `Roll20` | 6.28 ns/op | 6.29 | 6.46 | ~0 | ⚪ |
+| `Intn1` / `Intn20` / `Int63` / `Int31` | — | — | — | ~0 | ⚪ |
 | **common/serial** | | | | | |
-| ReadUint16 | 11.12 | 11.24 | 11.35 | ~0 | stable |
-| WriteUint64 | 9.19 | 9.14 | 9.44 | ~0 | stable |
-| Concat | 59.65 | 60.16 | 61.03 | ~0 | stable |
+| `ReadUint16` | 11.12 ns/op | 11.24 | 11.35 | ~0 | ⚪ |
+| `WriteUint64` | 9.19 ns/op | 9.14 | 9.44 | ~0 | ⚪ |
+| `Concat` | 59.65 ns/op | 60.16 | 61.03 | ~0 | ⚪ |
 | **common/mux** | | | | | |
-| FrameWrite | 47.93 | 47.93 | 47.34 | ~0 | stable |
+| `FrameWrite` | 47.93 ns/op | 47.93 | 47.34 | ~0 | ⚪ |
 
-**Verdict**: No regression vs upstream. buf/Copy/SplitBytes remain faster than upstream.
-
----
-
-## 2. XMUX Connection Pool: Run 1 vs Run 2
-
-| Benchmark | Run 1 (ns/op) | Run 2 (ns/op) | Delta | Status |
-|-----------|--------------|--------------|-------|--------|
-| GetXmuxClient | - | 17.06 | - | baseline |
-| GetXmuxClientParallel | - | 25,821 | - | baseline |
-| RTTEWMA | - | 8.41 | - | baseline |
-| PoolScheduling/pool_1 | - | 23.80 | - | baseline |
-| PoolScheduling/pool_4 | - | 32.27 | - | baseline |
-| PoolScheduling/pool_8 | - | 44.00 | - | baseline |
-| PoolScheduling/pool_16 | - | 78.03 | - | baseline |
-| PoolScheduling/pool_32 | - | 148.3 | - | baseline |
-| WarmupEnqueue | 10.9 | 10.83 | **-0.6%** | **stable** |
-| Metrics | 10.9 | 10.97 | +0.6% | **stable** |
-| ConcurrentRW/1 | 513,000 | 519,873 | +1.3% | **stable** |
-| ConcurrentRW/4 | 128,000 | 128,968 | +0.8% | **stable** |
-| ConcurrentRW/8 | 64,500 | 64,672 | +0.3% | **stable** |
-| ConcurrentRW/16 | 32,300 | 32,269 | **-0.1%** | **stable** |
-
-**Verdict**: Zero regression from V2.0 (scoreClient V2.0, quality drain, warmup delay). All hot paths unchanged.
+**Verdict**: ⚪/🟢 **No regression vs upstream**。`buf` 路径仍略快。
 
 ---
 
-## 3. Happy Eyeballs v3: Run 1 vs Run 2
+## 2. XMUX Connection Pool（同名指标对比）
 
-| Benchmark | Run 1 (ns/op) | Run 2 (ns/op) | Delta | Status |
-|-----------|--------------|--------------|-------|--------|
-| ScoreIPs | 1,104 | 1,124 | +1.8% | **stable** |
-| ScoreIPs_WithSVCB | 1,213 | 1,232 | +1.6% | **stable** |
-| ScoreIPs_V6Prioritized | 567 | 585 | +3.2% | **stable** |
-| SortIPScores | 441 | 422 | **-4.3%** | **improved** |
-| SortIPs | 352 | 277 | **-21.3%** | **improved** |
-| SortIPs_LargeList | 3,642 | 1,965 | **-46.1%** | **improved** |
-| ClampRTT | 0.10 | 0.10 | ~0 | **stable** |
-| Score | 0.10 | 0.21 | +110% | expected (V2.0 added retrans/loss) |
-| ScoreWithHighFailRate | 0.10 | 0.10 | ~0 | **stable** |
+| Benchmark | Run1 | Run2 | Delta | Trend |
+|-----------|-----:|-----:|------:|-------|
+| `GetXmuxClient` | — | 17.06 ns/op | — | 🆕 baseline |
+| `GetXmuxClientParallel` | — | 25,821 ns/op | — | 🆕 |
+| `RTTEWMA` | — | 8.41 ns/op | — | 🆕 |
+| `PoolScheduling/pool_1` | — | 23.80 ns/op | — | 🆕 |
+| `PoolScheduling/pool_4` | — | 32.27 ns/op | — | 🆕 |
+| `PoolScheduling/pool_8` | — | 44.00 ns/op | — | 🆕 |
+| `PoolScheduling/pool_16` | — | 78.03 ns/op | — | 🆕 |
+| `PoolScheduling/pool_32` | — | 148.3 ns/op | — | 🆕 |
+| `WarmupEnqueue` | 10.9 ns/op | 10.83 | **+0.6%** | ⚪ |
+| `Metrics` | 10.9 ns/op | 10.97 | -0.6% | ⚪ |
+| `ConcurrentRW/1` | 513,000 | 519,873 | -1.3% | ⚪ |
+| `ConcurrentRW/4` | 128,000 | 128,968 | -0.8% | ⚪ |
+| `ConcurrentRW/8` | 64,500 | 64,672 | -0.3% | ⚪ |
+| `ConcurrentRW/16` | 32,300 | 32,269 | **+0.1%** | ⚪ |
 
-**Verdict**: V2.0 score() is ~0.1ns slower (expected — adds retrans*50 + lossRate/20). Sort algorithms significantly improved. No regression.
-
----
-
-## 4. Reality Handshake Benchmarks (2026-06-24, v26.6.22)
-
-| Benchmark | ns/op | B/op | allocs/op |
-|-----------|-------|------|-----------|
-| RealityHandshakeKeyExchange | 24,820 | 32 | 1 |
-| RealityAEADSeal | 64.08 | 32 | 1 |
-| RealityAEADOpen | 53.11 | 16 | 1 |
-| RealityHKDF | 26,651 | 17,064 | 217 |
-| RealityECDSA | 22,308 | 6,064 | 59 |
-| RealityMLDSA65Verify | 24,065 | 450 | 3 |
-
-**Verdict**: All crypto hot paths stable. X25519MLKEM768 key exchange at 24.8μs.
+**Verdict**: ⚪ **Zero material regression** on XMUX hot paths.
 
 ---
 
-## 5. XHTTP Throughput
+## 3. Happy Eyeballs v3
 
-| Benchmark | Run 1 | Run 2 | Delta |
-|-----------|-------|-------|-------|
-| H2C Throughput | - | 35.36 MB/s | baseline |
-| H2 Throughput | 268 MB/s | - | (different benchmark) |
-| Packet-up 16 conns | 265 MB/s | - | (different benchmark) |
-| Packet-up 1 conn | 200 MB/s | - | (different benchmark) |
+| Benchmark | Run1 | Run2 | Delta | Trend |
+|-----------|-----:|-----:|------:|-------|
+| `ScoreIPs` | 1,104 ns/op | 1,124 | -1.8% | ⚪ |
+| `ScoreIPs_WithSVCB` | 1,213 | 1,232 | -1.6% | ⚪ |
+| `ScoreIPs_V6Prioritized` | 567 | 585 | -3.2% | 🔴 borderline |
+| `SortIPScores` | 441 | 422 | **+4.3%** | 🟢 |
+| `SortIPs` | 352 | 277 | **+21.3%** | 🟢 |
+| `SortIPs_LargeList` | 3,642 | 1,965 | **+46.1%** | 🟢 |
+| `ClampRTT` | 0.10 | 0.10 | ~0 | ⚪ |
+| `Score` | 0.10 | 0.21 | expected | ⚪* |
+| `ScoreWithHighFailRate` | 0.10 | 0.10 | ~0 | ⚪ |
 
-Note: Run 2 uses `BenchmarkXHTTP_H2C_Throughput` (different from Run 1's `BenchmarkXHTTP_H2_Throughput`). Different test configurations — not directly comparable.
+\* `Score` 变慢是 V2.0 增加 retrans/loss 因子的预期成本（绝对量仍是亚纳秒级）。
 
----
-
-## 6. Upstream Sync Notes (v26.6.22)
-
-合入上游 4 个 commit，跳过 4 个（与自定义特性冲突）：
-- DNS TTL clamp fix ✅
-- TUN nil RemoteAddr panic fix ✅
-- circl 1.6.4 ✅
-- pion/stun 3.1.6 ✅
-- XHTTP scStreamUpServerSecs ❌ (与 padding 优化冲突)
-- TUN XRAY_TUN_FD ❌ (已独立实现)
-- Fragment lengths/delays ❌ (proto 重编号冲突)
-- 版本号 v26.6.22 ✅
+**Verdict**: sort 路径明显 🟢；score 路径无实质回归。
 
 ---
 
-## 7. Summary
+## 4. REALITY Handshake Microbenches
+
+| Benchmark | ns/op | B/op | allocs/op | Trend |
+|-----------|------:|-----:|----------:|-------|
+| `RealityHandshakeKeyExchange` | 24,820 | 32 | 1 | ⚪ snapshot |
+| `RealityAEADSeal` | 64.08 | 32 | 1 | ⚪ |
+| `RealityAEADOpen` | 53.11 | 16 | 1 | ⚪ |
+| `RealityHKDF` | 26,651 | 17,064 | 217 | ⚪ |
+| `RealityECDSA` | 22,308 | 6,064 | 59 | ⚪ |
+| `RealityMLDSA65Verify` | 24,065 | 450 | 3 | ⚪ |
+
+**Verdict**: crypto 热路径稳定快照（非与上游逐行 CI 对比）。
+
+---
+
+## 5. XHTTP Throughput — 场景隔离（勿横向比）
+
+不同 mode / 连接数 / TLS 与否会得到完全不同的 MB/s，**不能**把 H2、H2C、packet-up 放在同一「Run1 vs Run2」列里当 delta。
+
+| Scenario (固定配置) | Metric | Value | Comparable? | Notes |
+|---------------------|--------|------:|:------------:|-------|
+| `BenchmarkXHTTP_H2C_Throughput` | MB/s | 35.36 | yes (self) | cleartext H2C microbench |
+| `BenchmarkXHTTP_H2_Throughput` | MB/s | 268 | yes (self) | TLS H2; not H2C |
+| Packet-up 16 conns | MB/s | 265 | yes (self) | multi-conn bulk |
+| Packet-up 1 conn | MB/s | 200 | yes (self) | single-conn bulk |
+
+后续 CI / 本地请以**同名 Benchmark + 同 `-benchmem -count`** 对比；新 packet-up window/chunk 优化以 CI `buf`/`xmux` 微基准 + 专项吞吐名为准。
+
+---
+
+## 6. Summary
 
 | Category | Status | Notes |
 |----------|--------|-------|
-| vs Upstream (common) | **NO REGRESSION** | buf/Copy/SplitBytes still faster |
-| vs Upstream (crypto) | **IDENTICAL** | Standard library, no difference |
-| vs Upstream (dice/serial/mux) | **IDENTICAL** | No regression |
-| XMUX hot paths | **NO REGRESSION** | WarmupEnqueue 10.83ns, 0 allocs |
-| HE v3 hot paths | **NO REGRESSION** | Score 0.21ns, ClampRTT 0.10ns |
-| HE v3 sort | **IMPROVED** | SortIPs_LargeList -46% |
-| Goroutine lifecycle | **FIXED** | upsertSession, padding, dialer all cancellable |
-| Benchmark timeout | **FIXED** | All benchmarks complete within timeout |
+| vs Upstream (common) | 🟢/⚪ **NO REGRESSION** | buf/Copy 仍略优 |
+| vs Upstream (crypto) | ⚪ **IDENTICAL** | stdlib |
+| XMUX hot paths | ⚪ **NO REGRESSION** | WarmupEnqueue ~10.8ns |
+| HE v3 sort | 🟢 **IMPROVED** | LargeList +46% |
+| HE v3 score | ⚪ expected | +retrans/loss |
+| XHTTP throughput | scenario-bound | 见表 5，勿混比 |
+| Goroutine lifecycle | fixed | session/padding/dialer |
+| Bench report UX | tables + emoji + SVG + history | |
 
-### V2.0 Performance Impact: ZERO REGRESSION
-- scoreClient() V2.0: +0.11ns (expected, adds retrans+loss)
-- Quality drain: 0 overhead (only triggers on consecDrops>=5)
-- Warmup delay: 0 overhead (only on enqueue)
-- NetworkLearner: 0 overhead (background goroutine)
-- Behavior classifier: 0 overhead (background goroutine)
+### Bray-only 数据面（相对本快照之后的代码）
+
+- packet-up window / RTT chunk / zero-alloc seq / shared headers / padding shrink / deadline `bytespool`
+- 这些属于 **2026-07 Bray-only** 变更；请用 **CI Benchmark Tracking** 产物与 `bench_results/history/` 看演进，而不是改写上表 2026-06-24 数字。
+
+---
+
+## 7. 自动化与历史
+
+| 路径 / 动作 | 说明 |
+|-------------|------|
+| `.github/workflows/benchmark.yml` | push/PR 跑 XMUX / HE / Warmup / VLESS / buf |
+| `scripts/format_bench_report.py` | 输出统一 Markdown 表 + 🟢⚪🔴🆕 + `summary.svg` |
+| `bench_results/report.md` | 当次完整报告（CI artifact） |
+| `bench_results/summary.json` | 机器可读 summary |
+| `bench_results/history/*.json` | 每次 CI 快照（release / 演进曲线用） |
+| `bench_results/history/latest.md` | 最近一次短摘要 |
+| `bench_results/upstream/xray-core-v26.6.22.json` | 固定上游 Xray-core 对照指标（CI Upstream 列） |
+| `./benchmark.sh` | 本地全套（含 XHTTP / REALITY） |
+
+```bash
+# 本地快速格式化（在已有 new_*.txt / base_*.txt 时）
+python scripts/format_bench_report.py --history \
+  --sha "$(git rev-parse --short HEAD)" \
+  --runner local --go "$(go env GOVERSION)"
+```

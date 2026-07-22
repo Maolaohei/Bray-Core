@@ -195,6 +195,21 @@ sysctl -w net.core.wmem_max=16777216
 
 **未强行改动的取舍**：XMUX 选路大重构、REALITY 握手路径再抠微秒、服务端 body 所有权硬进 pool 等高回归风险项保持不动。
 
+#### Benchmark 结论（摘要）
+
+| 类别 | 结论 | 说明 |
+|------|------|------|
+| vs 上游 common（buf/crypto/…） | 🟢/⚪ **无回归** | `Copy`/`NewBuffer` 仍略快 |
+| XMUX 热路径 | ⚪ **无实质回归** | pool / RTT EWMA / warmup |
+| Happy Eyeballs sort | 🟢 **改进** | 大列表排序明显更快 |
+| XHTTP 吞吐 | ⚠️ **按场景读** | H2 / H2C / packet-up **不可横向比** |
+
+- 完整表格与图例：[bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md)
+- 每次 push/PR 的 CI 表格 + SVG：`Benchmark Tracking` workflow → artifact `bench-report-<sha>`（`report.md` / `summary.svg` / `history/`）
+- 本地：`./benchmark.sh` 或 `python scripts/format_bench_report.py --history`
+- **无法同配置复现的旧数字直接忽略**；只信同名 Benchmark + 同 count 的对比。
+- **Upstream 列** = 固定外部对照快照 [`bench_results/upstream/xray-core-v26.6.22.json`](bench_results/upstream/xray-core-v26.6.22.json)（2026-06-24 同机 Xray-core）；**Self-baseline** = CI 上次 `main` 缓存；二者不要混为一谈。
+
 本地 HTTPS 代理若叠加系统/浏览器 MITM（例如部分 DNS/广告拦截的 HTTPS 解密），会表现为独立 CA 签发的证书，属于链路外侧因素，与上述内核串站修复无关。
 
 ---
@@ -204,6 +219,8 @@ sysctl -w net.core.wmem_max=16777216
 | 文档 | 内容 |
 |------|------|
 | [CHANGELOG.md](CHANGELOG.md) | 版本与变更记录 |
+| [bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md) | 性能对比快照（表格 + 图例） |
+| [scripts/format_bench_report.py](scripts/format_bench_report.py) | CI/本地 bench → Markdown/SVG/history |
 | [docs/README.md](docs/README.md) | 文档索引 |
 | [docs/bray-v2-full.md](docs/bray-v2-full.md) | Bray 完全体总览 |
 | [docs/presets/README.md](docs/presets/README.md) | 传输预设与控制头 |

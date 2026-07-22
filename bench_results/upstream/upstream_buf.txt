@@ -1,0 +1,12 @@
+pkg: github.com/xtls/xray-core/common/buf
+goos: windows
+goarch: amd64
+BenchmarkNewBuffer-20  10000000  47.15 ns/op
+BenchmarkNewBufferStack-20  10000000  30.06 ns/op
+BenchmarkWrite2-20  10000000  1.52 ns/op
+BenchmarkWrite8-20  10000000  1.814 ns/op
+BenchmarkWrite32-20  10000000  1.834 ns/op
+BenchmarkWriteByte2-20  10000000  1.146 ns/op
+BenchmarkWriteByte8-20  10000000  4.18 ns/op
+BenchmarkCopy-20  10000000  98.13 ns/op
+BenchmarkSplitBytes-20  10000000  159.4 ns/op

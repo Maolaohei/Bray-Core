@@ -134,16 +134,6 @@ jobs:
         id: compare
         run: |
           set -euo pipefail
-          echo "## Benchmark Results" > bench_results/report.md
-          echo "" >> bench_results/report.md
-
-          HAS_BASELINE=false
-          for f in bench_results/base_*.txt; do
-            if [ -f "$f" ]; then
-              HAS_BASELINE=true
-              break
-            fi
-          done
 
           sanitize_bench() {
             local src="$1"
@@ -156,51 +146,50 @@ jobs:
             fi
           }
 
-          if [ "$HAS_BASELINE" = true ]; then
-            echo "### Comparison with baseline" >> bench_results/report.md
-            echo "" >> bench_results/report.md
-            echo '```' >> bench_results/report.md
-
-            for name in xmux happy warmup vless buf; do
-              if [ -f "bench_results/base_${name}.txt" ] && [ -f "bench_results/new_${name}.txt" ]; then
-                sanitize_bench "bench_results/base_${name}.txt" "bench_results/base_${name}.clean.txt"
-                sanitize_bench "bench_results/new_${name}.txt" "bench_results/new_${name}.clean.txt"
-                echo "=== ${name} ===" >> bench_results/report.md
-                if [ -s "bench_results/base_${name}.clean.txt" ] && [ -s "bench_results/new_${name}.clean.txt" ]; then
-                  if ! benchstat "bench_results/base_${name}.clean.txt" "bench_results/new_${name}.clean.txt" >> bench_results/report.md 2>> bench_results/report.md; then
-                    echo "benchstat failed for ${name}; falling back to current results only." >> bench_results/report.md
-                    head -n 40 "bench_results/new_${name}.clean.txt" >> bench_results/report.md
-                  fi
-                else
-                  echo "skipped: missing clean benchmark lines" >> bench_results/report.md
-                fi
-                echo "" >> bench_results/report.md
-              fi
-            done
-
-            echo '```' >> bench_results/report.md
-          else
-            echo "No baseline found. This is the first run." >> bench_results/report.md
-            echo "Baseline will be saved after merge to main." >> bench_results/report.md
-          fi
-
-          echo "" >> bench_results/report.md
-          echo "### Current Results" >> bench_results/report.md
-          echo "" >> bench_results/report.md
-          echo '```' >> bench_results/report.md
-          for f in bench_results/new_*.txt; do
-            if [ -f "$f" ]; then
-              echo "--- $(basename "$f" .txt) ---" >> bench_results/report.md
-              # Cap each result file in the report so one bad run cannot explode the PR comment.
-              head -n 200 "$f" >> bench_results/report.md
-              lines=$(wc -l < "$f" | tr -d ' ')
-              if [ "$lines" -gt 200 ]; then
-                echo "... truncated $((lines-200)) more lines ..." >> bench_results/report.md
-              fi
-              echo "" >> bench_results/report.md
+          for name in xmux happy warmup vless buf; do
+            if [ -f "bench_results/base_${name}.txt" ]; then
+              sanitize_bench "bench_results/base_${name}.txt" "bench_results/base_${name}.clean.txt"
+            fi
+            if [ -f "bench_results/new_${name}.txt" ]; then
+              sanitize_bench "bench_results/new_${name}.txt" "bench_results/new_${name}.clean.txt"
             fi
           done
-          echo '```' >> bench_results/report.md
+
+          # Table + emoji trends + SVG chart + summary JSON (GitHub-friendly).
+          python3 scripts/format_bench_report.py \
+            --results-dir bench_results \
+            --suites xmux,happy,warmup,vless,buf \
+            --sha "${GITHUB_SHA:-local}" \
+            --runner "${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}" \
+            --go "$(go env GOVERSION 2>/dev/null || echo go)" \
+            --upstream bench_results/upstream/xray-core-v26.6.22.json \
+            --history \
+            --out bench_results/report.md
+
+          # Keep raw benchstat appendix for power users (after formatted tables).
+          {
+            echo ""
+            echo "## benchstat (raw)"
+            echo ""
+            HAS_BASELINE=false
+            for f in bench_results/base_*.clean.txt; do
+              if [ -s "$f" ]; then HAS_BASELINE=true; break; fi
+            done
+            if [ "$HAS_BASELINE" = true ]; then
+              echo '```'
+              for name in xmux happy warmup vless buf; do
+                if [ -s "bench_results/base_${name}.clean.txt" ] && [ -s "bench_results/new_${name}.clean.txt" ]; then
+                  echo "=== ${name} ==="
+                  benchstat "bench_results/base_${name}.clean.txt" "bench_results/new_${name}.clean.txt" \
+                    || echo "benchstat failed for ${name}"
+                  echo ""
+                fi
+              done
+              echo '```'
+            else
+              echo "_No baseline cache yet — first main push will seed it._"
+            fi
+          } >> bench_results/report.md
 
           # Hard cap the markdown report itself (GitHub issue comment limit is 65536).
           python3 - <<'PY'
@@ -277,3 +266,17 @@ jobs:
         with:
           path: bench_baseline
           key: benchmark-baseline-main-${{ github.sha }}
+
+      - name: Upload bench report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-report-${{ github.sha }}
+          path: |
+            bench_results/report.md
+            bench_results/summary.json
+            bench_results/summary.svg
+            bench_results/history/**
+            bench_results/new_*.txt
+            bench_results/base_*.txt
+          if-no-files-found: warn
