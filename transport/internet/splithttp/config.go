@@ -22,6 +22,110 @@ import (
 // Headers map is immutable after start in normal use; rebuild on miss only.
 var requestHeaderBaseCache sync.Map // *Config -> http.Header
 
+// multiBufferContainerPool reuses packet-up request body wrappers.
+// Hot path previously allocated &buf.MultiBufferContainer per PostPacket.
+var multiBufferContainerPool = sync.Pool{
+	New: func() any {
+		return &buf.MultiBufferContainer{}
+	},
+}
+
+// packetBodyPool reuses the outer io.ReadCloser shell used as req.Body.
+var packetBodyPool = sync.Pool{
+	New: func() any {
+		return &pooledPacketBody{}
+	},
+}
+
+// durableBodyPool reuses byte-slice request bodies for packet-up retries.
+// The durable snapshot outlives the HTTP round-trip; Close only recycles the
+// shell and never frees the underlying bytes.
+var durableBodyPool = sync.Pool{
+	New: func() any {
+		return &pooledDurableBody{}
+	},
+}
+
+// pooledPacketBody returns a MultiBufferContainer to the pool on Close so
+// http.Client / http2 can free the body without leaking the wrapper.
+type pooledPacketBody struct {
+	c *buf.MultiBufferContainer
+}
+
+func (p *pooledPacketBody) Read(b []byte) (int, error) {
+	if p.c == nil {
+		return 0, io.EOF
+	}
+	return p.c.Read(b)
+}
+
+func (p *pooledPacketBody) Close() error {
+	if p.c == nil {
+		return nil
+	}
+	// Close releases buffers via ReleaseMulti and keeps MultiBuffer[:0] capacity.
+	_ = p.c.Close()
+	multiBufferContainerPool.Put(p.c)
+	p.c = nil
+	packetBodyPool.Put(p)
+	return nil
+}
+
+func acquirePacketBody(payload buf.MultiBuffer) *pooledPacketBody {
+	c := multiBufferContainerPool.Get().(*buf.MultiBufferContainer)
+	// Reuse container MultiBuffer capacity for the common 1-buffer wrap so the
+	// temporary MultiBuffer{FromBytes(...)} outer slice can be GC'd while the
+	// Buffer element lives on the container until body Close/ReleaseMulti.
+	if len(payload) == 1 {
+		mb := c.MultiBuffer[:0]
+		if cap(mb) < 1 {
+			mb = make(buf.MultiBuffer, 0, 1)
+		}
+		c.MultiBuffer = append(mb, payload[0])
+	} else {
+		c.MultiBuffer = payload
+	}
+	p := packetBodyPool.Get().(*pooledPacketBody)
+	p.c = c
+	return p
+}
+
+// pooledDurableBody is an io.ReadCloser over an external durable []byte.
+// Used by FillPacketRequestBytes so retries skip MultiBuffer/FromBytes shells.
+type pooledDurableBody struct {
+	b []byte
+	i int
+}
+
+func (p *pooledDurableBody) Read(b []byte) (int, error) {
+	if p == nil || p.i >= len(p.b) {
+		return 0, io.EOF
+	}
+	n := copy(b, p.b[p.i:])
+	p.i += n
+	if p.i >= len(p.b) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (p *pooledDurableBody) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.b = nil
+	p.i = 0
+	durableBodyPool.Put(p)
+	return nil
+}
+
+func acquireDurableBody(data []byte) *pooledDurableBody {
+	p := durableBodyPool.Get().(*pooledDurableBody)
+	p.b = data
+	p.i = 0
+	return p
+}
+
 // Pre-allocated default RangeConfig values to avoid per-request heap allocations.
 // XMUX nil fields use process-stable jittered copies (green-zone); explicit config wins.
 var (
@@ -181,15 +285,44 @@ func (c *Config) GetNormalizedQuery() string {
 	return query
 }
 
+// headerMapPool reuses outer http.Header maps for packet/stream request fill.
+// Values are cleared on Put; single-value slices may still share immutable base.
+var headerMapPool = sync.Pool{
+	New: func() any {
+		return make(http.Header, 8)
+	},
+}
+
+func acquireHeaderMap(sizeHint int) http.Header {
+	h := headerMapPool.Get().(http.Header)
+	if sizeHint > 0 && len(h) == 0 {
+		// Grow by inserting then deleting is pointless; just return pooled map.
+		_ = sizeHint
+	}
+	return h
+}
+
+// releaseHeaderMap returns a request-local header map to the pool after the
+// HTTP round-trip finished. Safe only when no transport retains the map.
+func releaseHeaderMap(h http.Header) {
+	if h == nil {
+		return
+	}
+	for k := range h {
+		delete(h, k)
+	}
+	headerMapPool.Put(h)
+}
+
 // cloneHeaderShallow builds a request-local http.Header from an immutable base.
-// Outer map is always new. Single-value non-Cookie slices are shared (Set replaces
-// the entry). Multi-value and Cookie slices are copied so Add/append cannot poison
-// the cache. Avoids http.Header.Clone's deeper bookkeeping.
+// Outer map comes from headerMapPool. Single-value non-Cookie slices are shared
+// (Set replaces the entry). Multi-value and Cookie slices are copied so Add/append
+// cannot poison the cache. Avoids http.Header.Clone's deeper bookkeeping.
 func cloneHeaderShallow(src http.Header) http.Header {
 	if src == nil {
-		return make(http.Header)
+		return acquireHeaderMap(0)
 	}
-	dst := make(http.Header, len(src))
+	dst := acquireHeaderMap(len(src))
 	for k, vv := range src {
 		switch len(vv) {
 		case 0:
@@ -470,6 +603,15 @@ func (c *Config) GetNormalizedSeqKey() string {
 func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr string) {
 	sessionPlacement := c.GetNormalizedSessionPlacement()
 	seqPlacement := c.GetNormalizedSeqPlacement()
+
+	// Default wire (session+seq both path): one path rewrite, no Query/Cookie work.
+	if sessionPlacement == PlacementPath && (seqStr == "" || seqPlacement == PlacementPath) {
+		if sessionId != "" || seqStr != "" {
+			req.URL.Path = appendToPath2(req.URL.Path, sessionId, seqStr)
+		}
+		return
+	}
+
 	sessionKey := c.GetNormalizedSessionKey()
 	seqKey := c.GetNormalizedSeqKey()
 
@@ -510,9 +652,13 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 	// Stream open has no payload size yet; keep configured range.
 	length := int(basePad.rand())
 	config := XPaddingConfig{Length: length}
-	rawURL := requestURLString(request)
 
 	if c.XPaddingObfsMode {
+		// Query/Referer placements need a stable URL string; header-only does not.
+		rawURL := ""
+		if c.XPaddingPlacement == PlacementQueryInHeader || c.XPaddingPlacement == PlacementQuery {
+			rawURL = requestURLString(request)
+		}
 		config.Placement = XPaddingPlacement{
 			Placement: c.XPaddingPlacement,
 			Key:       c.XPaddingKey,
@@ -528,7 +674,6 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 			Placement: PlacementHeader,
 			Key:       "X-Padding",
 			Header:    "X-Padding",
-			RawURL:    rawURL,
 		}
 	}
 
@@ -550,8 +695,9 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 
 	if dataPlacement == PlacementBody || dataPlacement == PlacementAuto {
 		request.Header = c.GetRequestHeader()
-		request.Body = io.NopCloser(&buf.MultiBufferContainer{MultiBuffer: payload})
-		request.ContentLength = int64(payload.Len())
+		// Pooled body wrapper: Close releases MultiBuffer and returns container.
+		request.Body = acquirePacketBody(payload)
+		request.ContentLength = int64(payloadLen)
 	} else {
 		dataLen := payload.Len()
 		data := bytespool.Alloc(int32(dataLen))
@@ -570,6 +716,40 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		bytespool.Free(data)
 	}
 
+	return c.finishPacketRequest(request, sessionId, seqStr, payloadLen)
+}
+
+// FillPacketRequestBytes is the zero-copy body path for durable packet-up
+// snapshots (retry source already materialised as []byte). Body Close never
+// frees data; ownership stays with the caller for the whole retry window.
+func (c *Config) FillPacketRequestBytes(request *http.Request, sessionId string, seqStr string, data []byte) error {
+	dataPlacement := c.GetNormalizedUplinkDataPlacement()
+	payloadLen := len(data)
+
+	if dataPlacement == PlacementBody || dataPlacement == PlacementAuto {
+		request.Header = c.GetRequestHeader()
+		request.Body = acquireDurableBody(data)
+		request.ContentLength = int64(payloadLen)
+	} else {
+		switch dataPlacement {
+		case PlacementHeader:
+			request.Header = c.GetRequestHeaderWithPayload(data)
+		case PlacementCookie:
+			request.Header = c.GetRequestHeader()
+			for _, cookie := range c.GetRequestCookiesWithPayload(data) {
+				request.AddCookie(cookie)
+			}
+		default:
+			request.Header = c.GetRequestHeader()
+			request.Body = acquireDurableBody(data)
+			request.ContentLength = int64(payloadLen)
+		}
+	}
+
+	return c.finishPacketRequest(request, sessionId, seqStr, payloadLen)
+}
+
+func (c *Config) finishPacketRequest(request *http.Request, sessionId string, seqStr string, payloadLen int) error {
 	basePad := c.GetNormalizedXPaddingBytes()
 	var from, to int32
 	var strict bool
@@ -589,11 +769,15 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		// about [base.From, base.To].
 		from, to = AdaptivePaddingRange(basePad.From, basePad.To, payloadLen)
 	}
-	length := int((&RangeConfig{From: from, To: to}).rand())
+	// Avoid heap-escaping &RangeConfig{...} per packet-up POST.
+	length := int(crypto.RandBetween(int64(from), int64(to)))
 	config := XPaddingConfig{Length: length, Strict: strict}
-	rawURL := requestURLString(request)
 
 	if c.XPaddingObfsMode {
+		rawURL := ""
+		if c.XPaddingPlacement == PlacementQueryInHeader || c.XPaddingPlacement == PlacementQuery {
+			rawURL = requestURLString(request)
+		}
 		config.Placement = XPaddingPlacement{
 			Placement: c.XPaddingPlacement,
 			Key:       c.XPaddingKey,
@@ -604,11 +788,11 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		config.methodIdx = methodIndex(config.Method)
 	} else {
 		// Bray-only default wire: header X-Padding (both ends).
+		// Header placement needs no RawURL string build.
 		config.Placement = XPaddingPlacement{
 			Placement: PlacementHeader,
 			Key:       "X-Padding",
 			Header:    "X-Padding",
-			RawURL:    rawURL,
 		}
 	}
 
@@ -754,8 +938,45 @@ func (c *Config) GenerateSessionID() string {
 }
 
 func appendToPath(path, value string) string {
+	if value == "" {
+		return path
+	}
 	if strings.HasSuffix(path, "/") {
 		return path + value
 	}
 	return path + "/" + value
+}
+
+// appendToPath2 appends up to two path segments in a single allocation.
+// Used by the default session+seq PlacementPath packet-up meta path.
+func appendToPath2(path, a, b string) string {
+	if a == "" && b == "" {
+		return path
+	}
+	needSlash := !strings.HasSuffix(path, "/")
+	extra := 0
+	if needSlash {
+		extra++
+	}
+	extra += len(a)
+	if a != "" && b != "" {
+		extra++ // '/' between a and b
+	}
+	extra += len(b)
+	var buf strings.Builder
+	buf.Grow(len(path) + extra)
+	buf.WriteString(path)
+	if needSlash {
+		buf.WriteByte('/')
+	}
+	if a != "" {
+		buf.WriteString(a)
+		if b != "" {
+			buf.WriteByte('/')
+		}
+	}
+	if b != "" {
+		buf.WriteString(b)
+	}
+	return buf.String()
 }

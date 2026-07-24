@@ -168,6 +168,12 @@ const (
 	packetUploadChunkMid int32 = 512 * 1024
 )
 
+// packetUploadBulkPaceBytes is the post body size at/above which configured
+// scMinPostsIntervalMs is skipped. Idle/tiny posts keep camouflage pacing;
+// bulk app writes (bench 16-32KiB, tunnels, large copies) must not be capped
+// at ~30ms/post when scMaxEachPostBytes is much larger than the write size.
+const packetUploadBulkPaceBytes int32 = 8 * 1024
+
 // packetUploadChunkSize chooses an effective max POST body size.
 // configuredMax is the operator/config ceiling (must never be exceeded).
 // rtt==0 keeps configuredMax so cold starts stay compatible.
@@ -212,11 +218,16 @@ func packetUploadChunkSize(configuredMax int32, rtt time.Duration) int32 {
 // next POST. Configured pacing is kept for small/idle writes (camouflage);
 // when more data is already queued (backlog / full-size chunk), skip pacing
 // so the in-flight window can fill and hide RTT.
-func packetUploadLaunchIntervalMs(configuredMs int32, hasBacklog bool, fullChunk bool) int32 {
+// bulkChunk covers continuous bulk traffic that never reaches full scMaxEachPostBytes
+// (e.g. 32KiB app writes against a 1MB post ceiling) so request/response benches
+// are not hard-capped at scMinPostsIntervalMs.
+// recentFlow covers back-to-back small posts while the app is still writing
+// (time since previous launch within a short window); first idle tiny post still paces.
+func packetUploadLaunchIntervalMs(configuredMs int32, hasBacklog bool, fullChunk bool, bulkChunk bool, recentFlow bool) int32 {
 	if configuredMs <= 0 {
 		return 0
 	}
-	if hasBacklog || fullChunk {
+	if hasBacklog || fullChunk || bulkChunk || recentFlow {
 		return 0
 	}
 	return configuredMs
@@ -235,12 +246,19 @@ func cloneMultiBuffer(src buf.MultiBuffer) buf.MultiBuffer {
 }
 
 // multiFromDurable wraps a durable byte snapshot as an unmanaged MultiBuffer.
-// PostPacket may ReleaseMulti the wrapper; unmanaged bytes stay valid for retries.
+// Fallback path for DialerClient implementations without PostPacketBytes.
+// FromBytes uses a pooled Buffer shell so Release does not leak one alloc/post.
 func multiFromDurable(durable []byte) buf.MultiBuffer {
 	if len(durable) == 0 {
 		return nil
 	}
 	return buf.MultiBuffer{buf.FromBytes(durable)}
+}
+
+// packetBytesPoster is optional: DefaultDialerClient implements PostPacketBytes
+// to skip MultiBuffer shells on the packet-up retry hot path.
+type packetBytesPoster interface {
+	PostPacketBytes(ctx context.Context, url string, sessionId string, seqStr string, data []byte) error
 }
 
 // postPacketReliable sends one sequenced packet with bounded retries.
@@ -249,8 +267,8 @@ func multiFromDurable(durable []byte) buf.MultiBuffer {
 //
 // Ownership: takes payload. On entry a single durable byte snapshot is made
 // (retry source); payload is released immediately after the snapshot.
-// Each attempt wraps the same durable bytes via FromBytes (no second content
-// copy). MultiBuffer pages return to the pool before the HTTP RTT completes.
+// Prefer PostPacketBytes when available (no MultiBuffer/FromBytes per attempt).
+// MultiBuffer fallback still uses pooled shells and no second content copy.
 func postPacketReliable(
 	ctx context.Context,
 	client DialerClient,
@@ -278,13 +296,20 @@ func postPacketReliable(
 	// free durable after all attempts (success or failure)
 	defer freeDurable(durable, durableKind, durableLocalRef)
 
+	bytesPoster, hasBytes := client.(packetBytesPoster)
+
 	var lastErr error
 	for attempt := 1; attempt <= packetUploadMaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		chunk := multiFromDurable(durable)
-		err := client.PostPacket(ctx, url, sessionId, seqStr, chunk)
+		var err error
+		if hasBytes {
+			err = bytesPoster.PostPacketBytes(ctx, url, sessionId, seqStr, durable)
+		} else {
+			chunk := multiFromDurable(durable)
+			err = client.PostPacket(ctx, url, sessionId, seqStr, chunk)
+		}
 		if err == nil {
 			return nil
 		}

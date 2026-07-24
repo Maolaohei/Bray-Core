@@ -69,12 +69,15 @@ func NewExisted(b []byte) *Buffer {
 }
 
 // FromBytes creates a Buffer with an existed bytearray, unmanaged.
+// The Buffer shell is pooled; Release returns the shell without freeing b.
 func FromBytes(b []byte) *Buffer {
-	return &Buffer{
+	buf := bufferShellPool.Get().(*Buffer)
+	*buf = Buffer{
 		v:         b,
 		end:       int32(len(b)),
 		ownership: unmanaged,
 	}
+	return buf
 }
 
 // StackNew creates a new Buffer object on stack, managed.
@@ -102,23 +105,29 @@ func NewWithSize(size int32) *Buffer {
 
 // Release recycles the buffer into an internal buffer pool.
 func (b *Buffer) Release() {
-	if b == nil || b.v == nil || b.ownership == unmanaged {
+	if b == nil || b.v == nil {
 		return
 	}
 
 	p := b.v
+	own := b.ownership
 	b.v = nil
 	b.Clear()
+	b.UDP = nil
 
-	switch b.ownership {
+	switch own {
 	case managed:
 		if cap(p) == Size {
 			pool.Put(p)
 		}
 	case bytespools:
 		bytespool.Free(p)
+	case unmanaged:
+		// Byte slice is not owned; recycle only the Buffer shell.
+		b.ownership = managed
+		bufferShellPool.Put(b)
+		return
 	}
-	b.UDP = nil
 }
 
 // Clear clears the content of the buffer, results an empty buffer with

@@ -5,10 +5,10 @@ import (
 	"context"
 	"crypto/tls"
 	stderrors "errors"
-	"fmt"
 	"io"
 	stdnet "net"
 	"net/http"
+	"net/url"
 	"net/http/httptrace"
 	"strings"
 	"sync"
@@ -41,6 +41,48 @@ var requestBuffPool = sync.Pool{
 	},
 }
 
+// urlURLPool reuses request-local *url.URL shells for PostPacket path mutation.
+// Base host/scheme fields are copied from the dialer's immutable packet URL.
+var urlURLPool = sync.Pool{
+	New: func() any {
+		return new(url.URL)
+	},
+}
+
+// reqBytesLocal holds H1 pipeline request wire snapshots for pooling.
+// Store *reqBytesLocal so Put never captures a stack-local slice header.
+type reqBytesLocal struct {
+	b []byte
+}
+
+var reqBytesPool = sync.Pool{
+	New: func() any {
+		return &reqBytesLocal{b: make([]byte, 0, 2048)}
+	},
+}
+
+func acquireReqBytes(src []byte) *reqBytesLocal {
+	dl := reqBytesPool.Get().(*reqBytesLocal)
+	if cap(dl.b) < len(src) {
+		dl.b = make([]byte, len(src))
+	} else {
+		dl.b = dl.b[:len(src)]
+	}
+	copy(dl.b, src)
+	return dl
+}
+
+func releaseReqBytes(dl *reqBytesLocal) {
+	if dl == nil {
+		return
+	}
+	if cap(dl.b) > maxBufferPoolCap {
+		return
+	}
+	dl.b = dl.b[:0]
+	reqBytesPool.Put(dl)
+}
+
 // interface to abstract between use of browser dialer, vs net/http
 type DialerClient interface {
 	IsClosed() bool
@@ -60,6 +102,18 @@ type DefaultDialerClient struct {
 	httpVersion     string
 	// pool of H1 upload conns, created using dialUploadConn (bounded)
 	uploadRawPool  *h1ConnPool
+	// hotH1 is the currently shared pipelined H1 upload conn (depth > 1).
+	// Protected by hotH1Mu; activeUsers on the H1Conn tracks concurrent posts.
+	hotH1Mu        sync.Mutex
+	hotH1          *H1Conn
+	// h1Dialing serializes concurrent first-dial so N parallel PostPacket
+	// callers share one socket instead of N redundant dials.
+	h1Dialing      bool
+	hotH1Wait      *sync.Cond
+	// packetURLBase caches the last PostPacket base URL for this dialer
+	// (packet-up posts the same host/path every seq). Immutable after parse.
+	packetURLRaw  atomic.Value // string
+	packetURLBase atomic.Value // *url.URL
 	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
 	// Callbacks are stored atomically because getHTTPClient may re-wire them
 	// from concurrent Dial paths while OpenStream/PostPacket read them.
@@ -447,138 +501,331 @@ func (c *cancelOnClose) Close() error {
 	return err
 }
 
+// resolvePacketURL returns a request-local *url.URL for PostPacket.
+// The dialer reuses one immutable base for the common single-destination case;
+// Path/Query mutations by FillPacketRequest only touch the returned copy.
+func (c *DefaultDialerClient) resolvePacketURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, errors.New("empty packet-up URL")
+	}
+	if v := c.packetURLRaw.Load(); v != nil {
+		if v.(string) == raw {
+			if base := c.packetURLBase.Load(); base != nil {
+				return cloneURL(base.(*url.URL)), nil
+			}
+		}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	// Store immutable base; concurrent stores are fine (same raw wins).
+	c.packetURLBase.Store(parsed)
+	c.packetURLRaw.Store(raw)
+	return cloneURL(parsed), nil
+}
+
+func cloneURL(base *url.URL) *url.URL {
+	u := urlURLPool.Get().(*url.URL)
+	*u = *base
+	// Userinfo is a pointer; keep sharing the immutable base value.
+	return u
+}
+
+func releaseURL(u *url.URL) {
+	if u == nil {
+		return
+	}
+	*u = url.URL{}
+	urlURLPool.Put(u)
+}
+
+// newPacketRequest builds a POST/PUT packet-up request without re-parsing the
+// base URL string on every seq. Context is attached once via NewRequestWithContext
+// (avoids Request.WithContext's second heap clone of the whole Request).
+func (c *DefaultDialerClient) newPacketRequest(ctx context.Context, method, rawURL string) (*http.Request, error) {
+	u, err := c.resolvePacketURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	// Build the request shell manually: no dummy URL parse, no NewRequest
+	// method validation. Context is attached via one WithContext clone
+	// (Request.ctx is unexported). Header/Body filled by FillPacketRequest.
+	req := &http.Request{
+		Method:     method,
+		URL:        u,
+		Host:       u.Host,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+	}
+	return req.WithContext(context.WithoutCancel(ctx)), nil
+}
+
 func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, payload buf.MultiBuffer) error {
+	return c.postPacket(ctx, url, sessionId, seqStr, func(req *http.Request) error {
+		return c.transportConfig.FillPacketRequest(req, sessionId, seqStr, payload)
+	})
+}
+
+// PostPacketBytes posts a durable []byte snapshot without MultiBuffer wrappers.
+// Used by postPacketReliable on the packet-up hot path.
+func (c *DefaultDialerClient) PostPacketBytes(ctx context.Context, url string, sessionId string, seqStr string, data []byte) error {
+	return c.postPacket(ctx, url, sessionId, seqStr, func(req *http.Request) error {
+		return c.transportConfig.FillPacketRequestBytes(req, sessionId, seqStr, data)
+	})
+}
+
+func (c *DefaultDialerClient) postPacket(ctx context.Context, rawURL string, sessionId string, seqStr string, fill func(*http.Request) error) error {
 	method := c.transportConfig.GetNormalizedUplinkHTTPMethod()
-	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), method, url, nil)
+	req, err := c.newPacketRequest(ctx, method, rawURL)
 	if err != nil {
 		return err
 	}
-	c.transportConfig.FillPacketRequest(req, sessionId, seqStr, payload)
+	// Fill may mutate req.URL.Path; recycle URL shell after the round-trip.
+	defer releaseURL(req.URL)
+
+	if err := fill(req); err != nil {
+		if req.Header != nil {
+			releaseHeaderMap(req.Header)
+			req.Header = nil
+		}
+		if req.Body != nil {
+			_ = req.Body.Close()
+			req.Body = nil
+		}
+		return err
+	}
 
 	if c.httpVersion != "1.1" {
-		start := time.Now()
+		rttFn := c.getOnRTT()
+		var start time.Time
+		if rttFn != nil {
+			start = time.Now()
+		}
 		resp, err := c.client.Do(req)
+		// Header map is request-local; recycle after transport finished with req.
+		releaseHeaderMap(req.Header)
+		req.Header = nil
 		if err != nil {
 			c.markFatal(err)
 			return err
 		}
 
-		// Record RTT for RTT-aware scheduling
-		if fn := c.getOnRTT(); fn != nil {
-			fn(time.Since(start))
+		// Record RTT for RTT-aware scheduling (skip clock when unused).
+		if rttFn != nil {
+			rttFn(time.Since(start))
 		}
 
-		io.Copy(io.Discard, resp.Body)
+		// Packet-up responses are empty (200 + CL 0); avoid generic Copy overhead.
+		if resp.ContentLength != 0 {
+			io.Copy(io.Discard, resp.Body)
+		}
 		resp.Body.Close()
 
 		if resp.StatusCode != 200 {
 			return errors.New("bad status code:", resp.Status)
 		}
-	} else {
-		// stringify the entire HTTP/1.1 request so it can be
-		// safely retried. if instead req.Write is called multiple
-		// times, the body is already drained after the first
-		// request
-		requestBuff := requestBuffPool.Get().(*bytes.Buffer)
-		requestBuff.Reset()
-		common.Must(req.Write(requestBuff))
-		defer func() {
-			if requestBuff.Cap() <= maxBufferPoolCap {
-				requestBuff.Reset()
-				requestBuffPool.Put(requestBuff)
-			}
-		}()
-
-		var h1UploadConn *H1Conn
-		start := time.Now()
-
-		for {
-			h1UploadConn = c.uploadRawPool.Get()
-			newConnection := h1UploadConn == nil
-			if newConnection {
-				newConn, err := c.dialUploadConn(context.WithoutCancel(ctx))
-				if err != nil {
-					return err
-				}
-				h1UploadConn = NewH1Conn(newConn)
-			} else {
-
-				// Drain any leftover unread responses before reuse (legacy pipeline depth).
-				drainFailed := false
-				for h1UploadConn.UnreadResponsesCount > 0 {
-					resp, err := http.ReadResponse(h1UploadConn.RespBufReader, nil)
-					if err != nil {
-						_ = h1UploadConn.Close()
-						c.markFatal(err)
-						drainFailed = true
-						break
-					}
-					io.Copy(io.Discard, resp.Body)
-					resp.Body.Close()
-					h1UploadConn.UnreadResponsesCount--
-					if resp.StatusCode != 200 {
-						_ = h1UploadConn.Close()
-						return fmt.Errorf("got non-200 error response code: %d", resp.StatusCode)
-					}
-				}
-				if drainFailed {
-					// Drop dead pooled conn; try another (or dial fresh).
-					continue
-				}
-			}
-
-			_, err := h1UploadConn.Write(requestBuff.Bytes())
-			// if the write failed, we try another connection from
-			// the pool, until the write on a new connection fails.
-			// failed writes to a pooled connection are normal when
-			// the connection has been closed in the meantime.
-			if err == nil {
-				// Confirm this upload response immediately so failures are not
-				// deferred until a later reuse that may never happen. Pipeline
-				// depth stays at most 1 for packet-up reliability.
-				resp, readErr := http.ReadResponse(h1UploadConn.RespBufReader, nil)
-				if readErr != nil {
-					_ = h1UploadConn.Close()
-					if newConnection {
-						c.markFatal(readErr)
-						return readErr
-					}
-					c.markFatal(readErr)
-					continue
-				}
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-				if resp.StatusCode != 200 {
-					_ = h1UploadConn.Close()
-					return fmt.Errorf("got non-200 error response code: %d", resp.StatusCode)
-				}
-				if fn := c.getOnRTT(); fn != nil {
-					fn(time.Since(start))
-				}
-				break
-			} else if newConnection {
-				return err
-			} else {
-				// Do not return a broken pooled connection; close and retry.
-				_ = h1UploadConn.Close()
-				c.markFatal(err)
-			}
-		}
-
-		c.uploadRawPool.Put(h1UploadConn)
+		return nil
 	}
 
+	// stringify the entire HTTP/1.1 request so it can be
+	// safely retried. if instead req.Write is called multiple
+	// times, the body is already drained after the first
+	// request
+	requestBuff := requestBuffPool.Get().(*bytes.Buffer)
+	requestBuff.Reset()
+	common.Must(req.Write(requestBuff))
+	releaseHeaderMap(req.Header)
+	req.Header = nil
+	if req.Body != nil {
+		_ = req.Body.Close()
+		req.Body = nil
+	}
+	reqHold := acquireReqBytes(requestBuff.Bytes())
+	reqBytes := reqHold.b
+	if requestBuff.Cap() <= maxBufferPoolCap {
+		requestBuff.Reset()
+		requestBuffPool.Put(requestBuff)
+	}
+	defer releaseReqBytes(reqHold)
+
+	start := time.Now()
+	// Acquire a shared hot conn (pipeline depth > 1) or dial fresh.
+	h1UploadConn, newConnection, err := c.acquireH1UploadConn(ctx)
+	if err != nil {
+		return err
+	}
+	postErr := h1UploadConn.pipelinePost(reqBytes)
+	c.releaseH1UploadConn(h1UploadConn, newConnection, postErr)
+	if postErr != nil {
+		if newConnection || h1UploadConn.isDead() {
+			c.markFatal(postErr)
+		}
+		// Pooled/shared write failure: try once more on a fresh dial so
+		// transient closed-idle sockets do not fail the packet.
+		if !newConnection {
+			h2, _, err2 := c.acquireH1UploadConn(ctx)
+			if err2 != nil {
+				return err2
+			}
+			// Force new path: do not reuse the dead hot.
+			postErr = h2.pipelinePost(reqBytes)
+			c.releaseH1UploadConn(h2, true, postErr)
+			if postErr != nil {
+				c.markFatal(postErr)
+				return postErr
+			}
+		} else {
+			return postErr
+		}
+	}
+	if fn := c.getOnRTT(); fn != nil {
+		fn(time.Since(start))
+	}
 	return nil
 }
 
+
+// acquireH1UploadConn returns a shared pipelined H1 conn (hot) or dials a new one.
+// Caller must releaseH1UploadConn when done.
+// Concurrent first-dials wait on h1Dialing so parallel PostPacket shares one socket.
+func (c *DefaultDialerClient) acquireH1UploadConn(ctx context.Context) (*H1Conn, bool, error) {
+	c.hotH1Mu.Lock()
+	if c.hotH1Wait == nil {
+		c.hotH1Wait = sync.NewCond(&c.hotH1Mu)
+	}
+	for {
+		// Prefer the shared hot conn so concurrent PostPacket can pipeline.
+		if c.hotH1 != nil {
+			h := c.hotH1
+			if h.tryAcquireShared() {
+				c.hotH1Mu.Unlock()
+				return h, false, nil
+			}
+			// Dead hot: drop it.
+			c.hotH1 = nil
+		}
+		if c.h1Dialing {
+			c.hotH1Wait.Wait()
+			continue
+		}
+		// Try idle pool first (may have leftover pipeline state from older path).
+		if c.uploadRawPool != nil {
+			if h := c.uploadRawPool.Get(); h != nil {
+				if h.tryAcquireShared() {
+					if c.hotH1 == nil {
+						c.hotH1 = h
+					}
+					c.hotH1Mu.Unlock()
+					return h, false, nil
+				}
+				_ = h.Close()
+			}
+		}
+		// This caller becomes the single dialer; peers wait on h1Dialing.
+		c.h1Dialing = true
+		c.hotH1Mu.Unlock()
+
+		newConn, err := c.dialUploadConn(context.WithoutCancel(ctx))
+		c.hotH1Mu.Lock()
+		c.h1Dialing = false
+		if err != nil {
+			c.hotH1Wait.Broadcast()
+			c.hotH1Mu.Unlock()
+			return nil, true, err
+		}
+		h := NewH1Conn(newConn)
+		if !h.tryAcquireShared() {
+			_ = h.Close()
+			c.hotH1Wait.Broadcast()
+			c.hotH1Mu.Unlock()
+			return nil, true, stdnet.ErrClosed
+		}
+		// Prefer the socket we just dialed as the shared hot conn.
+		if c.hotH1 == nil {
+			c.hotH1 = h
+			c.hotH1Wait.Broadcast()
+			c.hotH1Mu.Unlock()
+			return h, true, nil
+		}
+		// Unexpected: a hot appeared without going through h1Dialing.
+		// Keep existing hot for sharing; drop our unused dial (we already
+		// hold one activeUsers on h — close instead of pooling dirty).
+		_ = h.Close()
+		hot := c.hotH1
+		if !hot.tryAcquireShared() {
+			c.hotH1 = nil
+			c.hotH1Wait.Broadcast()
+			c.hotH1Mu.Unlock()
+			return nil, true, stdnet.ErrClosed
+		}
+		c.hotH1Wait.Broadcast()
+		c.hotH1Mu.Unlock()
+		return hot, false, nil
+	}
+}
+
+// releaseH1UploadConn drops a shared user and returns the conn to the idle pool
+// when no users remain. On error the conn is closed and cleared from hot.
+func (c *DefaultDialerClient) releaseH1UploadConn(h *H1Conn, newConnection bool, postErr error) {
+	if h == nil {
+		return
+	}
+	if postErr != nil || h.isDead() {
+		c.hotH1Mu.Lock()
+		if c.hotH1 == h {
+			c.hotH1 = nil
+		}
+		c.hotH1Mu.Unlock()
+		_ = h.Close()
+		return
+	}
+	if h.releaseShared() {
+		c.hotH1Mu.Lock()
+		// Keep healthy hot for reuse; also park a spare in the idle pool.
+		if c.hotH1 == h {
+			// stay hot with 0 users; next acquire reuses without pool hop
+			c.hotH1Mu.Unlock()
+			return
+		}
+		c.hotH1Mu.Unlock()
+		c.uploadRawPool.Put(h)
+	}
+}
 // Close shuts down the underlying HTTP transport.
 // For HTTP/2: force-closes tracked raw sockets (active streams included), then
 // clears idle pool entries. CloseIdleConnections alone leaves busy H2 conns alive.
 // For HTTP/1.1: closes idle connections after tracked sockets.
 // For HTTP/3: closes immediately (QUIC handles graceful shutdown internally).
 // For Happy Eyeballs: closes both H3 and H2 transports.
+func (c *DefaultDialerClient) clearHotH1() {
+	c.hotH1Mu.Lock()
+	h := c.hotH1
+	c.hotH1 = nil
+	c.h1Dialing = false
+	if c.hotH1Wait != nil {
+		c.hotH1Wait.Broadcast()
+	}
+	c.hotH1Mu.Unlock()
+	if h != nil {
+		_ = h.Close()
+	}
+}
+
 func (c *DefaultDialerClient) Close() error {
 	c.closed.Store(true)
+	c.clearHotH1()
+	// Drain idle H1 upload pool so sockets do not linger after dialer close.
+	if c.uploadRawPool != nil {
+		for {
+			h := c.uploadRawPool.Get()
+			if h == nil {
+				break
+			}
+			_ = h.Close()
+		}
+	}
 	// Tear down live sockets first so blocked Read/Write on dead H2 streams unblock.
 	c.forceCloseLiveConns()
 	if c.client == nil || c.client.Transport == nil {
@@ -653,3 +900,4 @@ func (w *WaitReadCloser) Close() error {
 	}
 	return nil
 }
+
