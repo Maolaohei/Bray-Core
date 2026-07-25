@@ -40,6 +40,23 @@ BENCH_RE = re.compile(
 
 STABLE_PCT = 3.0  # |delta| < 3% counts as stable
 
+# Suites that represent Bray product advantages (not common/buf regression noise).
+ADVANTAGE_SUITES = frozenset({"xhttp_core", "xmux"})
+# Prefer these metric name fragments when ranking Advantage Highlights.
+ADVANTAGE_NAME_HINTS = (
+    "TTFB",
+    "Burst",
+    "MemoryAllocations",
+    "Modes",
+    "GetRequestHeader",
+    "FormatSeq",
+    "GetXmuxClient",
+    "PoolScheduling",
+    "ConcurrentReadWrite",
+    "RTTEWMA",
+)
+
+
 
 def load_upstream_snapshot(path: Path) -> dict:
     """Load fixed external Xray-core reference metrics.
@@ -203,16 +220,21 @@ def suite_table(
     up_metrics = (upstream or {}).get("metrics") or {}
     has_any_up = any(match_upstream(n, up_metrics) for n in names)
 
+    if suite == "xhttp_core":
+        suite_title = f"{suite} — Bray XHTTP core (scenario-bound; not cross-comparable across modes)"
+    else:
+        suite_title = suite
+
     if has_any_up:
         lines = [
-            f"### {suite}",
+            f"### {suite_title}",
             "",
             "| Benchmark | Upstream | Self-baseline | Current | Δ vs Upstream | Δ vs Self | Trend |",
             "|-----------|---------:|--------------:|--------:|--------------:|----------:|-------|",
         ]
     else:
         lines = [
-            f"### {suite}",
+            f"### {suite_title}",
             "",
             "| Benchmark | Self-baseline | Current | Delta | Trend |",
             "|-----------|--------------:|--------:|------:|-------|",
@@ -297,6 +319,99 @@ def suite_table(
     return "\n".join(lines), rows_out
 
 
+
+def advantage_score(row: dict) -> float:
+    """Higher = more interesting for product Advantage Highlights."""
+    name = row.get("name") or ""
+    suite = row.get("suite") or ""
+    score = 0.0
+    if suite in ADVANTAGE_SUITES:
+        score += 100.0
+    for hint in ADVANTAGE_NAME_HINTS:
+        if hint in name:
+            score += 25.0
+            break
+    pct = row.get("delta_pct")
+    if pct is not None:
+        score += abs(float(pct))
+        if pct >= STABLE_PCT:
+            score += 10.0
+    else:
+        # first observation on an advantage suite still worth showing
+        if suite in ADVANTAGE_SUITES:
+            score += 8.0
+    return score
+
+
+def advantage_section(all_rows: List[dict], max_rows: int = 12) -> str:
+    """Marketing/product board: Bray data-plane highlights (separate from regression counts)."""
+    if not all_rows:
+        return (
+            "## Advantage Highlights\n\n"
+            "_No metrics this run. Advantage suite is `xhttp_core` (+ XMUX hot paths)._\n"
+        )
+
+    preferred = [r for r in all_rows if (r.get("suite") in ADVANTAGE_SUITES)]
+    pool = preferred if preferred else list(all_rows)
+    ranked = sorted(pool, key=advantage_score, reverse=True)[:max_rows]
+
+    lines = [
+        "## Advantage Highlights",
+        "",
+        "> **Regression board ≠ Advantage board.**",
+        "> Summary counts above answer: *did we get slower?*",
+        "> This section answers: *where does Bray's XHTTP/XMUX data-plane show up?*",
+        "> Prefer `xhttp_core` (TTFB / Burst / Modes / allocs / header+seq) and XMUX pool paths.",
+        "> Do **not** cross-compare H2 vs H2C vs packet-up as one delta series.",
+        "> Bray-only paths (session MAC, packet-up window semantics) may show Upstream as —.",
+        "",
+        "| Suite | Benchmark | Current | Self-baseline | Δ vs Self | Trend | Why it matters |",
+        "|-------|-----------|--------:|--------------:|----------:|-------|----------------|",
+    ]
+
+    why_map = {
+        "TTFB": "open latency / first byte",
+        "Burst": "short transfer burst",
+        "MemoryAllocations": "upload hot-path allocs",
+        "Modes": "packet-up / stream-up / stream-one",
+        "GetRequestHeader": "shared header construction",
+        "FormatSeq": "zero-alloc sequence format",
+        "GetXmuxClient": "mux client checkout",
+        "PoolScheduling": "pool pick cost",
+        "ConcurrentReadWrite": "mux concurrent RW",
+        "RTTEWMA": "RTT EWMA update",
+    }
+
+    for r in ranked:
+        name = r.get("name") or ""
+        why = "data-plane metric"
+        for k, v in why_map.items():
+            if k in name:
+                why = v
+                break
+        if r.get("suite") == "xhttp_core" and why == "data-plane metric":
+            why = "XHTTP core (scenario-bound)"
+        cur = f"{fmt_num(r['current'])} {r['unit']}"
+        base = "—" if r.get("baseline") is None else f"{fmt_num(r['baseline'])} {r['unit']}"
+        if r.get("delta_pct") is None:
+            delta = "—"
+        else:
+            delta = f"{r['delta_pct']:+.1f}%"
+        lines.append(
+            f"| `{r['suite']}` | `{name}` | {cur} | {base} | {delta} | {r.get('trend', '—')} | {why} |"
+        )
+
+    adv_n = sum(1 for r in all_rows if r.get("suite") in ADVANTAGE_SUITES)
+    lines.extend(
+        [
+            "",
+            f"_Advantage-suite rows this run: **{adv_n}**. Full suite tables follow._",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def summary_table(all_rows: List[dict]) -> str:
     improved = [r for r in all_rows if r.get("delta_pct") is not None and r["delta_pct"] >= STABLE_PCT]
     slower = [r for r in all_rows if r.get("delta_pct") is not None and r["delta_pct"] <= -STABLE_PCT]
@@ -330,6 +445,10 @@ def summary_table(all_rows: List[dict]) -> str:
 def make_svg(all_rows: List[dict], path: Path, max_bars: int = 12) -> None:
     """Simple horizontal bar chart of |delta| for metrics with baseline."""
     scored = [r for r in all_rows if r.get("delta_pct") is not None]
+    # Prefer Advantage-suite rows for the chart so common/buf noise does not dominate.
+    adv_scored = [r for r in scored if r.get("suite") in ADVANTAGE_SUITES]
+    if adv_scored:
+        scored = adv_scored
     if not scored:
         path.write_text(
             '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="80">'
@@ -351,7 +470,7 @@ def make_svg(all_rows: List[dict], path: Path, max_bars: int = 12) -> None:
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
         '<rect width="100%" height="100%" fill="#0f1419"/>',
         f'<text x="16" y="22" fill="#e7ecf3" font-family="Segoe UI,sans-serif" font-size="14" font-weight="600">'
-        f"Bray-Core bench delta (top {len(scored)} by |%|)</text>",
+        f"Bray-Core advantage/self delta (top {len(scored)} by |%|)</text>",
     ]
     for i, r in enumerate(scored):
         y = top + i * row_h
@@ -449,6 +568,7 @@ def assemble_report(
             "stable": sum(1 for r in all_rows if r.get("delta_pct") is not None and abs(r["delta_pct"]) < STABLE_PCT),
             "slower": sum(1 for r in all_rows if r.get("delta_pct") is not None and r["delta_pct"] <= -STABLE_PCT),
             "new": sum(1 for r in all_rows if r.get("delta_pct") is None),
+            "advantage_rows": sum(1 for r in all_rows if r.get("suite") in ADVANTAGE_SUITES),
         },
         "verdict": "no_material_regression" if verdict_ok else "regressions_present",
         "rows": all_rows,
@@ -465,18 +585,25 @@ def assemble_report(
         f"| Go | {meta.get('go', 'unknown')} |",
         f"| Noise band | ±{STABLE_PCT:.0f}% → ⚪ |",
         f"| Upstream ref | {(upstream or {}).get('label') or '—'} |",
+        f"| Tracks | Regression (all suites) · Advantage (`xhttp_core` + XMUX) |",
         "",
         "> **Delta 为正 = 更好**（`ns/op` 更低，或 `MB/s` 更高）。",
-        "> **Upstream** = 固定外部 Xray-core 对照快照；**Self-baseline** = CI 上次 main 缓存。",
+        "> **Upstream** = 固定外部 Xray-core 对照快照（common micro 参考，不是 Bray 卖点主表）。",
+        "> **Self-baseline** = CI 上次 main 缓存。",
+        "> **Regression board** = Summary counts（有没有明显变慢）。",
+        "> **Advantage board** = XHTTP/XMUX 数据面（TTFB / Burst / Modes / allocs / pool）。",
         "> 仅同名 Benchmark 对比；H2 / H2C / packet-up 不同场景不要横向比较吞吐。",
         "",
         summary_table(all_rows),
+        advantage_section(all_rows),
         "## Suites",
         "",
         *suite_mds,
         "## Chart",
         "",
         "![bench delta](summary.svg)",
+        "",
+        "_Chart prefers Advantage-suite deltas when present; otherwise largest |self-delta|._",
         "",
         "## How to read",
         "",
@@ -491,9 +618,10 @@ def assemble_report(
         "",
         "| Column | Source |",
         "|--------|--------|",
-        "| Upstream | Fixed external Xray-core snapshot (historical same-machine run) |",
+        "| Upstream | Fixed external Xray-core snapshot (historical same-machine run; mostly common/*) |",
         "| Self-baseline | Last successful `main` CI cache (`base_*.txt`) |",
         "| Current | This commit |",
+        "| Advantage Highlights | Product-facing subset (`xhttp_core`, XMUX); not a substitute for full suites |",
         "",
     ]
     return "\n".join(parts), all_rows, summary
@@ -502,7 +630,7 @@ def assemble_report(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default="bench_results")
-    ap.add_argument("--suites", default="xmux,happy,warmup,vless,buf")
+    ap.add_argument("--suites", default="xhttp_core,xmux,happy,warmup,vless,buf")
     ap.add_argument("--sha", default="local")
     ap.add_argument("--runner", default="local")
     ap.add_argument("--go", default="")

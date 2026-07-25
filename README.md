@@ -199,24 +199,35 @@ sysctl -w net.core.wmem_max=16777216
 
 #### Benchmark 结论（摘要）
 
+**读表口径（回归轨 vs 优势轨）**
+
+| 轨道 | 回答的问题 | 看哪里 |
+|------|------------|--------|
+| **Regression** | 有没有明显变慢？ | CI Summary 计数 + common/XMUX/VLESS/buf 全表 |
+| **Advantage** | Bray 数据面强在哪？ | CI **Advantage Highlights** + suite `xhttp_core`（TTFB / Burst / Modes / allocs / header·seq）+ XMUX 热路径 |
+| **Local product snapshot** | 同机手工产品吞吐 | 下表 + [COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md)（P0/optN 时间线） |
+
+> common/buf 与固定 Upstream 对照证明「底层没做烂」；**卖点请看 XHTTP/XMUX**，不要把 AES/ChaCha 或混场景 MB/s 当 Bray 优势。
+
 **快照**：2026-07-24 P0 pace 修复后（i5-13600KF / go1.26.4；XHTTP median of 3 @ 500ms）· 全文 [bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md)
 
-| 类别 | 结论 | 说明 |
-|------|------|------|
-| vs 上游 common（buf/crypto/…） | ⚪/🔴 **混合 / 微慢** | crypto 持平；`Copy` ≈ −29%（非主战场） |
-| XMUX ConcurrentRW | ⚪ **稳定** | Get/Pool 以 07-24 为新 self-baseline |
-| Happy Eyeballs | ⚠️ **撤销旧 +46% 叙事** | LargeList 无法复现 06-24 大胜 |
-| XHTTP stream-one / stream-up | 🟢 **~262 / ~241 MB/s** | 与 quiet 同量级 |
-| XHTTP packet-up 单连接 | 🟢 **~223 MB/s H2C** | 原 ~2.17 MB/s（30ms 间隔）已 P0 解锁，约 **100×** |
-| XHTTP multi-conn (16) | 🟢 **聚合 ~18 GB/s 量级** | conns_1 已 ~170 MB/s；不再靠堆连接绕 30ms |
-| REALITY micro | ⚪ **同量级** | AEAD / KeyExchange 稳定 |
+| 类别 | 轨道 | 结论 | 说明 |
+|------|------|------|------|
+| vs 上游 common（buf/crypto/…） | Regression | ⚪/🔴 **混合 / 非主战场** | crypto 持平；`Copy` 波动不代表 XHTTP 产品吞吐 |
+| XMUX ConcurrentRW / Pool | Regression + Advantage | ⚪/**🟢** | Get/Pool 以近期 self-baseline 演进；见 CI XMUX + Advantage |
+| Happy Eyeballs | Regression | ⚠️ **撤销旧 +46% 叙事** | LargeList 无法复现 06-24 大胜 |
+| XHTTP stream-one / stream-up | Advantage (local) | 🟢 **~262 / ~241 MB/s** | 与 quiet 同量级；CI 用 Modes 子 bench 跟踪 |
+| XHTTP packet-up 单连接 | Advantage (local) | 🟢 **~223 MB/s H2C** | 原 ~2.17 MB/s（30ms 间隔）P0 解锁，约 **100×** |
+| XHTTP multi-conn (16) | Advantage (local) | 🟢 **聚合 ~18 GB/s 量级** | conns_1 已 ~170 MB/s；勿与 H2C micro 横向比 |
+| XHTTP TTFB / Burst / allocs | Advantage (CI `xhttp_core`) | 📈 **CI 跟踪** | 每次 push 写入 `new_xhttp_core.txt` → report Advantage 区 |
+| REALITY micro | Regression | ⚪ **同量级** | AEAD / KeyExchange 稳定 |
 
 - 完整表格与图例：[bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md) · 短摘要 [bench_results/history/latest.md](bench_results/history/latest.md)
 - 原始输出：`bench_results/run_20260724_p0_pace/`（P0 后）· 修复前对照 `bench_results/run_20260724_quiet/`
-- 每次 push/PR 的 CI 表格 + SVG：`Benchmark Tracking` workflow → artifact `bench-report-<sha>`（`report.md` / `summary.svg` / `history/`）
-- 本地：`./benchmark.sh` 或 `python scripts/format_bench_report.py --history`
+- 每次 push/PR 的 CI 表格 + SVG：`Benchmark Tracking` → artifact `bench-report-<sha>`（`report.md` / `summary.svg` / `history/`；含 **Advantage Highlights**）
+- 本地格式化：`python scripts/format_bench_report.py --history --suites xhttp_core,xmux,happy,warmup,vless,buf`
 - **无法同配置复现的旧数字直接忽略**；只信同名 Benchmark + 同 count + median。
-- **Upstream 列** = 固定外部对照快照 [`bench_results/upstream/xray-core-v26.6.22.json`](bench_results/upstream/xray-core-v26.6.22.json)（2026-06-24 同机 Xray-core）；**Self-baseline** = CI 上次 `main` 缓存 / 本机 07-24 quiet；二者不要混为一谈。
+- **Upstream 列** = 固定外部对照快照 [`bench_results/upstream/xray-core-v26.6.22.json`](bench_results/upstream/xray-core-v26.6.22.json)（2026-06-24 同机 Xray-core，偏 common/*）；**Self-baseline** = CI 上次 `main` 缓存；**Advantage** ≠ Upstream 对打。
 
 本地 HTTPS 代理若叠加系统/浏览器 MITM（例如部分 DNS/广告拦截的 HTTPS 解密），会表现为独立 CA 签发的证书，属于链路外侧因素，与上述内核串站修复无关。
 

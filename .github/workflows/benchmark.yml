@@ -58,6 +58,24 @@ jobs:
           ls -la bench_baseline || true
 
       # Capture only go test stdout so log/panic noise does not break benchstat.
+      - name: Run XHTTP core benchmarks
+        run: |
+          set -o pipefail
+          # Product-facing Advantage suite (scenario-bound). Avoid ConnectionStorm here
+          # (slow/noisy); keep Modes/TTFB/Burst/Memory + packet-up header/seq micros.
+          go test -run=^$ \
+            -bench='Benchmark(XHTTP_TTFB|XHTTP_Burst_|XHTTP_MemoryAllocations|XHTTP_Modes|GetRequestHeader|FormatSeqInt64)' \
+            -benchmem -count=3 -timeout=420s \
+            ./transport/internet/splithttp/ \
+            2> bench_results/new_xhttp_core.err | tee bench_results/new_xhttp_core.raw | \
+            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            > bench_results/new_xhttp_core.txt || true
+          if ! grep -q '^Benchmark' bench_results/new_xhttp_core.txt; then
+            echo "XHTTP core benchmark produced no Benchmark lines" | tee bench_results/new_xhttp_core.txt
+            cat bench_results/new_xhttp_core.err || true
+            exit 1
+          fi
+
       - name: Run XMUX benchmarks
         run: |
           set -o pipefail
@@ -146,7 +164,7 @@ jobs:
             fi
           }
 
-          for name in xmux happy warmup vless buf; do
+          for name in xhttp_core xmux happy warmup vless buf; do
             if [ -f "bench_results/base_${name}.txt" ]; then
               sanitize_bench "bench_results/base_${name}.txt" "bench_results/base_${name}.clean.txt"
             fi
@@ -158,7 +176,7 @@ jobs:
           # Table + emoji trends + SVG chart + summary JSON (GitHub-friendly).
           python3 scripts/format_bench_report.py \
             --results-dir bench_results \
-            --suites xmux,happy,warmup,vless,buf \
+            --suites xhttp_core,xmux,happy,warmup,vless,buf \
             --sha "${GITHUB_SHA:-local}" \
             --runner "${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}" \
             --go "$(go env GOVERSION 2>/dev/null || echo go)" \
@@ -177,7 +195,7 @@ jobs:
             done
             if [ "$HAS_BASELINE" = true ]; then
               echo '```'
-              for name in xmux happy warmup vless buf; do
+              for name in xhttp_core xmux happy warmup vless buf; do
                 if [ -s "bench_results/base_${name}.clean.txt" ] && [ -s "bench_results/new_${name}.clean.txt" ]; then
                   echo "=== ${name} ==="
                   benchstat "bench_results/base_${name}.clean.txt" "bench_results/new_${name}.clean.txt" \
@@ -247,7 +265,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           mkdir -p bench_baseline
-          for name in xmux happy warmup vless buf; do
+          for name in xhttp_core xmux happy warmup vless buf; do
             if [ -f "bench_results/new_${name}.txt" ]; then
               # Persist only benchstat-compatible lines.
               if grep -E '^(Benchmark[[:alnum:]_./-]+[[:space:]]+[0-9]+[[:space:]]|pkg:|goos:|goarch:|cpu:)' \

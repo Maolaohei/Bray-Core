@@ -7,6 +7,8 @@
 
 > CI 每次 push/PR 会生成新的表格报告（`bench_results/report.md` + `summary.svg`）。  
 > 本文件是**可复现的本地快照**；无法在同配置下复现的旧吞吐数字标为 **not comparable** 并以下方 07-24 数字为准。
+>
+> **Regression board ≠ Advantage board**：Summary 计数看回归；**Advantage Highlights** + suite `xhttp_core` 看 Bray XHTTP/XMUX 数据面。common/* Upstream 对照不是产品卖点主表。
 
 **图例**
 
