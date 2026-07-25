@@ -949,6 +949,7 @@ func appendToPath(path, value string) string {
 
 // appendToPath2 appends up to two path segments in a single allocation.
 // Used by the default session+seq PlacementPath packet-up meta path.
+// Built with one []byte buffer (no strings.Builder indirection).
 func appendToPath2(path, a, b string) string {
 	if a == "" && b == "" {
 		return path
@@ -963,20 +964,19 @@ func appendToPath2(path, a, b string) string {
 		extra++ // '/' between a and b
 	}
 	extra += len(b)
-	var buf strings.Builder
-	buf.Grow(len(path) + extra)
-	buf.WriteString(path)
+	buf := make([]byte, 0, len(path)+extra)
+	buf = append(buf, path...)
 	if needSlash {
-		buf.WriteByte('/')
+		buf = append(buf, '/')
 	}
 	if a != "" {
-		buf.WriteString(a)
+		buf = append(buf, a...)
 		if b != "" {
-			buf.WriteByte('/')
+			buf = append(buf, '/')
 		}
 	}
 	if b != "" {
-		buf.WriteString(b)
+		buf = append(buf, b...)
 	}
-	return buf.String()
+	return string(buf)
 }

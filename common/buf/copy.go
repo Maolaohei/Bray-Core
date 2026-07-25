@@ -107,13 +107,34 @@ func copyInternal(reader Reader, writer Writer, handler *copyHandler) error {
 	}
 }
 
+// copyPlain is the common no-option hot path (benchmarks + many callers).
+// Avoids building a copyHandler / ranging an empty onData slice each loop.
+func copyPlain(reader Reader, writer Writer) error {
+	for {
+		buffer, err := reader.ReadMultiBuffer()
+		if !buffer.IsEmpty() {
+			if werr := writer.WriteMultiBuffer(buffer); werr != nil {
+				return writeError{werr}
+			}
+		}
+		if err != nil {
+			return readError{err}
+		}
+	}
+}
+
 // Copy dumps all payload from reader to writer or stops when an error occurs. It returns nil when EOF.
 func Copy(reader Reader, writer Writer, options ...CopyOption) error {
-	var handler copyHandler
-	for _, option := range options {
-		option(&handler)
+	var err error
+	if len(options) == 0 {
+		err = copyPlain(reader, writer)
+	} else {
+		var handler copyHandler
+		for _, option := range options {
+			option(&handler)
+		}
+		err = copyInternal(reader, writer, &handler)
 	}
-	err := copyInternal(reader, writer, &handler)
 	if err != nil && errors.Cause(err) != io.EOF {
 		return err
 	}

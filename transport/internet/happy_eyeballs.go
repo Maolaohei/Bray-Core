@@ -2,6 +2,7 @@ package internet
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/xtls/xray-core/common/errors"
@@ -116,7 +117,9 @@ func tcpRaceDialV3(ctx context.Context, src net.Address, ips []net.IP, port net.
 	prioritizeIPv6 := cfg.PrioritizeIpv6
 
 	// Score and sort IPs by v3 priority
-	ipScores := scoreIPs(ips, prioritizeIPv6, nil)
+	// Reusable score buffer for this race (1 growth, then 0 alloc).
+	var scoreBuf []HappyIPScore
+	ipScores := scoreIPsInto(scoreBuf, ips, prioritizeIPv6, nil)
 
 	// Set up try controller
 	initialDelay := time.Duration(cfg.TryDelayMs) * time.Millisecond
@@ -171,7 +174,7 @@ func tcpRaceDialV3(ctx context.Context, src net.Address, ips []net.IP, port net.
 			default:
 				if r.conn != nil {
 					// Record success
-					record := globalHappyIPDB.get(ipScores[r.index].IP.String())
+					record := globalHappyIPDB.getByIP(ipScores[r.index].IP)
 					if r.rtt > 0 {
 						record.recordSuccess(r.rtt)
 						tryController.OnSuccess(r.rtt)
@@ -189,7 +192,7 @@ func tcpRaceDialV3(ctx context.Context, src net.Address, ips []net.IP, port net.
 					}
 				} else {
 					// Record failure
-					record := globalHappyIPDB.get(ipScores[r.index].IP.String())
+					record := globalHappyIPDB.getByIP(ipScores[r.index].IP)
 					record.recordFail()
 					tryController.OnFail()
 					if r.err != nil {
@@ -236,27 +239,78 @@ func tcpRaceDialV3(ctx context.Context, src net.Address, ips []net.IP, port net.
 	}
 }
 
+// sortIPScratch holds temporary family buckets for RFC 8305 interleave.
+// Returned slice is always a fresh []net.IP of exact result length so callers
+// may retain it without racing the pool.
+type sortIPScratch struct {
+	ip4 []net.IP
+	ip6 []net.IP
+	out []net.IP
+}
+
+var sortIPScratchPool = sync.Pool{
+	New: func() any {
+		return &sortIPScratch{
+			ip4: make([]net.IP, 0, 16),
+			ip6: make([]net.IP, 0, 16),
+			out: make([]net.IP, 0, 16),
+		}
+	},
+}
+
 // sortIPs sort IPs according to rfc 8305.
 func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
 	if len(ips) == 0 {
 		return ips
 	}
-	ip4 := make([]net.IP, 0, len(ips))
-	ip6 := make([]net.IP, 0, len(ips))
+	if interleave == 0 {
+		interleave = 1
+	}
+	sc := sortIPScratchPool.Get().(*sortIPScratch)
+	ip4 := sc.ip4[:0]
+	ip6 := sc.ip6[:0]
+	if cap(ip4) < len(ips) {
+		ip4 = make([]net.IP, 0, len(ips))
+	}
+	if cap(ip6) < len(ips) {
+		ip6 = make([]net.IP, 0, len(ips))
+	}
 	for _, ip := range ips {
-		parsedIp := net.IPAddress(ip).IP()
-		if len(parsedIp) == net.IPv4len {
-			ip4 = append(ip4, parsedIp)
-		} else {
-			ip6 = append(ip6, parsedIp)
+		// Prefer length checks over To4/To16 which may allocate for non-canonical forms.
+		switch len(ip) {
+		case net.IPv4len:
+			ip4 = append(ip4, ip)
+		case net.IPv6len:
+			// IPv4-mapped IPv6 (::ffff:a.b.c.d) counts as v4 for interleave.
+			if v4 := ip.To4(); v4 != nil {
+				ip4 = append(ip4, v4)
+			} else {
+				ip6 = append(ip6, ip)
+			}
+		default:
+			// Keep unparsable entries as-is in the IPv6 bucket so we never drop IPs.
+			ip6 = append(ip6, ip)
 		}
 	}
 
 	if len(ip4) == 0 || len(ip6) == 0 {
+		// Clear refs before Put so pooled scratch does not pin IPs.
+		for i := range ip4 {
+			ip4[i] = nil
+		}
+		for i := range ip6 {
+			ip6[i] = nil
+		}
+		sc.ip4 = ip4[:0]
+		sc.ip6 = ip6[:0]
+		sortIPScratchPool.Put(sc)
 		return ips
 	}
 
-	newIPs := make([]net.IP, 0, len(ips))
+	out := sc.out[:0]
+	if cap(out) < len(ips) {
+		out = make([]net.IP, 0, len(ips))
+	}
 	consumeIP4 := 0
 	consumeIP6 := 0
 	consumeTurn := uint32(0)
@@ -266,10 +320,10 @@ func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
 	}
 	for {
 		if ip4turn {
-			newIPs = append(newIPs, ip4[consumeIP4])
+			out = append(out, ip4[consumeIP4])
 			consumeIP4++
 			if consumeIP4 == len(ip4) {
-				newIPs = append(newIPs, ip6[consumeIP6:]...)
+				out = append(out, ip6[consumeIP6:]...)
 				break
 			}
 			consumeTurn++
@@ -278,10 +332,10 @@ func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
 				consumeTurn = uint32(0)
 			}
 		} else {
-			newIPs = append(newIPs, ip6[consumeIP6])
+			out = append(out, ip6[consumeIP6])
 			consumeIP6++
 			if consumeIP6 == len(ip6) {
-				newIPs = append(newIPs, ip4[consumeIP4:]...)
+				out = append(out, ip4[consumeIP4:]...)
 				break
 			}
 			consumeTurn++
@@ -292,7 +346,25 @@ func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
 		}
 	}
 
-	return newIPs
+	// Caller-owned result: copy out of scratch so Put cannot race retainers.
+	result := make([]net.IP, len(out))
+	copy(result, out)
+	for i := range ip4 {
+		ip4[i] = nil
+	}
+	for i := range ip6 {
+		ip6[i] = nil
+	}
+	for i := range out {
+		out[i] = nil
+	}
+	sc.ip4 = ip4[:0]
+	sc.ip6 = ip6[:0]
+	sc.out = out[:0]
+	if cap(sc.ip4) <= 128 && cap(sc.ip6) <= 128 && cap(sc.out) <= 128 {
+		sortIPScratchPool.Put(sc)
+	}
+	return result
 }
 
 func tcpTryDial(ctx context.Context, src net.Address, sockopt *SocketConfig, ip net.IP, port net.Port, index int, resultCh chan<- *result, originalDomain string) {

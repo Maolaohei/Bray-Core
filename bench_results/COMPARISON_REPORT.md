@@ -1,8 +1,8 @@
 # Bray-Core Benchmark Comparison Report
 
-**Last human snapshot**: 2026-07-25 (**optN9 residual** + optN8 micro) · **Environment**: i5-13600KF, Windows amd64, Go 1.26.x
-**Tree**: optN9 residual · **Method**: 产品 thruput headline 仍 quiet2/optN3；XMUX/HE 官方 micro 仍 optN8；optN9 只报 packet-up short alloc 信号
-**Artifacts**: `bench_results/run_20260725_optN9/`（本轮 residual）· `run_20260725_optN8/` · `run_20260725_status/` · `run_20260724_optN3/` · `run_20260724_quiet2/`
+**Last human snapshot**: 2026-07-25 (**optN10 residual** + optN9 packet + optN8 micro) · **Environment**: i5-13600KF, Windows amd64, Go 1.26.x
+**Tree**: optN10 residual · **Method**: 产品 thruput headline 仍 quiet2/optN3；XMUX/HE/buf 官方 micro 以 **optN10 串行** 为准；packet-up short 只报 alloc 信号
+**Artifacts**: `bench_results/run_20260725_optN10/`（本轮 residual）· `run_20260725_optN9/` · `run_20260725_optN8/` · `run_20260724_optN3/` · `run_20260724_quiet2/`
 **Baseline label**: Xray-core / Bray-Core **v26.6.22** 固定外部对照（`bench_results/upstream/xray-core-v26.6.22.json`，2026-06-24 同机）
 
 > CI 每次 push/PR 会生成新的表格报告（`bench_results/report.md` + `summary.svg`）。  
@@ -22,23 +22,21 @@
 
 ---
 
-## 0. 一句话结论（2026-07-25 · quiet2 + optN3 产品 + **optN8 micro + optN9 packet residual**）
+## 0. 一句话结论（2026-07-25 · quiet2 + optN3 产品 + **optN10 micro residual**）
 
 | 维度 | 结论 |
 |------|------|
-| vs 固定上游 common micro | ⚪/🔴 **无全面“大胜”**。crypto 基本持平；`buf.Copy` 等偏慢属微基准噪声 + 代码面漂移，**不是** XHTTP 主战场（P2 暂不硬改）。 |
-| 200+ commit 是否“白做” | **否。** 最大可测跃迁仍是 **packet-up 默认 30ms pacing → P0 跳过 bulk/recentFlow**（H2C ~2.17 → ~220+ MB/s）。optN4→optN8 把 **XMUX Get/Pool 与 HE 微基准相对 quiet 明确拉回**；HE 已全面优于 06-24 Run2，且 Score **4→0 alloc**。 |
-| Bray-only packet-up H2C | 🟢 **P0 量级保持**：quiet2 med **~224.5**；**optN3** short med **~226 MB/s**，allocs **114**。相对 pre-P0 **~100×** 仍在。 |
-| Bray-only Modes/stream-* | quiet2 曾软；**optN3** stream-up med **~262**、stream-one **~213**。 |
-| H2 packet-up+TLS | ⚠️/**🟢 residual 小幅推进**：产品 headline 仍 optN3 ~**84 MB/s**；optN9 short alloc **201→~197**（H2C **112→~110**）。TLS 单连接仍是产品天花板，~90 gap 主要在 http2/TLS 栈。 |
+| vs 固定上游 common micro | ⚪ 多数接近；**`buf.Copy` 已 🟢**：optN10 med **~79.9 ns · 4 alloc** 优于上游 **98.13 ns**（旧 quiet ~126.5 的尴尬点已关掉）。其余 write micro 仍可能略慢，**不是** XHTTP 主战场。 |
+| 200+ commit 是否“白做” | **否。** 最大可测跃迁仍是 **packet-up 默认 30ms pacing → P0 跳过 bulk/recentFlow**（H2C ~2.17 → ~220+ MB/s）。optN4→optN10 把 **XMUX Get/Pool、HE Score/SVCB/V6、buf.Copy** 相对 quiet/上游明确拉回。 |
+| Bray-only packet-up H2C | 🟢 **P0 量级保持**：quiet2 med **~224.5**；**optN3** short med **~226 MB/s**，allocs **114** 类。相对 pre-P0 **~100×** 仍在。optN10 short alloc **~111**（不覆盖 thruput headline）。 |
+| Bray-only Modes/stream-* | quiet2 曾软；**optN3** stream-up med **~262**、stream-one **~213**。optN10 modes alloc 仍 **18 / 18**。 |
+| H2 packet-up+TLS | ⚠️/**🟢 residual 小幅推进后见顶**：产品 headline 仍 optN3 ~**84 MB/s**；optN9/optN10 short alloc **~197**。TLS 单连接仍是产品天花板，~90 gap 主要在 http2/TLS 栈。 |
 | H1 pipeline | 🟢 depth **3** ordered + first-dial 串行化；稳定性回归 PASS。 |
-| XMUX Get/Pool | 🟢 **optN8**：Borrow/Release **不再全量 recomputeScore**（inflight 读时折叠）；`behaviorScale` 缓存避免 learner 锁。干净串行：Get **~63 ns**（clean2）、pool_1 **~69–82**、pool_4 **~142–156**、pool_8 **~224–258**、pool_16 **~245–249**、pool_32 **~404–424**（均 0 alloc）。相对 quiet Get 129 / pool_1 160 **明确回升**；**不能**对标旧 17ns 简单随机选池。 |
-| HE v3 | 🟢 **optN8 官方 `he_optN8`**：ScoreIPs **~667 · 0 alloc**、SVCB **~1250 · 0**、V6 **~232 · 0**、SortIPScores **~440 · 0**、SortIPs **~191 · 1**、LargeList **~1299 · 1**。相对 optN7d Score **905·1 → 667·0**；相对 Run2 全面更好。 |
-| 污染跑次 | `run_20260724_h1_pipeline` **作废**；产品 thruput quiet2/optN3；micro 以 **optN8 干净串行** 为准（并行/热噪窗不覆盖）。 |
+| XMUX Get/Pool | 🟢 **optN10**：Get med **~59 ns**；pool_1 **~61.5** / pool_4 **~85** / pool_8 **~153** / pool_16 **~218** / pool_32 **~377**（均 0 alloc）。相对 quiet Get 129 / pool_1 160 **明确回升**，且中大池相对 optN8 再砍一截；**不能**对标旧 17ns 简单随机选池。 |
+| HE v3 | 🟢 **optN10 官方 `he.txt`**：ScoreIPs **~527 · 0 alloc**、SVCB **~811 · 0**、V6 **~153 · 0**、SortIPs **~166 · 1**、LargeList **~1007 · 1**。相对 optN8 Score **667→527**、SVCB **1250→811**、V6 **232→153**；Sort/LargeList 优于 optN8 软窗，仍未声称压过 optN7d 峰值。 |
+| 污染跑次 | `run_20260724_h1_pipeline` **作废**；产品 thruput quiet2/optN3；micro 以 **optN10 干净串行** 为准（短 thruput 窗不覆盖 headline）。 |
 
-**给“感觉全回退了 / 200 commit 更慢”的直接回答**：pre-P0 的 30ms 悬崖**没有**回来；产品 H2C headline 仍 ~225 MB/s 类（短窗 thruput 噪声偏软，alloc 现 ~110）。HE 已**不是**比 Run2 慢——optN8 Score **0 alloc** 且 ns 优于 optN7d。XMUX Get/Pool 相对 quiet **明确回升**，pool_1 相对 optN6 再砍一截。旧 17ns XMUX 与当前 Bray 不是同一算法。**真还没打穿的是 H2+TLS 单连接 ~197 alloc / ~84 MB/s 产品天花板**（optN9 只从 201 再砍约 4），不是“全面回退”。
-
----
+**给“感觉全回退了 / 200 commit 更慢”的直接回答**：pre-P0 的 30ms 悬崖**没有**回来；产品 H2C headline 仍 ~225 MB/s 类。HE 已**不是**比 Run2 慢——Score **0 alloc** 且 optN10 ns 再优于 optN8。XMUX Get/Pool 相对 quiet **明确回升**，optN10 中大池又比 optN8 更便宜。`buf.Copy` 已从“落后上游 ~29%”翻成 **快于上游**。旧 17ns XMUX 与当前 Bray 不是同一算法。**真还没打穿的是 H2+TLS 单连接 ~197 alloc / ~84 MB/s 产品天花板**（optN9/optN10 卡在 ~197），不是“全面回退”。
 
 ## 0.1 optN8 residual（2026-07-25 · 代码 + 串行 micro）
 
@@ -81,7 +79,7 @@
 2. **P2 XMUX 多池扫描**：大 pool 仍 O(n) + RLock；可考虑分层/堆，但别砍 score/probe/over-admit。
 3. **P2 HE SortIPs/LargeList**：非 scoreIPs 主路径；与 Run2/optN7 比有窗噪，需要单独安静窗再定是否值得动。
 4. **P2 stream-one residual**：相对 stream-up / P0 峰值仍有空间。
-5. **P3 common/buf.Copy 等**：上游对照偏慢，但不是 XHTTP 吞吐主战场。
+5. **P3 common/buf 其它 write micro**：Copy 已由 optN10 关掉上游缺口；其余次要。
 
 
 ## 0.2 optN9 residual（2026-07-25 · packet-up zero-copy + short alloc）
@@ -113,9 +111,50 @@
 2. **P2 XMUX 多池扫描**：大 pool 仍 O(n)+RLock；可分层/堆，但别砍 score/probe/over-admit。
 3. **P2 HE SortIPs/LargeList**：非 scoreIPs 主路径；需安静窗再确认。
 4. **P2 stream-one residual**：相对 stream-up 峰值仍有空间。
-5. **P3 common/buf.Copy 等**：上游对照偏慢，不是 XHTTP 吞吐主战场。
+5. **P3 common/buf 其它 write micro**：Copy 已由 optN10 关掉上游缺口；其余次要。
 
 详见 `bench_results/run_20260725_optN9/SUMMARY.md`。
+
+## 0.3 optN10 residual（2026-07-25 · path/XMUX/HE/buf micro）
+
+**代码面（稳定性优先，未砍 probe / MarkDead / over-admit / H1 ordered / session IP / P0 pace）**
+
+| 区域 | 改动 |
+|------|------|
+| path | `appendToPath2` 单次 `[]byte` 拼接（仍 1 path alloc） |
+| XMUX | `idleTimeoutNs` 缓存；多池扫描 indexed local slice；**拒绝** sticky skip-scan |
+| HE | `sortIPs` 用 `len(ip)` 先分族，减少 `To4`/`To16` 转换 |
+| common/buf | `copyPlain` 无 option 热路径；`Copy` 跳过空 `onData` 组装 |
+
+**官方 micro（中位，干净串行 · `run_20260725_optN10`）**
+
+| Bench | quiet / optN8 / optN9 | **optN10** | Trend |
+|-------|----------------------:|-----------:|:-----:|
+| `buf.Copy` | upstream 98.13 · quiet ~126.5 | **~79.9 ns · 4 alloc** | 🟢 vs upstream |
+| XMUX Get | quiet 129 · optN8 ~63 | **~59.4 ns · 0** | 🟢 |
+| XMUX pool_1 | quiet 160 · optN8 ~69–82 | **~61.5** | 🟢 |
+| XMUX pool_4 | quiet 187 · optN8 ~142–156 | **~85.3** | 🟢 |
+| XMUX pool_8 | quiet 243 · optN8 ~224–258 | **~152.8** | 🟢 |
+| XMUX pool_16 | quiet 242 · optN8 ~245–249 | **~218.1** | 🟢 |
+| XMUX pool_32 | quiet 357 · optN8 ~404–424 | **~377.2** | 🟢 vs optN8 |
+| HE ScoreIPs | optN8 667 · 0 | **~526.5 · 0** | 🟢 |
+| HE SVCB | optN8 1250 · 0 | **~811 · 0** | 🟢 |
+| HE V6 | optN8 232 · 0 | **~153 · 0** | 🟢 |
+| HE SortIPs | optN8 191 · 1 | **~165.5 · 1** | 🟢 vs optN8；⚠️ vs optN7d 134 |
+| HE LargeList | optN8 1299 · 1 | **~1007 · 1** | 🟢 vs optN8；⚠️ vs optN7d 799 |
+| H2C / H2 short alloc | optN9 110 / 197 | **~111 / ~197** | ⚪ |
+
+**产品 thruput headline 不变**：H2C ~224–226 · H2+TLS ~84 · stream-up ~262 · stream-one ~213。
+
+**剩余能继续优化的点（按 ROI）**
+
+1. **P1 H2+TLS / packet-up alloc gap（~197 vs H2C ~111）**：header 浅拷贝、`Request.WithContext`、`client.Do`、TLS/http2 栈；XHTTP 内继续只剩小数。
+2. **P2 XMUX 多池扫描结构**：pool_32 仍 O(n)+RLock；可分层/堆，但别砍 score/probe/over-admit；勿 sticky 绑死。
+3. **P2 stream-one residual**：相对 stream-up / P0 峰值仍有空间。
+4. **P2 HE SortIPs/LargeList quiet reconfirm**：相对 optN7d 峰值仍有窗差，需多窗再定。
+5. **P3 common/buf 其它 write micro**：Copy 已不再是上游缺口；其余性价比低。
+
+详见 `bench_results/run_20260725_optN10/SUMMARY.md`。
 ---
 ## 1. Common Modules: Bray now vs Upstream Xray-core v26.6.22
 
@@ -131,7 +170,7 @@
 | `Write32` | 1.834 ns/op | 1.986 | **-8.3%** | 🔴 |
 | `WriteByte2` | 1.146 ns/op | 1.265 | **-10.4%** | 🔴 |
 | `WriteByte8` | 4.180 ns/op | 4.348 | **-4.0%** | 🔴 |
-| `Copy` | 98.13 ns/op | 126.5 | **-28.9%** | 🔴 |
+| `Copy` | 98.13 ns/op | **79.9** (optN10 med) / 126.5 (quiet) | **+18.6%** vs upstream (optN10) | 🟢 optN10；quiet 历史 🔴 |
 | `SplitBytes` | 159.4 ns/op | 175.0 | **-9.8%** | 🔴 |
 | **common/crypto** | | | | |
 | `ChaCha20` | 625 MB/s | 629.7 | **+0.7%** | ⚪ |
@@ -152,10 +191,10 @@
 | **common/mux** | | | | |
 | `FrameWrite` | 47.93 ns/op | 49.12 | **-2.5%** | ⚪ |
 
-**Verdict**: ⚪/🔴 **不能**再写 “No regression vs upstream”。  
+**Verdict**: ⚪/**🟢 on Copy**。  
 - crypto 仍接近 stdlib 天花板（⚪）。  
-- `buf.Copy` / 若干 write 路径在 07-24 安静窗口下持续偏慢；同一机器上**初跑**更差（`Copy` med 160.5），安静重跑回收一部分但仍落后上游快照。  
-- 这些 common 微基准**不是** 07 月 XHTTP/XMUX/REALITY 优化的主要收益区。
+- `buf.Copy`：07-24 quiet 曾 **126.5**（落后上游）；**optN10 `copyPlain`** med **~79.9 ns · 4 alloc**，**优于**上游 **98.13**。  
+- 若干 write micro 仍可能略慢；这些 common 微基准**不是** XHTTP 吞吐主战场，但 Copy 已不再是“全面回退”证据。
 
 ---
 
@@ -324,11 +363,11 @@
 
 | Category | Status | Notes |
 |----------|--------|-------|
-| vs Upstream common | ⚪/🔴 **mixed / slight slower** | crypto ⚪；buf.Copy 🔴（P2：非主战场） |
-| XMUX Get | 🟢 **optN6 vs quiet** | Get **~62 ns**（was 129）；≠ 旧 17ns 算法 |
-| XMUX Pool | 🟢 **optN6 pool_1..32** | 102 / 137 / 193 / 190 / 309；中大池假回退已证伪 |
+| vs Upstream common | ⚪/**🟢 Copy** | crypto ⚪；**buf.Copy optN10 ~80 ns 优于上游 98**；其它 write micro 次要 |
+| XMUX Get | 🟢 **optN10 vs quiet** | Get **~59 ns**（was 129；optN8 ~63）；≠ 旧 17ns 算法 |
+| XMUX Pool | 🟢 **optN10 pool_1..32** | ~62 / 85 / 153 / 218 / 377；相对 quiet/optN8 中大池再降；≠ 旧 17/23ns |
 | XMUX ConcurrentRW | ⚪ stable | quiet 基线 |
-| HE v3 | 🟢 **optN7 全面优于 Run2** | Score/SVCB/V6/Sort/LargeList 全胜；Score **1 alloc**；SortIPScores **0 alloc** |
+| HE v3 | 🟢 **optN10 再压 Score/SVCB/V6** | Score **~527 · 0 alloc**（optN8 667）；SVCB ~811；V6 ~153；Sort/LargeList 优于 optN8 软窗 |
 | REALITY micro | ⚪ stable | 同量级（本轮未重跑） |
 | XHTTP packet-up H2C | 🟢 **~225–226 MB/s** 产品 | quiet2 / **optN3** |
 | XHTTP packet-up+TLS | ⚠️/**🟢 ~84 MB/s** 产品 optN3 | 单连接 TLS 天花板仍是 P1 |
@@ -347,18 +386,19 @@
 6. **optN5 micro residual**：XMUX Get **~60–62 ns**；HE SVCB **24→4 allocs**；Score/LargeList 贴/超 Run2。  
 7. **optN6 micro residual**：HE **全面优于 Run2**；XMUX pool_4..32 干净波全面优于 quiet/optN4；Get ~62。  
 8. **optN7 micro residual**：HE Score **4→1 alloc** / SortIPScores **3→0**；ScoreIPs **905**、V6 **268**、LargeList **799**；packet request shell 手构。  
-9. common/buf **不要**当 200-commit 卖点；XMUX 也不要用上游/旧 17ns 当 KPI。
+9. common/buf **不要**当 200-commit 主卖点；XMUX 也不要用上游/旧 17ns 当 KPI。
+10. **optN8–optN10 residual**：XMUX score fold → packet body zero-copy → path/HE/buf micro；optN10 关 `buf.Copy` 上游缺口，HE Score/XMUX 中池再降；**H2+TLS ~197 alloc 仍见顶**。
 
 ### 7.1 还能优化的点（按收益/风险）
 
 | 优先级 | 点 | 为什么 | 风险 |
 |--------|----|--------|------|
-| P1 | **H2 packet-up+TLS 剩余 ~90 allocs vs H2C** | 单连接产品天花板；optN3 ~84 MB/s / ~200 allocs；短跑 alloc 仍 ~201 | Header/指纹语义；先 profile 再改 |
+| P1 | **H2 packet-up+TLS 剩余 ~90 allocs vs H2C** | 单连接产品天花板；optN3 ~84 MB/s；optN9/optN10 short alloc **~197** | Header/指纹语义；`WithContext`/Do/TLS 栈 |
 | P1 | **Modes/stream-one vs P0 ~262** | OpenStream header wait + 双向 body | deadline / 半关 |
-| P2 | **XMUX pool_32 residual** | 308 vs 旧 148 算法不同；还可减 atomic 次 | 勿砍 score/probe/over-admit |
+| P2 | **XMUX pool_32 residual** | optN10 ~377（仍 O(n)）；相对 quiet/optN8 已降；≠ 旧 148 算法 | 勿砍 score/probe/over-admit；勿 sticky |
 | P2 | **scoreIPs 结果切片 1 alloc** | optN7 已 4→1；再降需 caller-owned buffer API | 保持 score 语义 |
 | P2 | **packet-up 多连接聚合** 回落调查 | conns_N 相对 P0 峰值 −20..−50% | bench 定义/热噪声 |
-| P3 | common/buf.Copy 等 micro | 非 XHTTP 主战场 | 性价比低 |
+| P3 | common/buf 其它 write micro | **Copy 已 🟢 优于上游**；其余 write 次要 | 性价比低 |
 | Keep | probe / MarkDead / over-admit / H1 ordered / session IP | 稳定性资产 | **禁止为 ns 拆除** |
 
 **稳定性优先**：有序 H1 pipeline、first-dial 串行、session IP 绑定、MarkDead 关传输、pace 仅 idle tiny——这些正确性资产保留。
@@ -380,6 +420,9 @@
 | `bench_results/run_20260724_quiet2/` | post-H1 干净 re-bench（产品基线） |
 | `bench_results/run_20260724_quiet2_long/` | H2/Modes/Conns 1s×5 |
 | `bench_results/run_20260724_optN2/` | residual 中途（H1 depth3 / probe） |
+| `bench_results/run_20260725_optN10/` | **optN10 residual**（buf.Copy ~80；XMUX Get ~59 / pool 中大池再降；HE Score ~527 · 0） |
+| `bench_results/run_20260725_optN9/` | **optN9 packet residual**（H2C/H2 alloc 110/197；PostPacketBytes） |
+| `bench_results/run_20260725_optN8/` | **optN8 micro residual**（XMUX score fold；HE Score 0 alloc） |
 | `bench_results/run_20260725_optN6/` | **optN6+optN7 micro residual**（XMUX Get ~62；HE Score 1 alloc / SortIPScores 0） |
 | `bench_results/run_20260724_optN5/` | **本轮 micro residual**（XMUX Get ~60ns + HE SVCB 4 allocs） |
 | `bench_results/run_20260724_optN4/` | 上轮 micro residual（XMUX Get/Pool + HE v3） |
