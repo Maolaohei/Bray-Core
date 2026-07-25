@@ -18,14 +18,26 @@ func (c *benchFakeConn) IsClosed() bool {
 }
 
 func BenchmarkXMUXGetXmuxClient(b *testing.B) {
-	m := NewXmuxManager(&XmuxConfig{}, func() XmuxConn {
+	// Microbench selection only: pin pool=1, unlimited reuse/concurrency so
+	// default CMaxReuseTimes rotation does not dominate ns/op.
+	m := NewXmuxManager(&XmuxConfig{
+		MaxConnections: &RangeConfig{From: 1, To: 1},
+		MaxConcurrency: &RangeConfig{From: 0, To: 0},
+		CMaxReuseTimes: &RangeConfig{From: 0, To: 0},
+	}, func() XmuxConn {
 		return &benchFakeConn{}
 	})
 	defer m.Close()
+	if _, err := m.GetXmuxClient(context.Background()); err != nil {
+		b.Fatal(err)
+	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		m.GetXmuxClient(context.Background())
+		if _, err := m.GetXmuxClient(context.Background()); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -61,17 +73,28 @@ func BenchmarkXMUXRTTEWMA(b *testing.B) {
 func BenchmarkXMUXPoolScheduling(b *testing.B) {
 	for _, poolSize := range []int{1, 4, 8, 16, 32} {
 		b.Run("pool_"+itoa(poolSize), func(b *testing.B) {
+			// Selection microbench: unlimited reuse/concurrency, force-filled pool.
+			// ForceAddClientsForTest bypasses burst soft-cap so pool_32 is real n=32.
 			m := NewXmuxManager(&XmuxConfig{
 				MaxConnections: &RangeConfig{From: int32(poolSize), To: int32(poolSize)},
+				MaxConcurrency: &RangeConfig{From: 0, To: 0},
+				CMaxReuseTimes: &RangeConfig{From: 0, To: 0},
 			}, func() XmuxConn {
 				return &benchFakeConn{}
 			})
 			defer m.Close()
+			m.ForceAddClientsForTest(poolSize)
 
+			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				c, _ := m.GetXmuxClient(context.Background())
-				c.Borrow()
+				c, err := m.GetXmuxClient(context.Background())
+				if err != nil || c == nil {
+					b.Fatal(err)
+				}
+				if !c.Borrow() {
+					b.Fatal("borrow failed")
+				}
 				c.Release()
 			}
 		})

@@ -1130,6 +1130,20 @@ func (m *XmuxManager) effectiveConcurrency() int32 {
 	return m._dynamicConc.Load()
 }
 
+
+// ForceAddClientsForTest appends n fresh clients without burst gating.
+// Test/bench only: measures multi-conn selection cost on a filled pool.
+func (m *XmuxManager) ForceAddClientsForTest(n int) {
+	if m == nil || n <= 0 {
+		return
+	}
+	for i := 0; i < n; i++ {
+		m.pool.mu.Lock()
+		_ = m.newXmuxClientLocked()
+		m.pool.mu.Unlock()
+	}
+}
+
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
 	m.pool.mu.Lock()
 	defer m.pool.mu.Unlock()
@@ -1373,6 +1387,77 @@ func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
 	return c
 }
 
+
+// maxInlineXmuxScan is the stack capacity for multi-conn selection without
+// heap snapshot. Covers common MaxConnections and BenchmarkXMUXPoolScheduling
+// sizes (1..32). Larger pools fall back to xmuxSnapPool.
+const maxInlineXmuxScan = 32
+
+// pickBestXmuxClient scans candidates and returns the lowest selectionScore
+// reusable client under concurrency/idle rules. overAdmit prefers lower
+// inflight first, then score. Snapshot may be nil when n==0.
+//
+// Callers that unlocked the pool must re-validate the winner before use
+// (leftUsage CAS + state) because the set can change after the snapshot.
+func pickBestXmuxClient(candidates []*XmuxClient, n int, nowNs, idleNs int64, effectiveConc int32, overAdmit bool) *XmuxClient {
+	if n <= 0 {
+		return nil
+	}
+	var best *XmuxClient
+	bestScore := int64(math.MaxInt64)
+	var bestInflight int32 = math.MaxInt32
+	for i := 0; i < n; i++ {
+		c := candidates[i]
+		if c == nil || !xmuxClientReusable(c, nowNs) {
+			continue
+		}
+		inf := c.activeStreams.Load()
+		if !overAdmit {
+			// Idle eviction: only skip if NO active streams AND idle for too long.
+			if inf == 0 {
+				if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > idleNs {
+					continue
+				}
+			}
+			if effectiveConc > 0 && inf >= effectiveConc {
+				continue
+			}
+			if sc := selectionScoreWithInflight(c, inf); sc < bestScore {
+				best = c
+				bestScore = sc
+			}
+			continue
+		}
+		if !underOverAdmitCap(c, effectiveConc) {
+			continue
+		}
+		sc := selectionScoreWithInflight(c, inf)
+		if inf < bestInflight || (inf == bestInflight && sc < bestScore) {
+			best = c
+			bestInflight = inf
+			bestScore = sc
+		}
+	}
+	return best
+}
+
+// copyXmuxClientsLocked copies pool client pointers under RLock into dst
+// (must have len>=poolLen) or allocates via snap when dst is too small.
+// Returns the slice to scan and an optional snap to release after unlock.
+func copyXmuxClientsLocked(clients []*XmuxClient, poolLen int, dst []*XmuxClient) (scan []*XmuxClient, sn *xmuxSnap) {
+	if poolLen <= 0 {
+		return nil, nil
+	}
+	if poolLen <= len(dst) {
+		copy(dst[:poolLen], clients[:poolLen])
+		return dst[:poolLen], nil
+	}
+	sn = acquireSnap(poolLen)
+	sn.s = sn.s[:poolLen]
+	copy(sn.s, clients[:poolLen])
+	return sn.s, sn
+}
+
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 	// Bypass: always create new connection (for debugging XMUX issues)
 	if forceNewConnection {
@@ -1391,18 +1476,21 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		return nil, errors.New("XMUX: newConnFunc returned nil")
 	}
 
-	// Phase 1: select under RLock without snapshot copy on the common reuse path.
+	// Phase 1: brief RLock to size/copy pointers, score scan outside the lock.
 	// Prune of dead/exhausted clients is owned by healthCheckTick (Bray-only).
+	// Multi-conn must remain full quality scan (no sticky pin of high-RTT).
 	nowNs := time.Now().UnixNano()
 	effectiveConns := m.effectiveConnections()
 	effectiveConc := m.effectiveConcurrency()
+	idleNs := m.idleTimeoutNs
 
 	// overAdmit: when saturated past burst, reuse least-loaded Active client
 	// instead of creating unbounded REALITY/TLS connections.
 	overAdmit := false
 	var best *XmuxClient
+	var inline [maxInlineXmuxScan]*XmuxClient
 
-	// Attempt reuse with CAS on leftUsage; reselect under RLock if needed.
+	// Attempt reuse with CAS on leftUsage; reselect if race loses.
 	for attempt := 0; attempt < 4; attempt++ {
 		m.pool.mu.RLock()
 		poolLen := len(m.pool.clients)
@@ -1418,86 +1506,77 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 			break
 		}
 
-		best = nil
-		bestScore := int64(math.MaxInt64)
-		if !overAdmit {
-			// Single-conn warm path: skip full scan when the only client is reusable.
-			// Covers BenchmarkXMUXGetXmuxClient (default MaxConnections=1) and pool_1.
-			if poolLen == 1 {
-				c := m.pool.clients[0]
-				if xmuxClientReusable(c, nowNs) {
-					inf := c.activeStreams.Load()
-					idleSkip := false
-					if inf == 0 {
-						if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > m.idleTimeoutNs {
-							idleSkip = true
-						}
-					}
-					if !idleSkip && (effectiveConc <= 0 || inf < effectiveConc) {
-						best = c
+		// Single-conn warm path: no snapshot, decide under RLock (pool_1 / default).
+		if !overAdmit && poolLen == 1 {
+			c := m.pool.clients[0]
+			best = nil
+			if xmuxClientReusable(c, nowNs) {
+				inf := c.activeStreams.Load()
+				idleSkip := false
+				if inf == 0 {
+					if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > idleNs {
+						idleSkip = true
 					}
 				}
+				if !idleSkip && (effectiveConc <= 0 || inf < effectiveConc) {
+					best = c
+				}
+			}
+			if best != nil {
+				m.pool.mu.RUnlock()
 			} else {
-				// Multi-conn: full score scan. Do not sticky-skip: that would pin a
-				// high-RTT client and break quality-aware scheduling under load.
-				idleNs := m.idleTimeoutNs
-				clients := m.pool.clients
-				for i := 0; i < poolLen; i++ {
-					c := clients[i]
-					if !xmuxClientReusable(c, nowNs) {
-						continue
-					}
-					// Idle eviction: only skip if NO active streams AND idle for too long.
-					inf := c.activeStreams.Load()
-					if inf == 0 {
-						if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > idleNs {
-							continue
-						}
-					}
-					if effectiveConc > 0 && inf >= effectiveConc {
-						continue
-					}
-					if sc := selectionScoreWithInflight(c, inf); sc < bestScore {
-						best = c
-						bestScore = sc
-					}
+				burst := burstConnectionLimit(effectiveConns)
+				if burst == 0 || poolLen < burst {
+					m.pool.mu.RUnlock()
+					best = nil
+					break
+				}
+				overAdmit = true
+				// fall through to over-admit snapshot path with lock still held
+				scan, sn := copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
+				m.pool.mu.RUnlock()
+				best = pickBestXmuxClient(scan, len(scan), nowNs, idleNs, effectiveConc, true)
+				releaseSnap(sn)
+				if best == nil {
+					break
+				}
+			}
+		} else {
+			// Multi-conn (or over-admit retry): copy pointers under RLock, score unlocked.
+			scan, sn := copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
+			m.pool.mu.RUnlock()
+			best = pickBestXmuxClient(scan, len(scan), nowNs, idleNs, effectiveConc, overAdmit)
+			releaseSnap(sn)
+			if best == nil {
+				if overAdmit {
+					break
+				}
+				// All Active clients at concurrency limit (or idle-evicted).
+				// Soft-expand only up to burst; beyond that over-admit onto H2.
+				burst := burstConnectionLimit(effectiveConns)
+				if burst == 0 || poolLen < burst {
+					best = nil
+					break
+				}
+				overAdmit = true
+				// Reselect over-admit on the same snapshot size; take a fresh copy.
+				m.pool.mu.RLock()
+				poolLen = len(m.pool.clients)
+				scan, sn = copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
+				m.pool.mu.RUnlock()
+				best = pickBestXmuxClient(scan, len(scan), nowNs, idleNs, effectiveConc, true)
+				releaseSnap(sn)
+				if best == nil {
+					break
 				}
 			}
 		}
 
-		if best == nil {
-			// All Active clients are at concurrency limit (or idle-evicted).
-			// Soft-expand only up to burst; beyond that over-admit onto H2.
-			burst := burstConnectionLimit(effectiveConns)
-			if burst == 0 || poolLen < burst {
-				m.pool.mu.RUnlock()
-				best = nil
-				break
-			}
-			overAdmit = true
-			bestScore = int64(math.MaxInt64)
-			var bestInflight int32 = math.MaxInt32
-			for _, c := range m.pool.clients {
-				if !xmuxClientReusable(c, nowNs) {
-					continue
-				}
-				if !underOverAdmitCap(c, effectiveConc) {
-					continue
-				}
-				inf := c.activeStreams.Load()
-				sc := selectionScoreWithInflight(c, inf)
-				if inf < bestInflight || (inf == bestInflight && sc < bestScore) {
-					best = c
-					bestInflight = inf
-					bestScore = sc
-				}
-			}
-			if best == nil {
-				m.pool.mu.RUnlock()
-				break
-			}
+		// Snapshot can race with drain/close after unlock; drop and reselect.
+		if best == nil || !xmuxClientReusable(best, nowNs) {
+			best = nil
+			continue
 		}
-		m.pool.mu.RUnlock()
 
 		// CAS loop to atomically decrement leftUsage for finite reuse budgets.
 		acquired := false
@@ -1556,28 +1635,14 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		if burst := burstConnectionLimit(m.effectiveConnections()); burst > 0 {
 			m.pool.mu.RLock()
 			cur := len(m.pool.clients)
-			var least *XmuxClient
-			var leastInf int32 = math.MaxInt32
-			leastScore := int64(math.MaxInt64)
 			// Use effective concurrency hard-cap so a single wedged H2 cannot
 			// absorb every Dial under burst saturation.
 			effConc := m.effectiveConcurrency()
-			for _, c := range m.pool.clients {
-				if c.state.Load() != StateActive {
-					continue
-				}
-				if !underOverAdmitCap(c, effConc) {
-					continue
-				}
-				inf := c.activeStreams.Load()
-				sc := selectionScoreWithInflight(c, inf)
-				if inf < leastInf || (inf == leastInf && sc < leastScore) {
-					least = c
-					leastInf = inf
-					leastScore = sc
-				}
-			}
+			var inline2 [maxInlineXmuxScan]*XmuxClient
+			scan, sn := copyXmuxClientsLocked(m.pool.clients, cur, inline2[:])
 			m.pool.mu.RUnlock()
+			least := pickBestXmuxClient(scan, len(scan), time.Now().UnixNano(), m.idleTimeoutNs, effConc, true)
+			releaseSnap(sn)
 			if cur >= burst && least != nil {
 				m.lastActivity.Store(time.Now().UnixNano())
 				least.LastUsed.Store(time.Now().UnixNano())
