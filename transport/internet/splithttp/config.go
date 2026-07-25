@@ -30,48 +30,34 @@ var multiBufferContainerPool = sync.Pool{
 	},
 }
 
-// packetBodyPool reuses the outer io.ReadCloser shell used as req.Body.
-var packetBodyPool = sync.Pool{
-	New: func() any {
-		return &pooledPacketBody{}
-	},
-}
-
-// durableBodyPool reuses byte-slice request bodies for packet-up retries.
-// The durable snapshot outlives the HTTP round-trip; Close only recycles the
-// shell and never frees the underlying bytes.
-var durableBodyPool = sync.Pool{
-	New: func() any {
-		return &pooledDurableBody{}
-	},
-}
-
-// pooledPacketBody returns a MultiBufferContainer to the pool on Close so
-// http.Client / http2 can free the body without leaking the wrapper.
-type pooledPacketBody struct {
+// packetBody is a one-shot io.ReadCloser over a pooled MultiBufferContainer.
+// The shell is NOT pooled: net/http.Request.Write always Close()s Body, and
+// callers may hold the same pointer afterward. Reusing the shell via sync.Pool
+// caused concurrent packet-up posts to steal each other's body (CL != body).
+// Only the MultiBufferContainer is pooled.
+type packetBody struct {
 	c *buf.MultiBufferContainer
 }
 
-func (p *pooledPacketBody) Read(b []byte) (int, error) {
-	if p.c == nil {
+func (p *packetBody) Read(b []byte) (int, error) {
+	if p == nil || p.c == nil {
 		return 0, io.EOF
 	}
 	return p.c.Read(b)
 }
 
-func (p *pooledPacketBody) Close() error {
-	if p.c == nil {
+func (p *packetBody) Close() error {
+	if p == nil || p.c == nil {
 		return nil
 	}
 	// Close releases buffers via ReleaseMulti and keeps MultiBuffer[:0] capacity.
 	_ = p.c.Close()
 	multiBufferContainerPool.Put(p.c)
 	p.c = nil
-	packetBodyPool.Put(p)
 	return nil
 }
 
-func acquirePacketBody(payload buf.MultiBuffer) *pooledPacketBody {
+func acquirePacketBody(payload buf.MultiBuffer) *packetBody {
 	c := multiBufferContainerPool.Get().(*buf.MultiBufferContainer)
 	// Reuse container MultiBuffer capacity for the common 1-buffer wrap so the
 	// temporary MultiBuffer{FromBytes(...)} outer slice can be GC'd while the
@@ -85,19 +71,18 @@ func acquirePacketBody(payload buf.MultiBuffer) *pooledPacketBody {
 	} else {
 		c.MultiBuffer = payload
 	}
-	p := packetBodyPool.Get().(*pooledPacketBody)
-	p.c = c
-	return p
+	return &packetBody{c: c}
 }
 
-// pooledDurableBody is an io.ReadCloser over an external durable []byte.
+// durableBody is a one-shot io.ReadCloser over an external durable []byte.
 // Used by FillPacketRequestBytes so retries skip MultiBuffer/FromBytes shells.
-type pooledDurableBody struct {
+// Shell is not pooled (same concurrent Close/reuse hazard as packetBody).
+type durableBody struct {
 	b []byte
 	i int
 }
 
-func (p *pooledDurableBody) Read(b []byte) (int, error) {
+func (p *durableBody) Read(b []byte) (int, error) {
 	if p == nil || p.i >= len(p.b) {
 		return 0, io.EOF
 	}
@@ -109,21 +94,18 @@ func (p *pooledDurableBody) Read(b []byte) (int, error) {
 	return n, nil
 }
 
-func (p *pooledDurableBody) Close() error {
+func (p *durableBody) Close() error {
 	if p == nil {
 		return nil
 	}
+	// Idempotent: drop the view; caller owns the durable snapshot bytes.
 	p.b = nil
 	p.i = 0
-	durableBodyPool.Put(p)
 	return nil
 }
 
-func acquireDurableBody(data []byte) *pooledDurableBody {
-	p := durableBodyPool.Get().(*pooledDurableBody)
-	p.b = data
-	p.i = 0
-	return p
+func acquireDurableBody(data []byte) *durableBody {
+	return &durableBody{b: data}
 }
 
 // Pre-allocated default RangeConfig values to avoid per-request heap allocations.

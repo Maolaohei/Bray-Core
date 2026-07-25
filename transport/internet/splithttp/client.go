@@ -632,16 +632,22 @@ func (c *DefaultDialerClient) postPacket(ctx context.Context, rawURL string, ses
 	// stringify the entire HTTP/1.1 request so it can be
 	// safely retried. if instead req.Write is called multiple
 	// times, the body is already drained after the first
-	// request
+	// request. Request.Write always closes Body; do not Close again.
 	requestBuff := requestBuffPool.Get().(*bytes.Buffer)
 	requestBuff.Reset()
-	common.Must(req.Write(requestBuff))
+	if err := req.Write(requestBuff); err != nil {
+		releaseHeaderMap(req.Header)
+		req.Header = nil
+		req.Body = nil
+		if requestBuff.Cap() <= maxBufferPoolCap {
+			requestBuff.Reset()
+			requestBuffPool.Put(requestBuff)
+		}
+		return err
+	}
 	releaseHeaderMap(req.Header)
 	req.Header = nil
-	if req.Body != nil {
-		_ = req.Body.Close()
-		req.Body = nil
-	}
+	req.Body = nil
 	reqHold := acquireReqBytes(requestBuff.Bytes())
 	reqBytes := reqHold.b
 	if requestBuff.Cap() <= maxBufferPoolCap {
