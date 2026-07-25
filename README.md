@@ -82,6 +82,7 @@ git checkout v1       # 仅当需要旧线行为时
 | Session MAC | `sessionId = raw + "." + base64url(HMAC-SHA256(secret, raw)[:8])`；服务端拒收未签名/错误 MAC，防 hub 被未认证冲垮 |
 | Packet-up 窗口 | 默认 in-flight **12**，RTT 放大上限 **24**，且不超过 `scMaxBufferedPosts/2` |
 | Packet-up chunk | 按 RTT 选择 POST body 上限（约 256KB / 512KB / 满配置）；`rtt==0` 冷启动不砍；**永不超** `scMaxEachPostBytes` |
+| Packet-up pacing | 默认 `scMinPostsIntervalMs=30` 仅用于 **idle/tiny** 伪装；**≥8KiB bulk** 或 **recentFlow(<50ms)** 跳过间隔，避免 32KiB 写被钉在 30ms/POST |
 | 热路径减配 | `formatSeqInt64` 无堆分配、共享单值 header 切片、大包 X-Padding 收缩、splitConn deadline 缓冲走 `bytespool` |
 | OpenStream 防挂死 | 等响应头超时可累计并 MarkDead，避免黑洞 H2 占池导致内核「无响应」 |
 
@@ -190,25 +191,32 @@ sysctl -w net.core.wmem_max=16777216
 
 1. **packet-up window**：默认 12 / 上限 24，RTT 缩放，半缓冲硬顶。
 2. **packet-up chunk**：RTT 档位 256KB / 512KB / 满配置；不超服务器 `scMaxEachPostBytes`。
-3. **零分配 seq + 共享 header + 大包 padding 收缩**。
-4. **splitConn deadline**：Read/Write 中间缓冲 `bytespool` 复用。
+3. **packet-up pacing**：bulk≥8KiB / recentFlow 跳过 `scMinPostsIntervalMs`（修 30ms/POST 吞吐钉死）。
+4. **零分配 seq + 共享 header + 大包 padding 收缩**。
+5. **splitConn deadline**：Read/Write 中间缓冲 `bytespool` 复用。
 
 **未强行改动的取舍**：XMUX 选路大重构、REALITY 握手路径再抠微秒、服务端 body 所有权硬进 pool 等高回归风险项保持不动。
 
 #### Benchmark 结论（摘要）
 
+**快照**：2026-07-24 P0 pace 修复后（i5-13600KF / go1.26.4；XHTTP median of 3 @ 500ms）· 全文 [bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md)
+
 | 类别 | 结论 | 说明 |
 |------|------|------|
-| vs 上游 common（buf/crypto/…） | 🟢/⚪ **无回归** | `Copy`/`NewBuffer` 仍略快 |
-| XMUX 热路径 | ⚪ **无实质回归** | pool / RTT EWMA / warmup |
-| Happy Eyeballs sort | 🟢 **改进** | 大列表排序明显更快 |
-| XHTTP 吞吐 | ⚠️ **按场景读** | H2 / H2C / packet-up **不可横向比** |
+| vs 上游 common（buf/crypto/…） | ⚪/🔴 **混合 / 微慢** | crypto 持平；`Copy` ≈ −29%（非主战场） |
+| XMUX ConcurrentRW | ⚪ **稳定** | Get/Pool 以 07-24 为新 self-baseline |
+| Happy Eyeballs | ⚠️ **撤销旧 +46% 叙事** | LargeList 无法复现 06-24 大胜 |
+| XHTTP stream-one / stream-up | 🟢 **~262 / ~241 MB/s** | 与 quiet 同量级 |
+| XHTTP packet-up 单连接 | 🟢 **~223 MB/s H2C** | 原 ~2.17 MB/s（30ms 间隔）已 P0 解锁，约 **100×** |
+| XHTTP multi-conn (16) | 🟢 **聚合 ~18 GB/s 量级** | conns_1 已 ~170 MB/s；不再靠堆连接绕 30ms |
+| REALITY micro | ⚪ **同量级** | AEAD / KeyExchange 稳定 |
 
-- 完整表格与图例：[bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md)
+- 完整表格与图例：[bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md) · 短摘要 [bench_results/history/latest.md](bench_results/history/latest.md)
+- 原始输出：`bench_results/run_20260724_p0_pace/`（P0 后）· 修复前对照 `bench_results/run_20260724_quiet/`
 - 每次 push/PR 的 CI 表格 + SVG：`Benchmark Tracking` workflow → artifact `bench-report-<sha>`（`report.md` / `summary.svg` / `history/`）
 - 本地：`./benchmark.sh` 或 `python scripts/format_bench_report.py --history`
-- **无法同配置复现的旧数字直接忽略**；只信同名 Benchmark + 同 count 的对比。
-- **Upstream 列** = 固定外部对照快照 [`bench_results/upstream/xray-core-v26.6.22.json`](bench_results/upstream/xray-core-v26.6.22.json)（2026-06-24 同机 Xray-core）；**Self-baseline** = CI 上次 `main` 缓存；二者不要混为一谈。
+- **无法同配置复现的旧数字直接忽略**；只信同名 Benchmark + 同 count + median。
+- **Upstream 列** = 固定外部对照快照 [`bench_results/upstream/xray-core-v26.6.22.json`](bench_results/upstream/xray-core-v26.6.22.json)（2026-06-24 同机 Xray-core）；**Self-baseline** = CI 上次 `main` 缓存 / 本机 07-24 quiet；二者不要混为一谈。
 
 本地 HTTPS 代理若叠加系统/浏览器 MITM（例如部分 DNS/广告拦截的 HTTPS 解密），会表现为独立 CA 签发的证书，属于链路外侧因素，与上述内核串站修复无关。
 

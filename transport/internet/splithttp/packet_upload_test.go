@@ -208,16 +208,22 @@ func TestPacketUploadChunkSize(t *testing.T) {
 }
 
 func TestPacketUploadLaunchInterval(t *testing.T) {
-	if got := packetUploadLaunchIntervalMs(30, false, false); got != 30 {
+	if got := packetUploadLaunchIntervalMs(30, false, false, false, false); got != 30 {
 		t.Fatalf("idle=%d", got)
 	}
-	if got := packetUploadLaunchIntervalMs(30, true, false); got != 0 {
+	if got := packetUploadLaunchIntervalMs(30, true, false, false, false); got != 0 {
 		t.Fatalf("backlog=%d", got)
 	}
-	if got := packetUploadLaunchIntervalMs(30, false, true); got != 0 {
+	if got := packetUploadLaunchIntervalMs(30, false, true, false, false); got != 0 {
 		t.Fatalf("full chunk=%d", got)
 	}
-	if got := packetUploadLaunchIntervalMs(0, false, false); got != 0 {
+	if got := packetUploadLaunchIntervalMs(30, false, false, true, false); got != 0 {
+		t.Fatalf("bulk chunk=%d", got)
+	}
+	if got := packetUploadLaunchIntervalMs(30, false, false, false, true); got != 0 {
+		t.Fatalf("recent flow=%d", got)
+	}
+	if got := packetUploadLaunchIntervalMs(0, false, false, false, false); got != 0 {
 		t.Fatalf("disabled=%d", got)
 	}
 }

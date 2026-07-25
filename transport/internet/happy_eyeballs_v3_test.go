@@ -46,9 +46,11 @@ func TestScoreIPs_WithSVCBPriority(t *testing.T) {
 	ipv4a := net.ParseIP("192.168.1.1")
 	ipv4b := net.ParseIP("192.168.1.2")
 
-	svcb := map[string]int64{
-		ipv4a.String(): 10,
-		ipv4b.String(): 1,
+	ka, _ := ipToKey(ipv4a)
+	kb, _ := ipToKey(ipv4b)
+	svcb := map[ipKey]int64{
+		ka: 10,
+		kb: 1,
 	}
 	scores := scoreIPs([]net.IP{ipv4a, ipv4b}, false, svcb)
 	if len(scores) != 2 {
@@ -103,7 +105,7 @@ func TestHappyIPRecord_EWMA(t *testing.T) {
 }
 
 func TestHappyIPDB_Concurrent(t *testing.T) {
-	db := &HappyIPDB{records: make(map[string]*HappyIPRecord)}
+	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord), stringRecords: make(map[string]*HappyIPRecord)}
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)

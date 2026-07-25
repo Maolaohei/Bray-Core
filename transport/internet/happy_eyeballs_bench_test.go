@@ -13,24 +13,28 @@ func BenchmarkScoreIPs(b *testing.B) {
 		ips[i] = net.IPv4(byte(10), byte(i/256), byte(i%256), 1)
 	}
 
+	var buf []HappyIPScore
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		scoreIPs(ips, false, nil)
+		buf = scoreIPsInto(buf, ips, false, nil)
 	}
 }
 
 // BenchmarkScoreIPs_WithSVCB measures IP scoring with SVCB priorities.
 func BenchmarkScoreIPs_WithSVCB(b *testing.B) {
 	ips := make([]net.IP, 20)
-	svcb := make(map[string]int64, 20)
+	svcb := make(map[ipKey]int64, 20)
 	for i := range ips {
 		ips[i] = net.IPv4(byte(10), byte(i/256), byte(i%256), 1)
-		svcb[ips[i].String()] = int64(i)
+		if k, ok := ipToKey(ips[i]); ok {
+			svcb[k] = int64(i)
+		}
 	}
 
+	var buf []HappyIPScore
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		scoreIPs(ips, false, svcb)
+		buf = scoreIPsInto(buf, ips, false, svcb)
 	}
 }
 
@@ -44,9 +48,10 @@ func BenchmarkScoreIPs_V6Prioritized(b *testing.B) {
 		net.ParseIP("2001:db8::3"),
 	}
 
+	var buf []HappyIPScore
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		scoreIPs(ips, true, nil)
+		buf = scoreIPsInto(buf, ips, true, nil)
 	}
 }
 
@@ -94,7 +99,7 @@ func BenchmarkHappyIPRecord_ConcurrentRecordSuccess(b *testing.B) {
 
 // BenchmarkHappyIPDB_Get measures IP record lookup throughput.
 func BenchmarkHappyIPDB_Get(b *testing.B) {
-	db := &HappyIPDB{records: make(map[string]*HappyIPRecord)}
+	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord), stringRecords: make(map[string]*HappyIPRecord)}
 	// Pre-populate
 	for i := 0; i < 100; i++ {
 		ip := net.IPv4(10, 0, byte(i/256), byte(i%256)).String()
@@ -109,7 +114,7 @@ func BenchmarkHappyIPDB_Get(b *testing.B) {
 
 // BenchmarkHappyIPDB_GetParallel measures concurrent IP record lookup.
 func BenchmarkHappyIPDB_GetParallel(b *testing.B) {
-	db := &HappyIPDB{records: make(map[string]*HappyIPRecord)}
+	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord), stringRecords: make(map[string]*HappyIPRecord)}
 	for i := 0; i < 100; i++ {
 		ip := net.IPv4(10, 0, byte(i/256), byte(i%256)).String()
 		db.get(ip).recordSuccess(50 * time.Millisecond)
@@ -241,7 +246,7 @@ func BenchmarkHappyIPScore_ScoreWithHighFailRate(b *testing.B) {
 
 // BenchmarkHappyIPRecord_Cleanup measures IP record cleanup throughput.
 func BenchmarkHappyIPRecord_Cleanup(b *testing.B) {
-	db := &HappyIPDB{records: make(map[string]*HappyIPRecord)}
+	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord), stringRecords: make(map[string]*HappyIPRecord)}
 
 	// Pre-populate with old records
 	for i := 0; i < 1000; i++ {

@@ -1,23 +1,89 @@
 package internet
 
 import (
-	"sort"
+	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/xtls/xray-core/common/net"
+	xnet "github.com/xtls/xray-core/common/net"
 )
+
+// scoreIPsInto fills dst with scored IPs (growing if needed) and sorts in place.
+// Prefer this on hot dial paths with a reusable buffer for 0 steady-state allocs
+// beyond the first growth. scoreIPs remains for tests/simple callers.
+func scoreIPsInto(dst []HappyIPScore, ips []xnet.IP, prioritizeIPv6 bool, svcbPriorities map[ipKey]int64) []HappyIPScore {
+	n := len(ips)
+	if n == 0 {
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
+	}
+	if cap(dst) < n {
+		dst = make([]HappyIPScore, n)
+	} else {
+		dst = dst[:n]
+	}
+	db := globalHappyIPDB
+	haveSVCB := len(svcbPriorities) > 0
+	db.mu.RLock()
+	for i, ip := range ips {
+		var (
+			rtt      int64
+			failRate float64
+			lastLoss int64
+			priority int64
+		)
+		k, ok := ipToKey(ip)
+		if ok {
+			if record := db.records[k]; record != nil {
+				rtt = record.getSmoothedRTT()
+				failRate = record.getFailureRate()
+				lastLoss = record.getLoss()
+			}
+			if haveSVCB {
+				priority = svcbPriorities[k]
+			}
+		}
+
+		ipv6Boost := int64(0)
+		v4 := ip.To4()
+		if prioritizeIPv6 {
+			if v4 == nil {
+				ipv6Boost = -1e9
+			}
+		} else if v4 != nil {
+			ipv6Boost = -1e9
+		}
+
+		dst[i] = HappyIPScore{
+			IP:       ip,
+			Priority: priority + ipv6Boost,
+			RTT:      rtt,
+			FailRate: failRate,
+			LastLoss: lastLoss,
+		}
+	}
+	db.mu.RUnlock()
+	sortIPScores(dst)
+	return dst
+}
 
 // HappyIPScore holds scoring data for a single IP address used in v3 sorting.
 type HappyIPScore struct {
-	IP       net.IP
+	IP       xnet.IP
 	Priority int64   // from DNS SVCB/HTTPS record, lower = higher priority
 	RTT      int64   // smoothed RTT in nanoseconds
 	FailRate float64 // V2.0: EWMA failure rate 0.0-1.0 (replaces Successes/Fails)
 
 	// V2.0: loss rate from TransportProfile (0-10000 fixed-point, 0=none, 10000=100%)
 	LastLoss int64
+
+	// cachedScore is filled by sortIPScores before sorting so the comparator
+	// does not recompute float score O(n log n) times.
+	cachedScore float64
 }
 
 const (
@@ -53,13 +119,12 @@ func clampRTT(rtt int64) int64 {
 // lossPenalty comes from external quality data (TCP_INFO), weighted 5x.
 func (s *HappyIPScore) score() float64 {
 	rttScore := float64(clampRTT(s.RTT))
-
-	// V2.0: loss penalty (0-1.0 scale, increases RTT effective cost)
-	var lossPenalty float64
-	if s.LastLoss > 0 {
-		lossPenalty = float64(s.LastLoss) / 10000.0
+	// Common path: unsampled / healthy IP has no fail or loss samples.
+	if s.FailRate == 0 && s.LastLoss == 0 {
+		return float64(s.Priority)*1e9 + rttScore
 	}
-
+	// V2.0: loss penalty (0-1.0 scale, increases RTT effective cost)
+	lossPenalty := float64(s.LastLoss) / 10000.0
 	rttTerm := rttScore * (1 + s.FailRate*10 + lossPenalty*5)
 	return float64(s.Priority)*1e9 + rttTerm
 }
@@ -136,11 +201,44 @@ func (r *HappyIPRecord) recordFail() {
 	}
 }
 
+// ipKey is a fixed-size map key for IPv4/IPv6 without heap string conversion.
+// IPv4 is stored in the first 4 bytes with family=4; IPv6 uses all 16 bytes with family=6.
+type ipKey struct {
+	addr   [16]byte
+	family uint8 // 4 or 6
+}
+
+func ipToKey(ip net.IP) (ipKey, bool) {
+	var k ipKey
+	if v4 := ip.To4(); v4 != nil {
+		k.family = 4
+		copy(k.addr[:4], v4)
+		return k, true
+	}
+	v6 := ip.To16()
+	if v6 == nil {
+		return k, false
+	}
+	k.family = 6
+	copy(k.addr[:], v6)
+	return k, true
+}
+
+func ipKeyString(k ipKey) string {
+	if k.family == 4 {
+		return net.IP(k.addr[:4]).String()
+	}
+	return net.IP(k.addr[:]).String()
+}
+
 // HappyIPDB is the global database for per-IP historical metrics.
 type HappyIPDB struct {
 	mu      sync.RWMutex
-	records map[string]*HappyIPRecord
-	quit    chan struct{}
+	records map[ipKey]*HappyIPRecord
+	// legacy string map kept only for test helpers that still use textual keys
+	// via getString; production dial paths use getByIP / lookupByIP.
+	stringRecords map[string]*HappyIPRecord
+	quit          chan struct{}
 }
 
 const (
@@ -151,30 +249,86 @@ const (
 )
 
 var globalHappyIPDB = &HappyIPDB{
-	records: make(map[string]*HappyIPRecord),
-	quit:    make(chan struct{}),
+	records:       make(map[ipKey]*HappyIPRecord),
+	stringRecords: make(map[string]*HappyIPRecord),
+	quit:          make(chan struct{}),
 }
 
 func init() {
 	go globalHappyIPDB.cleanupLoop()
 }
 
+// get is the compatibility entry for string keys (tests / callers that already
+// have a textual IP). Prefer getByIP on dial hot paths.
 func (db *HappyIPDB) get(ip string) *HappyIPRecord {
+	// Fast path: textual cache hit (avoids ParseIP on repeated lookups).
 	db.mu.RLock()
-	r, ok := db.records[ip]
+	if r, ok := db.stringRecords[ip]; ok {
+		db.mu.RUnlock()
+		return r
+	}
 	db.mu.RUnlock()
-	if ok {
+
+	if parsed := net.ParseIP(ip); parsed != nil {
+		r := db.getByIP(parsed)
+		if r == nil {
+			return nil
+		}
+		// Write-through cache so subsequent get(string) stays O(map).
+		db.mu.Lock()
+		if existing, ok := db.stringRecords[ip]; ok {
+			db.mu.Unlock()
+			return existing
+		}
+		db.stringRecords[ip] = r
+		db.mu.Unlock()
+		return r
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if r, ok := db.stringRecords[ip]; ok {
+		return r
+	}
+	r := &HappyIPRecord{}
+	r.lastSeen.Store(time.Now().Unix())
+	db.stringRecords[ip] = r
+	return r
+}
+
+// lookupByIP returns an existing record without creating one.
+// Used by scoreIPs so first-time A/AAAA answers do not write the global map.
+func (db *HappyIPDB) lookupByIP(ip net.IP) *HappyIPRecord {
+	k, ok := ipToKey(ip)
+	if !ok {
+		return nil
+	}
+	db.mu.RLock()
+	r := db.records[k]
+	db.mu.RUnlock()
+	return r
+}
+
+// getByIP returns (and creates if needed) the record for ip.
+func (db *HappyIPDB) getByIP(ip net.IP) *HappyIPRecord {
+	k, ok := ipToKey(ip)
+	if !ok {
+		return nil
+	}
+	db.mu.RLock()
+	r, exists := db.records[k]
+	db.mu.RUnlock()
+	if exists {
 		return r
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	// double check
-	if r, ok = db.records[ip]; ok {
+	if r, exists = db.records[k]; exists {
 		return r
 	}
-	r = &HappyIPRecord{lastSeen: atomic.Int64{}}
+	r = &HappyIPRecord{}
 	r.lastSeen.Store(time.Now().Unix())
-	db.records[ip] = r
+	db.records[k] = r
 	return r
 }
 
@@ -206,43 +360,38 @@ func (db *HappyIPDB) cleanup() {
 			delete(db.records, ip)
 		}
 	}
+	for ip, record := range db.stringRecords {
+		if record.lastSeen.Load() < cutoff {
+			delete(db.stringRecords, ip)
+		}
+	}
 }
 
 // scoreIPs scores and sorts IPs by v3 priority. Lower score = higher priority.
-func scoreIPs(ips []net.IP, prioritizeIPv6 bool, svcbPriorities map[string]int64) []HappyIPScore {
-	scores := make([]HappyIPScore, 0, len(ips))
-	for _, ip := range ips {
-		ipStr := ip.String()
-		record := globalHappyIPDB.get(ipStr)
-
-		priority := int64(0)
-		if p, ok := svcbPriorities[ipStr]; ok {
-			priority = p
-		}
-
-		ipv6Boost := int64(0)
-		if prioritizeIPv6 && ip.To4() == nil {
-			ipv6Boost = -1e9
-		} else if !prioritizeIPv6 && ip.To4() != nil {
-			ipv6Boost = -1e9
-		}
-
-		scores = append(scores, HappyIPScore{
-			IP:       ip,
-			Priority: priority + ipv6Boost,
-			RTT:      record.getSmoothedRTT(),
-			FailRate: record.getFailureRate(), // V2.0: EWMA failure rate
-			LastLoss: record.getLoss(),
-		})
-	}
-
-	sortIPScores(scores)
-	return scores
+// Lookup is read-only: unknown IPs use default RTT/fail without writing the DB.
+// Success/fail paths still create records via getByIP.
+// svcbPriorities uses ipKey so scoring never allocates via ip.String().
+func scoreIPs(ips []xnet.IP, prioritizeIPv6 bool, svcbPriorities map[ipKey]int64) []HappyIPScore {
+	return scoreIPsInto(nil, ips, prioritizeIPv6, svcbPriorities)
 }
 
 func sortIPScores(scores []HappyIPScore) {
-	sort.SliceStable(scores, func(i, j int) bool {
-		return scores[i].score() < scores[j].score()
+	// Precompute once: comparator would otherwise re-run score()
+	// O(n log n) times with float/clamp work on every comparison.
+	for i := range scores {
+		scores[i].cachedScore = scores[i].score()
+	}
+	// slices.SortFunc avoids sort.Slice reflection/interface allocs.
+	// Equal scores are rare; dial order among ties is not a correctness contract.
+	slices.SortFunc(scores, func(a, b HappyIPScore) int {
+		switch {
+		case a.cachedScore < b.cachedScore:
+			return -1
+		case a.cachedScore > b.cachedScore:
+			return 1
+		default:
+			return 0
+		}
 	})
 }
 

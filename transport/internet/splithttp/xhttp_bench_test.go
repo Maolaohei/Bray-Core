@@ -11,6 +11,7 @@ import (
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol/tls/cert"
 	"github.com/xtls/xray-core/testing/servers/tcp"
@@ -19,6 +20,16 @@ import (
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
 )
+
+// Quiet default log handler for microbenches so probe/teardown noise does not
+// interleave with go test bench result lines or burn CPU on console writes.
+type benchNopLogHandler struct{}
+
+func (benchNopLogHandler) Handle(msg log.Message) {}
+
+func init() {
+	log.RegisterHandler(benchNopLogHandler{})
+}
 
 // =========================================================================
 // Throughput Benchmarks

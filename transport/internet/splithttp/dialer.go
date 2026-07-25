@@ -654,6 +654,11 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			},
 			IdleConnTimeout: net.ConnIdleTimeout,
 			ReadIdleTimeout: h2KeepAlive,
+			// Binary packet-up bodies must not be gzipped; skip Accept-Encoding work.
+			DisableCompression: true,
+			// Larger frames cut syscall/header overhead on bulk packet-up POSTs (TLS path).
+			// http2 default is 16KiB; 256KiB stays well under the 16MiB-1 cap.
+			MaxReadFrameSize: 256 << 10,
 		}
 
 		transport = newHappyEyeballsTransport(h3Transport, h2Transport)
@@ -673,6 +678,11 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			},
 			IdleConnTimeout: net.ConnIdleTimeout,
 			ReadIdleTimeout: keepAlivePeriod,
+			// Binary packet-up bodies must not be gzipped; skip Accept-Encoding work.
+			DisableCompression: true,
+			// Larger frames cut syscall/header overhead on bulk packet-up POSTs (TLS path).
+			// http2 default is 16KiB; 256KiB stays well under the 16MiB-1 cap.
+			MaxReadFrameSize: 256 << 10,
 		}
 	} else {
 		httpDialContext := func(ctxInner context.Context, network string, addr string) (net.Conn, error) {
@@ -1187,7 +1197,11 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					}
 					hasBacklog := !remainder.IsEmpty()
 					fullChunk := chunk.Len() >= maxUploadSize
-					paceMs := packetUploadLaunchIntervalMs(configuredMs, hasBacklog, fullChunk)
+					bulkChunk := chunk.Len() >= packetUploadBulkPaceBytes
+					// Continuity: if we launched recently, treat as active flow even
+					// for sub-bulk posts (e.g. many 1-4KiB writes in a tunnel burst).
+					recentFlow := !lastWrite.IsZero() && time.Since(lastWrite) < 50*time.Millisecond
+					paceMs := packetUploadLaunchIntervalMs(configuredMs, hasBacklog, fullChunk, bulkChunk, recentFlow)
 					if paceMs > 0 {
 						sleepDur := time.Duration(paceMs)*time.Millisecond - time.Since(lastWrite)
 						if sleepDur > 0 {

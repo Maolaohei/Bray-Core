@@ -7,6 +7,10 @@ const defaultH1UploadPoolCap = 16
 // h1ConnPool is a small fixed-capacity idle pool for HTTP/1.1 upload conns.
 // Unlike sync.Pool it never retains more than cap connections and does not
 // rely on GC to drop entries (failed/closed conns are never returned).
+//
+// Shared pipelined use: a single H1Conn may be held by multiple PostPacket
+// callers via BorrowShared/GetShared; only the last releaser returns it to
+// the idle channel (or closes if full/dead).
 type h1ConnPool struct {
 	ch chan *H1Conn
 }

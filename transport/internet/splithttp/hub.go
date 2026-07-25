@@ -771,6 +771,12 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 			ReadHeaderTimeout: time.Second * 4,
 			MaxHeaderBytes:    l.config.GetNormalizedServerMaxHeaderBytes(),
 			Protocols:         protocols,
+			// Match client http2.Transport MaxReadFrameSize so bulk packet-up
+			// DATA frames are not stuck at the 16KiB default SETTINGS ceiling.
+			// Peer write size is limited by what THIS endpoint will read.
+			HTTP2: &http.HTTP2Config{
+				MaxReadFrameSize: 256 << 10,
+			},
 		}
 		go func() {
 			if err := l.server.Serve(l.listener); err != nil {

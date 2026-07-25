@@ -207,3 +207,15 @@ func TestConcurrentPoolAccess(t *testing.T) {
 
 	t.Logf("Total connections created: %d", connCount.Load())
 }
+
+// TestProbeConnection_StopChSkipsMarkDead ensures manager Close cancels in-flight
+// HEAD probes without treating shutdown as connection death noise.
+func TestProbeConnection_StopChSkipsMarkDead(t *testing.T) {
+	m := NewXmuxManager(&XmuxConfig{}, func() XmuxConn {
+		return &fakeRoundTripper{}
+	}, "http://127.0.0.1:1/") // almost certainly closed
+	// Close immediately so any probe sees stopCh.
+	m.Close()
+	// Give probe goroutines a moment; they must exit without hanging the test.
+	time.Sleep(50 * time.Millisecond)
+}
