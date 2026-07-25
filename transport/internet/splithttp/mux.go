@@ -1130,7 +1130,6 @@ func (m *XmuxManager) effectiveConcurrency() int32 {
 	return m._dynamicConc.Load()
 }
 
-
 // ForceAddClientsForTest appends n fresh clients without burst gating.
 // Test/bench only: measures multi-conn selection cost on a filled pool.
 func (m *XmuxManager) ForceAddClientsForTest(n int) {
@@ -1386,7 +1385,6 @@ func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
 	c.recomputeScore()
 	return c
 }
-
 
 // maxInlineXmuxScan is the stack capacity for multi-conn selection without
 // heap snapshot. Covers common MaxConnections and BenchmarkXMUXPoolScheduling
