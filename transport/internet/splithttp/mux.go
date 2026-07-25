@@ -1,8 +1,8 @@
 package splithttp
 
 import (
-	stderrors "errors"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"math"
 	"net"
@@ -165,28 +165,28 @@ func (p *XmuxClientPool) RemoveAndClose(target *XmuxClient) bool {
 }
 
 type XmuxClient struct {
-	XmuxConn      XmuxConn
-	state         atomic.Int32 // StateActive / StateDraining / StateClosed
-	activeStreams atomic.Int32 // number of active HTTP/2 streams using this connection
-	leftUsage     atomic.Int32
-	LeftRequests  atomic.Int32
+	XmuxConn         XmuxConn
+	state            atomic.Int32 // StateActive / StateDraining / StateClosed
+	activeStreams    atomic.Int32 // number of active HTTP/2 streams using this connection
+	leftUsage        atomic.Int32
+	LeftRequests     atomic.Int32
 	UnreusableAt     time.Time    // wall deadline for HMaxReusableSecs (health / dialer)
 	unreusableAtUnix atomic.Int64 // unix nano of UnreusableAt; 0 = unlimited (hot path)
 	createdAt        time.Time
 	LastUsed         atomic.Int64 // unix nano: last time this client was borrowed
-	lastRTT       atomic.Int64 // nanoseconds, for RTT-aware scheduling
+	lastRTT          atomic.Int64 // nanoseconds, for RTT-aware scheduling
 	// cachedScore is the quality/RTT base only (no inflight term).
 	// Selection uses cachedScore + activeStreams*10000 so Borrow/Release
 	// never need a full scoreClient recompute under the stream hot path.
-	cachedScore   atomic.Int64
+	cachedScore atomic.Int64
 	// behaviorScale caches behaviorPenaltyScaleFixed (x100) so scoreClient
 	// does not take NetworkLearner.Dominant's mutex on every recompute.
 	behaviorScale atomic.Int64
 
 	// Ready Promise: blocks concurrent traffic until probe completes
-	ready    chan struct{} // closed when probe finishes (success or failure)
-	probeErr error         // set if probe failed
-	probeDone atomic.Bool // true after probe finished or skipped
+	ready     chan struct{} // closed when probe finishes (success or failure)
+	probeErr  error         // set if probe failed
+	probeDone atomic.Bool   // true after probe finished or skipped
 
 	// V2.0: link-quality metrics for smarter scheduling
 	lastRetrans  atomic.Int32 // cumulative retransmit count from TCP_INFO
@@ -447,19 +447,19 @@ func (c *XmuxClient) StopProfilingLocked() {
 }
 
 type XmuxManager struct {
-	xmuxConfig   *XmuxConfig
-	concurrency  int32 // base concurrency (from config)
-	connections  int32 // base connections (from config)
-	newConnFunc  func() XmuxConn
-	probeURL     string // URL for HEAD probe to trigger real TCP/TLS dial
-	pool         XmuxClientPool
+	xmuxConfig  *XmuxConfig
+	concurrency int32 // base concurrency (from config)
+	connections int32 // base connections (from config)
+	newConnFunc func() XmuxConn
+	probeURL    string // URL for HEAD probe to trigger real TCP/TLS dial
+	pool        XmuxClientPool
 	// idleTimeoutNs caches clientIdleTimeout as int64 so Get hot path does not
 	// convert time.Duration on every candidate under RLock.
 	idleTimeoutNs int64
 	stopCh        chan struct{}
-	doneCh       chan struct{} // closed when all goroutines exit
-	lastActivity atomic.Int64  // nanosecond timestamp of last client obtain; lock-free
-	closeOnce    sync.Once     // ensures Close() is idempotent
+	doneCh        chan struct{} // closed when all goroutines exit
+	lastActivity  atomic.Int64  // nanosecond timestamp of last client obtain; lock-free
+	closeOnce     sync.Once     // ensures Close() is idempotent
 
 	// V2.1: Dynamic Connection Scaling
 	poolBehavior   quality.Behavior // dominant behavior across all clients
@@ -482,10 +482,10 @@ type XmuxManager struct {
 	// Probe storm control: after repeated connect-refused / dial-dead failures
 	// (common when listen is gone mid-bench or migration), suppress MarkDead+log
 	// spam while still allowing one real probe after cooldown.
-	probeFailMu       sync.Mutex
-	probeFailStreak   int
-	probeCoolUntil    time.Time
-	probeLastFailLog  time.Time
+	probeFailMu      sync.Mutex
+	probeFailStreak  int
+	probeCoolUntil   time.Time
+	probeLastFailLog time.Time
 
 	// Metrics for quantifiable validation
 	metrics struct {

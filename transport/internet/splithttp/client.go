@@ -8,8 +8,8 @@ import (
 	"io"
 	stdnet "net"
 	"net/http"
-	"net/url"
 	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -101,19 +101,19 @@ type DefaultDialerClient struct {
 	closed          atomic.Bool
 	httpVersion     string
 	// pool of H1 upload conns, created using dialUploadConn (bounded)
-	uploadRawPool  *h1ConnPool
+	uploadRawPool *h1ConnPool
 	// hotH1 is the currently shared pipelined H1 upload conn (depth > 1).
 	// Protected by hotH1Mu; activeUsers on the H1Conn tracks concurrent posts.
-	hotH1Mu        sync.Mutex
-	hotH1          *H1Conn
+	hotH1Mu sync.Mutex
+	hotH1   *H1Conn
 	// h1Dialing serializes concurrent first-dial so N parallel PostPacket
 	// callers share one socket instead of N redundant dials.
-	h1Dialing      bool
-	hotH1Wait      *sync.Cond
+	h1Dialing bool
+	hotH1Wait *sync.Cond
 	// packetURLBase caches the last PostPacket base URL for this dialer
 	// (packet-up posts the same host/path every seq). Immutable after parse.
-	packetURLRaw  atomic.Value // string
-	packetURLBase atomic.Value // *url.URL
+	packetURLRaw   atomic.Value // string
+	packetURLBase  atomic.Value // *url.URL
 	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
 	// Callbacks are stored atomically because getHTTPClient may re-wire them
 	// from concurrent Dial paths while OpenStream/PostPacket read them.
@@ -686,7 +686,6 @@ func (c *DefaultDialerClient) postPacket(ctx context.Context, rawURL string, ses
 	return nil
 }
 
-
 // acquireH1UploadConn returns a shared pipelined H1 conn (hot) or dials a new one.
 // Caller must releaseH1UploadConn when done.
 // Concurrent first-dials wait on h1Dialing so parallel PostPacket shares one socket.
@@ -793,6 +792,7 @@ func (c *DefaultDialerClient) releaseH1UploadConn(h *H1Conn, newConnection bool,
 		c.uploadRawPool.Put(h)
 	}
 }
+
 // Close shuts down the underlying HTTP transport.
 // For HTTP/2: force-closes tracked raw sockets (active streams included), then
 // clears idle pool entries. CloseIdleConnections alone leaves busy H2 conns alive.
@@ -900,4 +900,3 @@ func (w *WaitReadCloser) Close() error {
 	}
 	return nil
 }
-
