@@ -1143,6 +1143,15 @@ func (m *XmuxManager) ForceAddClientsForTest(n int) {
 	}
 }
 
+// PoolClientsForTest returns a snapshot of live pool clients for tests/benches.
+// Do not mutate the slice; UpdateRTT / state on clients is fine.
+func (m *XmuxManager) PoolClientsForTest() []*XmuxClient {
+	if m == nil {
+		return nil
+	}
+	return m.pool.Snapshot()
+}
+
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
 	m.pool.mu.Lock()
 	defer m.pool.mu.Unlock()
