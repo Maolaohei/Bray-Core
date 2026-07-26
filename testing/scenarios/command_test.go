@@ -32,6 +32,40 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 )
 
+// dialCommanderGRPC waits until the commander API port accepts gRPC.
+// Windows CI under parallel scenario load can refuse the first connect
+// (listen not ready yet); a single grpc.WithBlock dial then fails the package.
+func dialCommanderGRPC(t *testing.T, cmdPort net.Port) *grpc.ClientConn {
+	t.Helper()
+	addr := fmt.Sprintf("127.0.0.1:%d", cmdPort)
+	var lastErr error
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		// TCP probe first: cheaper than spinning full gRPC handshakes on refuse.
+		tcpConn, err := net.DialTCP("tcp", nil, &net.TCPAddr{IP: net.LocalHostIP.IP(), Port: int(cmdPort)})
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		_ = tcpConn.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		conn, err := grpc.DialContext(ctx, addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+		)
+		cancel()
+		if err == nil {
+			return conn
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("commander gRPC dial %s: %v", addr, lastErr)
+	return nil
+}
+
 func TestCommanderListenConfigurationItem(t *testing.T) {
 	tcpServer := tcp.Server{
 		MsgProcessor: xor,
@@ -82,8 +116,7 @@ func TestCommanderListenConfigurationItem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmdConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", cmdPort), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	common.Must(err)
+	cmdConn := dialCommanderGRPC(t, cmdPort)
 	defer cmdConn.Close()
 
 	hsClient := command.NewHandlerServiceClient(cmdConn)
@@ -177,8 +210,7 @@ func TestCommanderRemoveHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmdConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", cmdPort), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	common.Must(err)
+	cmdConn := dialCommanderGRPC(t, cmdPort)
 	defer cmdConn.Close()
 
 	hsClient := command.NewHandlerServiceClient(cmdConn)
@@ -273,8 +305,7 @@ func TestCommanderListHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmdConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", cmdPort), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	common.Must(err)
+	cmdConn := dialCommanderGRPC(t, cmdPort)
 	defer cmdConn.Close()
 
 	hsClient := command.NewHandlerServiceClient(cmdConn)
@@ -463,8 +494,7 @@ func TestCommanderAddRemoveUser(t *testing.T) {
 		t.Fatal("expected error: ", err)
 	}
 
-	cmdConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", cmdPort), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	common.Must(err)
+	cmdConn := dialCommanderGRPC(t, cmdPort)
 	defer cmdConn.Close()
 
 	hsClient := command.NewHandlerServiceClient(cmdConn)
@@ -635,13 +665,14 @@ func TestCommanderStats(t *testing.T) {
 	}
 	defer CloseAllServers(servers)
 
+	// Ensure commander API is accepting before the large transfer (Windows CI
+	// has seen post-transfer connection refused on the API port).
+	cmdConn := dialCommanderGRPC(t, cmdPort)
+	defer cmdConn.Close()
+
 	if err := testTCPConn(clientPort, 10240*1024, time.Second*20)(); err != nil {
 		t.Fatal(err)
 	}
-
-	cmdConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", cmdPort), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	common.Must(err)
-	defer cmdConn.Close()
 
 	const name = "user>>>test>>>traffic>>>uplink"
 	sClient := statscmd.NewStatsServiceClient(cmdConn)
