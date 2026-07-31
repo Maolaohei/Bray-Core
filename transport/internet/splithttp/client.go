@@ -87,8 +87,10 @@ func releaseReqBytes(dl *reqBytesLocal) {
 type DialerClient interface {
 	IsClosed() bool
 
-	// ctx, url, sessionId, body, uploadOnly
-	OpenStream(context.Context, string, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error)
+	// ctx, baseURL, sessionId, body, uploadOnly.
+	// baseURL is the dialer's stream target; implementations must not mutate it
+	// (FillStreamRequest may append session/path on a request-local copy).
+	OpenStream(context.Context, *url.URL, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error)
 
 	// ctx, url, sessionId, seqStr, body, contentLength
 	PostPacket(context.Context, string, string, string, buf.MultiBuffer) error
@@ -316,7 +318,7 @@ func (t *trackedConn) Close() error {
 	return err
 }
 
-func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
+func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
 	t0 := time.Now()
 	var addrMu sync.Mutex
 	var gotRemote, gotLocal net.Addr
@@ -324,6 +326,9 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 	method := "GET" // stream-down
 	if body != nil {
 		method = c.transportConfig.GetNormalizedUplinkHTTPMethod() // stream-up/one
+	}
+	if base == nil {
+		return nil, nil, nil, errors.New("OpenStream: nil base URL")
 	}
 
 	// Wait for response headers (not merely GotConn). Returning on GotConn alone
@@ -360,12 +365,33 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 		},
 	})
 
-	req, err := http.NewRequestWithContext(reqCtx, method, url, body)
-	if err != nil {
-		reqCancel()
-		errors.LogInfoInner(ctx, err, "failed to create HTTP request for "+url)
-		return nil, nil, nil, err
+	// Avoid dialer's requestURL.String() → NewRequestWithContext Parse round-trip
+	// (alloc + re-encode). Copy base so FillStreamRequest path/session mutation
+	// never poisons the dialer-owned URL across mode cascade retries.
+	// Long-lived streams keep this URL for the request lifetime — do not use
+	// the short-lived packet urlURLPool here.
+	u := new(url.URL)
+	*u = *base
+	var bodyRC io.ReadCloser
+	if body != nil {
+		if rc, ok := body.(io.ReadCloser); ok {
+			bodyRC = rc
+		} else {
+			bodyRC = io.NopCloser(body)
+		}
 	}
+	// Manual shell + one WithContext attach (unexported Request.ctx). Same
+	// pattern as newPacketRequest: no dummy URL parse, no method re-validation.
+	req := &http.Request{
+		Method:     method,
+		URL:        u,
+		Host:       u.Host,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Body:       bodyRC,
+	}
+	req = req.WithContext(reqCtx)
 	c.transportConfig.FillStreamRequest(req, sessionId, "")
 
 	go func() {
@@ -376,7 +402,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 			if isFatalConnError(doErr) {
 				c.markFatal(doErr)
 			}
-			errors.LogInfoInner(ctx, doErr, "failed to "+method+" "+url)
+			errors.LogInfoInner(ctx, doErr, "failed to "+method+" "+base.String())
 			common.Close(body)
 			addrMu.Lock()
 			r, l := gotRemote, gotLocal

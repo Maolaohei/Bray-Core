@@ -974,7 +974,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			if mode == "stream-one" {
 				requestURL.Path = transportConfiguration.GetNormalizedPath()
 				var oerr error
-				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
+				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient.OpenStream(ctx, &requestURL, sessionId, reader, false)
 				if oerr != nil {
 					return false, false, oerr
 				}
@@ -989,7 +989,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			// Non-stream-one: download leg first (httpClient2 may equal httpClient).
 			{
 				var oerr error
-				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
+				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient2.OpenStream(ctx, &requestURL2, sessionId, nil, false)
 				if oerr != nil {
 					return false, false, oerr
 				}
@@ -1005,7 +1005,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				// Half-open (download OK, upload fail) previously leaked quota and could
 				// exhaust XMUX MaxRequests during cascade retries.
 				var upErr error
-				_, _, _, upErr = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
+				_, _, _, upErr = httpClient.OpenStream(ctx, &requestURL, sessionId, reader, true)
 				if upErr != nil {
 					return false, false, upErr
 				}

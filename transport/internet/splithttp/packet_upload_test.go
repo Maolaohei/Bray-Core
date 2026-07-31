@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,7 @@ type stubDialerClient struct {
 
 func (s *stubDialerClient) IsClosed() bool { return false }
 
-func (s *stubDialerClient) OpenStream(context.Context, string, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error) {
+func (s *stubDialerClient) OpenStream(context.Context, *url.URL, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error) {
 	return nil, nil, nil, errors.New("not implemented")
 }
 

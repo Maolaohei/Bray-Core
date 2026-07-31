@@ -6,11 +6,21 @@ import (
 	"io"
 	stdnet "net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", raw, err)
+	}
+	return u
+}
 
 func TestOpenStream_DownloadWaitsForHeadersAndReturnsBody(t *testing.T) {
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -26,7 +36,7 @@ func TestOpenStream_DownloadWaitsForHeadersAndReturnsBody(t *testing.T) {
 		httpVersion:     "2",
 		client:          &http.Client{Transport: rt},
 	}
-	rc, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	rc, _, _, err := c.OpenStream(context.Background(), mustParseURL(t, "http://example/d"), "sid", nil, false)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -54,7 +64,7 @@ func TestOpenStream_Non200ReturnsError(t *testing.T) {
 		httpVersion:     "2",
 		client:          &http.Client{Transport: rt},
 	}
-	rc, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	rc, _, _, err := c.OpenStream(context.Background(), mustParseURL(t, "http://example/d"), "sid", nil, false)
 	if err == nil {
 		if rc != nil {
 			rc.Close()
@@ -76,7 +86,7 @@ func TestOpenStream_DoErrorSurfacesAndFatalMarks(t *testing.T) {
 		httpVersion:     "2",
 		client:          &http.Client{Transport: rt},
 	}
-	_, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	_, _, _, err := c.OpenStream(context.Background(), mustParseURL(t, "http://example/d"), "sid", nil, false)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -95,7 +105,7 @@ func TestOpenStream_BareEOFDoesNotMarkClosed(t *testing.T) {
 		httpVersion:     "2",
 		client:          &http.Client{Transport: rt},
 	}
-	_, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	_, _, _, err := c.OpenStream(context.Background(), mustParseURL(t, "http://example/d"), "sid", nil, false)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -127,7 +137,7 @@ func TestOpenStream_UploadOnlySuccessKeepsDialerOpen(t *testing.T) {
 		client:          &http.Client{Transport: rt},
 	}
 	pr, pw := io.Pipe()
-	rc, _, _, err := c.OpenStream(context.Background(), "http://example/u", "sid", pr, true)
+	rc, _, _, err := c.OpenStream(context.Background(), mustParseURL(t, "http://example/u"), "sid", pr, true)
 	if err != nil {
 		t.Fatalf("OpenStream uploadOnly: %v", err)
 	}
@@ -157,7 +167,7 @@ func TestOpenStream_UploadOnlyFatalMarksClosed(t *testing.T) {
 	}
 	pr, pw := io.Pipe()
 	defer pw.Close()
-	_, _, _, err := c.OpenStream(context.Background(), "http://example/u", "sid", pr, true)
+	_, _, _, err := c.OpenStream(context.Background(), mustParseURL(t, "http://example/u"), "sid", pr, true)
 	if err == nil {
 		t.Fatal("expected fatal error")
 	}
@@ -187,7 +197,7 @@ func TestOpenStream_RecordsTTFBOnSuccess(t *testing.T) {
 		samples.Add(1)
 		lastTTFB.Store(int64(d))
 	})
-	rc, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	rc, _, _, err := c.OpenStream(context.Background(), mustParseURL(t, "http://example/d"), "sid", nil, false)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -218,7 +228,7 @@ func TestOpenStream_DoesNotRecordTTFBOnNon200(t *testing.T) {
 	c.SetOnTTFB(func(d time.Duration) {
 		samples.Add(1)
 	})
-	_, _, _, err := c.OpenStream(context.Background(), "http://example/d", "sid", nil, false)
+	_, _, _, err := c.OpenStream(context.Background(), mustParseURL(t, "http://example/d"), "sid", nil, false)
 	if err == nil {
 		t.Fatal("expected non-200 error")
 	}
@@ -243,7 +253,7 @@ func TestOpenStream_ParentCancelAbortsInFlightDo(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := c.OpenStream(ctx, "http://example/d", "sid", nil, false)
+		_, _, _, err := c.OpenStream(ctx, mustParseURL(t, "http://example/d"), "sid", nil, false)
 		errCh <- err
 	}()
 	select {
@@ -282,7 +292,7 @@ func TestOpenStream_SuccessKeepsStreamAfterDialContextDone(t *testing.T) {
 		client:          &http.Client{Transport: rt},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	rc, _, _, err := c.OpenStream(ctx, "http://example/d", "sid", nil, false)
+	rc, _, _, err := c.OpenStream(ctx, mustParseURL(t, "http://example/d"), "sid", nil, false)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -341,7 +351,7 @@ func TestOpenStream_HeaderTimeoutWhenNoDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, _, _, err := c.OpenStream(ctx, "http://example/d", "sid", nil, false)
+	_, _, _, err := c.OpenStream(ctx, mustParseURL(t, "http://example/d"), "sid", nil, false)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expected timeout error")

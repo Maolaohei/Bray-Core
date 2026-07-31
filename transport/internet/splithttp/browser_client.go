@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -21,15 +22,22 @@ func (c *BrowserDialerClient) IsClosed() bool {
 	return false
 }
 
-func (c *BrowserDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (io.ReadCloser, net.Addr, net.Addr, error) {
+func (c *BrowserDialerClient) OpenStream(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (io.ReadCloser, net.Addr, net.Addr, error) {
 	if body != nil {
 		return nil, nil, nil, errors.New("bidirectional streaming for browser dialer not implemented yet")
 	}
+	if base == nil {
+		return nil, nil, nil, errors.New("OpenStream: nil base URL")
+	}
 
-	request, err := http.NewRequest("GET", url, nil)
+	// Request-local URL copy: FillStreamRequest may append session path segments.
+	u := *base
+	request, err := http.NewRequest("GET", "", nil)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	request.URL = &u
+	request.Host = u.Host
 
 	c.transportConfig.FillStreamRequest(request, sessionId, "")
 
