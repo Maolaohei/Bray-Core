@@ -34,7 +34,12 @@ func tcpRaceDialV2(ctx context.Context, src net.Address, ips []net.IP, port net.
 	tryDelayMs := time.Duration(sockopt.HappyEyeballs.TryDelayMs) * time.Millisecond
 	maxConcurrentTry := sockopt.HappyEyeballs.MaxConcurrentTry
 
-	ips = sortIPs(ips, prioritizeIPv6, interleave)
+	// Per-race sort buffer: grows once per race dial (tcpTryDial goroutines
+	// read the sorted slice concurrently, so a package-level pool cannot
+	// recycle it safely). sortIPsInto keeps the API pool-friendly for callers
+	// that can own a buffer across calls.
+	var sortDst []net.IP
+	ips = sortIPsInto(sortDst, ips, prioritizeIPv6, interleave)
 	newCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	resultCh := make(chan *result, len(ips))
@@ -258,10 +263,21 @@ var sortIPScratchPool = sync.Pool{
 	},
 }
 
-// sortIPs sort IPs according to rfc 8305.
-func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
+// sortIPsInto sorts ips per RFC 8305 into dst (growing if needed) and returns
+// the result slice. Prefer this on dial paths with a reusable buffer for 0
+// steady-state allocs beyond the first growth (same contract as scoreIPsInto).
+//
+// Contract: single-family inputs (no interleave needed) return ips unchanged
+// (zero-copy fast path); mixed-family inputs copy the interleaved result into
+// dst and return a slice aliasing dst. Do not retain a returned dst-alias past
+// the next reuse; ips-alias returns stay valid as long as the input does.
+// sortIPs wraps this with a fresh buffer for simple callers.
+func sortIPsInto(dst []net.IP, ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
 	if len(ips) == 0 {
-		return ips
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
 	}
 	if interleave == 0 {
 		interleave = 1
@@ -347,8 +363,14 @@ func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
 	}
 
 	// Caller-owned result: copy out of scratch so Put cannot race retainers.
-	result := make([]net.IP, len(out))
-	copy(result, out)
+	// Reuse dst capacity when provided (0 steady-state allocs on hot dial
+	// paths); sortIPs passes nil and pays one alloc per call.
+	if cap(dst) < len(out) {
+		dst = make([]net.IP, len(out))
+	} else {
+		dst = dst[:len(out)]
+	}
+	copy(dst, out)
 	for i := range ip4 {
 		ip4[i] = nil
 	}
@@ -364,7 +386,14 @@ func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
 	if cap(sc.ip4) <= 128 && cap(sc.ip6) <= 128 && cap(sc.out) <= 128 {
 		sortIPScratchPool.Put(sc)
 	}
-	return result
+	return dst
+}
+
+// sortIPs sorts IPs according to rfc 8305. Simple wrapper over sortIPsInto
+// with a fresh result slice (one alloc); hot dial paths should use
+// sortIPsInto with a reusable buffer instead.
+func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
+	return sortIPsInto(nil, ips, prioritizeIPv6, interleave)
 }
 
 func tcpTryDial(ctx context.Context, src net.Address, sockopt *SocketConfig, ip net.IP, port net.Port, index int, resultCh chan<- *result, originalDomain string) {

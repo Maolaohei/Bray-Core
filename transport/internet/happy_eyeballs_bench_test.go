@@ -182,8 +182,9 @@ func BenchmarkSortIPs(b *testing.B) {
 	}
 
 	b.ResetTimer()
+	var buf []net.IP
 	for i := 0; i < b.N; i++ {
-		sortIPs(ips, false, 1)
+		buf = sortIPsInto(buf, ips, false, 1)
 	}
 }
 
@@ -199,8 +200,9 @@ func BenchmarkSortIPs_LargeList(b *testing.B) {
 	}
 
 	b.ResetTimer()
+	var buf []net.IP
 	for i := 0; i < b.N; i++ {
-		sortIPs(ips, false, 1)
+		buf = sortIPsInto(buf, ips, false, 1)
 	}
 }
 

@@ -31,13 +31,13 @@ func (c *BrowserDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 	}
 
 	// Request-local URL copy: FillStreamRequest may append session path segments.
+	// Manual shell (no NewRequest parse): same pattern as DefaultDialerClient.
 	u := *base
-	request, err := http.NewRequest("GET", "", nil)
-	if err != nil {
-		return nil, nil, nil, err
+	request := &http.Request{
+		Method: "GET",
+		URL:    &u,
+		Host:   u.Host,
 	}
-	request.URL = &u
-	request.Host = u.Host
 
 	c.transportConfig.FillStreamRequest(request, sessionId, "")
 
