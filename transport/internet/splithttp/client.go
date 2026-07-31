@@ -402,7 +402,9 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 			if isFatalConnError(doErr) {
 				c.markFatal(doErr)
 			}
-			errors.LogInfoInner(ctx, doErr, "failed to "+method+" "+base.String())
+			// Log the request-local copy: base is the dialer's URL, which a
+			// mode-cascade retry may mutate concurrently (data race on Path).
+			errors.LogInfoInner(ctx, doErr, "failed to "+method+" "+u.String())
 			common.Close(body)
 			addrMu.Lock()
 			r, l := gotRemote, gotLocal
