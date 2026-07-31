@@ -416,7 +416,7 @@
 | `bench_results/report.md` | 当次完整报告（CI artifact） |
 | `bench_results/summary.json` | 机器可读 summary |
 | `bench_results/history/*.json` | 快照（含本机 `20260724T0615-local.json`） |
-| `bench_results/history/latest.md` | 最近一次短摘要 |
+| `bench_results/history/` | 历史快照 JSON + 目录说明（README.md） |
 | `bench_results/upstream/xray-core-v26.6.22.json` | 固定上游对照 |
 | `bench_results/run_20260724_quiet/` | pre-P0 对照 |
 | `bench_results/run_20260724_p0_pace/` | P0 峰值 |

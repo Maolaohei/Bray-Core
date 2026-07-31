@@ -223,7 +223,7 @@ sysctl -w net.core.wmem_max=16777216
 | XHTTP TTFB / Burst / allocs | Advantage (CI `xhttp_core`) | 📈 **CI 跟踪** | 每次 push 写入 `new_xhttp_core.txt` → report Advantage 区 |
 | REALITY micro | Regression | ⚪ **同量级** | AEAD / KeyExchange 稳定 |
 
-- 完整表格与图例：[bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md) · 短摘要 [bench_results/history/latest.md](bench_results/history/latest.md)
+- 完整表格与图例：[bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md) · 历史快照 [bench_results/history/](bench_results/history/README.md)
 - 原始输出：`bench_results/run_20260801_optN12/`（optN12）· `run_20260724_p0_pace/`（P0 后）· 修复前对照 `bench_results/run_20260724_quiet/`
 - 每次 push/PR 的 CI 表格 + SVG：`Benchmark Tracking` → artifact `bench-report-<sha>`（`report.md` / `summary.svg` / `history/`；含 **Advantage Highlights**）
 - 本地格式化：`python scripts/format_bench_report.py --history --suites xhttp_core,xmux,happy,warmup,vless,buf`
