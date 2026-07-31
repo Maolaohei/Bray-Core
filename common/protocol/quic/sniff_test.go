@@ -285,3 +285,24 @@ func TestSniffFakeQUICPacketWithTooShortData(t *testing.T) {
 		t.Error("failed")
 	}
 }
+
+func TestSniffQUICShortInitialPacketNoPanic(t *testing.T) {
+	// GHSA-xqmr-94vq-cxvx / GHSA-9h6x-9r9m-5qw2: a forged Initial packet with
+	// 4 <= packetLen < 20 passes the hdrLen+packetLen length gate but would
+	// panic slicing b[hdrLen+4:hdrLen+4+16] during header-protection unmask.
+	// Must return an error, never panic.
+	for packetLen := byte(4); packetLen <= 19; packetLen++ {
+		pkt := []byte{
+			0xc0,             // long header + fixed bit + Initial
+			0x00, 0x00, 0x00, 0x01, // QUIC v1
+			0x00,      // dcid len
+			0x00,      // scid len
+			0x00,      // token len
+			packetLen, // packet length (1-byte varint)
+		}
+		pkt = append(pkt, make([]byte, packetLen)...) // payload
+		if _, err := quic.SniffQUIC(pkt); err == nil {
+			t.Fatalf("packetLen=%d: expected error, got nil", packetLen)
+		}
+	}
+}

@@ -78,7 +78,7 @@ func PublishBrayV2MetricsToStats(m stats.Manager) {
 	}
 	snap := GetBrayV2Metrics()
 	set := func(name string, v uint64) {
-		c, err := stats.GetOrRegisterCounter(m, name)
+		c, err := m.GetOrRegisterCounter(name)
 		if err != nil || c == nil {
 			return
 		}

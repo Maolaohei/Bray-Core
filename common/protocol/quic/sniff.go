@@ -145,6 +145,14 @@ func SniffQUIC(b []byte) (*SniffHeader, error) {
 		}
 
 		cache.Clear()
+		// Header-protection unmask needs at least hdrLen+4+blocksize bytes
+		// (packet number + one AES block). packetLen>=4 alone does not
+		// guarantee that: a forged Initial with 4<=packetLen<20 passes the
+		// gate above but would panic slicing b[hdrLen+4:hdrLen+4+16].
+		// GHSA-xqmr-94vq-cxvx / GHSA-9h6x-9r9m-5qw2.
+		if len(b) < hdrLen+4+block.BlockSize() {
+			return nil, errNotQuic
+		}
 		mask := cache.Extend(int32(block.BlockSize()))
 		block.Encrypt(mask, b[hdrLen+4:hdrLen+4+len(mask)])
 		b[0] ^= mask[0] & 0xf

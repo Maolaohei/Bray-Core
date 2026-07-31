@@ -48,6 +48,23 @@ func (m *Manager) RegisterCounter(name string) (stats.Counter, error) {
 	return c, nil
 }
 
+// GetOrRegisterCounter implements stats.Manager. Atomically returns the
+// existing counter or registers a new one under one lock hold — unlike
+// Get+Register, concurrent callers cannot race into a duplicate
+// "already registered" error (#6468).
+func (m *Manager) GetOrRegisterCounter(name string) (stats.Counter, error) {
+	m.access.Lock()
+	defer m.access.Unlock()
+
+	if c, found := m.counters[name]; found {
+		return c, nil
+	}
+	errors.LogDebug(context.Background(), "create new counter ", name)
+	c := new(Counter)
+	m.counters[name] = c
+	return c, nil
+}
+
 // UnregisterCounter implements stats.Manager.
 func (m *Manager) UnregisterCounter(name string) error {
 	m.access.Lock()
@@ -109,6 +126,21 @@ func (m *Manager) UnregisterOnlineMap(name string) error {
 	return nil
 }
 
+// GetOrRegisterOnlineMap implements stats.Manager. Atomically returns the
+// existing OnlineMap or registers a new one under one lock hold (#6468).
+func (m *Manager) GetOrRegisterOnlineMap(name string) (stats.OnlineMap, error) {
+	m.access.Lock()
+	defer m.access.Unlock()
+
+	if om, found := m.onlineMaps[name]; found {
+		return om, nil
+	}
+	errors.LogDebug(context.Background(), "create new OnlineMap ", name)
+	om := NewOnlineMap()
+	m.onlineMaps[name] = om
+	return om, nil
+}
+
 // GetOnlineMap implements stats.Manager.
 func (m *Manager) GetOnlineMap(name string) stats.OnlineMap {
 	m.access.RLock()
@@ -139,6 +171,24 @@ func (m *Manager) RegisterChannel(name string) (stats.Channel, error) {
 
 	if _, found := m.channels[name]; found {
 		return nil, errors.New("Channel ", name, " already registered.")
+	}
+	errors.LogDebug(context.Background(), "create new channel ", name)
+	c := NewChannel(&ChannelConfig{BufferSize: 64, Blocking: false})
+	m.channels[name] = c
+	if m.running {
+		return c, c.Start()
+	}
+	return c, nil
+}
+
+// GetOrRegisterChannel implements stats.Manager. Atomically returns the
+// existing channel or registers a new one under one lock hold (#6468).
+func (m *Manager) GetOrRegisterChannel(name string) (stats.Channel, error) {
+	m.access.Lock()
+	defer m.access.Unlock()
+
+	if c, found := m.channels[name]; found {
+		return c, nil
 	}
 	errors.LogDebug(context.Background(), "create new channel ", name)
 	c := NewChannel(&ChannelConfig{BufferSize: 64, Blocking: false})
