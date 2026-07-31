@@ -293,7 +293,7 @@ func TestSniffQUICShortInitialPacketNoPanic(t *testing.T) {
 	// Must return an error, never panic.
 	for packetLen := byte(4); packetLen <= 19; packetLen++ {
 		pkt := []byte{
-			0xc0,             // long header + fixed bit + Initial
+			0xc0,                   // long header + fixed bit + Initial
 			0x00, 0x00, 0x00, 0x01, // QUIC v1
 			0x00,      // dcid len
 			0x00,      // scid len
