@@ -389,13 +389,6 @@ func sortIPsInto(dst []net.IP, ips []net.IP, prioritizeIPv6 bool, interleave uin
 	return dst
 }
 
-// sortIPs sorts IPs according to rfc 8305. Simple wrapper over sortIPsInto
-// with a fresh result slice (one alloc); hot dial paths should use
-// sortIPsInto with a reusable buffer instead.
-func sortIPs(ips []net.IP, prioritizeIPv6 bool, interleave uint32) []net.IP {
-	return sortIPsInto(nil, ips, prioritizeIPv6, interleave)
-}
-
 func tcpTryDial(ctx context.Context, src net.Address, sockopt *SocketConfig, ip net.IP, port net.Port, index int, resultCh chan<- *result, originalDomain string) {
 	conn, err := effectiveSystemDialer.Dial(ctx, src, net.Destination{Address: net.IPAddress(ip), Network: net.Network_TCP, Port: port, OriginalDomain: originalDomain}, sockopt)
 	select {

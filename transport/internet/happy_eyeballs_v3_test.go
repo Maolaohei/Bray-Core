@@ -231,3 +231,71 @@ func TestGlobalHappyIPDB(t *testing.T) {
 		t.Error("same IP should return same record")
 	}
 }
+
+// TestSortIPsInto_Empty pins the empty-input contract: nil dst -> nil,
+// non-nil dst -> dst[:0] (aliased, no allocation).
+func TestSortIPsInto_Empty(t *testing.T) {
+	if got := sortIPsInto(nil, nil, false, 1); got != nil {
+		t.Fatalf("empty + nil dst: want nil, got %v", got)
+	}
+	dst := make([]net.IP, 4)
+	got := sortIPsInto(dst, nil, false, 1)
+	if len(got) != 0 || cap(got) != cap(dst) {
+		t.Fatalf("empty + dst: want len-0 aliasing dst (cap %d), got len %d cap %d", cap(dst), len(got), cap(got))
+	}
+}
+
+// TestSortIPsInto_SingleFamilyZeroCopy pins the zero-copy fast path: a
+// single-family input returns the input slice itself, never dst.
+func TestSortIPsInto_SingleFamilyZeroCopy(t *testing.T) {
+	ips := []net.IP{net.ParseIP("192.168.1.1"), net.ParseIP("10.0.0.2")}
+	dst := make([]net.IP, 0, 8)
+	got := sortIPsInto(dst, ips, false, 1)
+	if len(got) != len(ips) || &got[0] != &ips[0] {
+		t.Fatalf("single-family: want input alias (zero-copy), got %v", got)
+	}
+	if !got[0].Equal(net.ParseIP("192.168.1.1")) || !got[1].Equal(net.ParseIP("10.0.0.2")) {
+		t.Fatal("single-family: order not preserved")
+	}
+}
+
+// TestSortIPsInto_InterleaveAliasesDstZeroAlloc pins the mixed-family
+// contract: result aliases dst and reusing dst costs 0 allocations.
+func TestSortIPsInto_InterleaveAliasesDstZeroAlloc(t *testing.T) {
+	ips := []net.IP{
+		net.ParseIP("192.168.1.1"),
+		net.ParseIP("192.168.1.2"),
+		net.ParseIP("2001:db8::1"),
+		net.ParseIP("2001:db8::2"),
+	}
+	dst := make([]net.IP, 8)
+	var out []net.IP
+	allocs := testing.AllocsPerRun(100, func() {
+		out = sortIPsInto(dst, ips, false, 1)
+	})
+	if allocs != 0 {
+		t.Fatalf("reused dst: want 0 allocs, got %.2f", allocs)
+	}
+	if len(out) != len(ips) {
+		t.Fatalf("want %d results, got %d", len(ips), len(out))
+	}
+	if &out[0] != &dst[0] {
+		t.Fatal("interleaved result must alias dst")
+	}
+	// RFC 8305 interleave (prioritizeIPv6=false): v4, v6, v4, v6.
+	want := []string{"192.168.1.1", "2001:db8::1", "192.168.1.2", "2001:db8::2"}
+	for i, w := range want {
+		if out[i].String() != w {
+			t.Fatalf("interleave[%d]: want %s, got %s", i, w, out[i])
+		}
+	}
+}
+
+// TestSortIPsInto_PrioritizeIPv6 pins the v6-first interleave start.
+func TestSortIPsInto_PrioritizeIPv6(t *testing.T) {
+	ips := []net.IP{net.ParseIP("192.168.1.1"), net.ParseIP("2001:db8::1")}
+	got := sortIPsInto(nil, ips, true, 1)
+	if len(got) != 2 || !got[0].Equal(net.ParseIP("2001:db8::1")) {
+		t.Fatalf("prioritizeIPv6: want v6 first, got %v", got)
+	}
+}
