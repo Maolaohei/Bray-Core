@@ -5,7 +5,7 @@ Bray-Core 是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的 **Bray �
 
 | 项目 | 当前状态 |
 |------|----------|
-| 基线版本 | Xray-core **26.6.22** |
+| 基线版本 | Xray-core **26.8.1** |
 | 语言版本 | Go **1.26.4** |
 | 模块路径 | `github.com/xtls/xray-core` |
 | REALITY | [Maolaohei/REALITY](https://github.com/Maolaohei/REALITY) **v0.5.5**（子模块 `./REALITY`） |
@@ -209,21 +209,22 @@ sysctl -w net.core.wmem_max=16777216
 
 > common/buf 与固定 Upstream 对照证明「底层没做烂」；**卖点请看 XHTTP/XMUX**，不要把 AES/ChaCha 或混场景 MB/s 当 Bray 优势。
 
-**快照**：2026-07-24 P0 pace 修复后（i5-13600KF / go1.26.4；XHTTP median of 3 @ 500ms）· 全文 [bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md)
+**快照**：2026-08-01 optN12（i5-13600KF / go1.26.4；XHTTP short alloc 800ms×3、micro 干净串行）· 全文 [bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md)
 
 | 类别 | 轨道 | 结论 | 说明 |
 |------|------|------|------|
 | vs 上游 common（buf/crypto/…） | Regression | ⚪/🔴 **混合 / 非主战场** | crypto 持平；`Copy` 波动不代表 XHTTP 产品吞吐 |
 | XMUX ConcurrentRW / Pool | Regression + Advantage | ⚪/**🟢** | Get/Pool 以近期 self-baseline 演进；见 CI XMUX + Advantage |
 | Happy Eyeballs | Regression | ⚠️ **撤销旧 +46% 叙事** | LargeList 无法复现 06-24 大胜 |
-| XHTTP stream-one / stream-up | Advantage (local) | 🟢 **~262 / ~241 MB/s** | 与 quiet 同量级；CI 用 Modes 子 bench 跟踪 |
-| XHTTP packet-up 单连接 | Advantage (local) | 🟢 **~223 MB/s H2C** | 原 ~2.17 MB/s（30ms 间隔）P0 解锁，约 **100×** |
-| XHTTP multi-conn (16) | Advantage (local) | 🟢 **聚合 ~18 GB/s 量级** | conns_1 已 ~170 MB/s；勿与 H2C micro 横向比 |
+| XHTTP stream-one / stream-up | Advantage (local) | 🟢 **~450 / ~460 MB/s**（optN12 短窗） | 差距收窄至 ~4%，profile 无 XHTTP 热点；产品 headline 仍以 optN3 为准 |
+| XHTTP packet-up 单连接 | Advantage (local) | 🟢 **~330 MB/s H2C**（optN12 短窗） | 原 ~2.17 MB/s（30ms 间隔）P0 解锁，约 **100×** |
+| XHTTP multi-conn (16) | Advantage (local) | 🟢 **聚合 ~23 GB/s 量级** | conns_1..16 超 P0 峰值 +32~60%，回落已不存在 |
+| HE SortIPs / LargeList | Regression + Advantage | 🟢 **0 alloc**（SortIPs ~59ns / LargeList ~348ns） | `sortIPsInto` caller-owned buffer（optN12） |
 | XHTTP TTFB / Burst / allocs | Advantage (CI `xhttp_core`) | 📈 **CI 跟踪** | 每次 push 写入 `new_xhttp_core.txt` → report Advantage 区 |
 | REALITY micro | Regression | ⚪ **同量级** | AEAD / KeyExchange 稳定 |
 
 - 完整表格与图例：[bench_results/COMPARISON_REPORT.md](bench_results/COMPARISON_REPORT.md) · 短摘要 [bench_results/history/latest.md](bench_results/history/latest.md)
-- 原始输出：`bench_results/run_20260724_p0_pace/`（P0 后）· 修复前对照 `bench_results/run_20260724_quiet/`
+- 原始输出：`bench_results/run_20260801_optN12/`（optN12）· `run_20260724_p0_pace/`（P0 后）· 修复前对照 `bench_results/run_20260724_quiet/`
 - 每次 push/PR 的 CI 表格 + SVG：`Benchmark Tracking` → artifact `bench-report-<sha>`（`report.md` / `summary.svg` / `history/`；含 **Advantage Highlights**）
 - 本地格式化：`python scripts/format_bench_report.py --history --suites xhttp_core,xmux,happy,warmup,vless,buf`
 - **无法同配置复现的旧数字直接忽略**；只信同名 Benchmark + 同 count + median。

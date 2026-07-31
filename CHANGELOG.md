@@ -1,11 +1,36 @@
 # Bray-Core Changelog
 
 基于 [Xray-core](https://github.com/XTLS/Xray-core) 的 **Bray 专属魔改**变更记录。  
-基线版本以 `core` 包中的版本号为准（当前 **26.6.22**）。REALITY 独立版本见 [Maolaohei/REALITY Releases](https://github.com/Maolaohei/REALITY/releases)。
+基线版本以 `core` 包中的版本号为准（当前 **26.8.1**）。REALITY 独立版本见 [Maolaohei/REALITY Releases](https://github.com/Maolaohei/REALITY/releases)。
 
 **兼容策略（2026-07 起）**：`main` 默认 **Bray 客户端 ↔ Bray 服务端**；不再承诺与上游 Xray 内核互访兼容。
 
 格式大致遵循 [Keep a Changelog](https://keepachangelog.com/) 语义：新增 / 变更 / 修复 / 文档。
+
+---
+
+## [26.8.1] — 2026-08-01
+
+对应提交：`23b7ea94`、`569b92f3`、`dcbbad33`、`f1bbc674`、`66567499`（`main` 相对 `origin/main` 领先）。
+
+### 性能（XHTTP / XMUX / HE）
+
+- **OpenStream URL 指针化**（`23b7ea94`）：`DialerClient.OpenStream` 改传 `*url.URL`，省去每流 `url.String()` + `NewRequestWithContext` Parse 往返（alloc + 重编码）；手构 `http.Request` shell 与 `newPacketRequest` 同模式。
+- **错误日志数据竞争修复**（`569b92f3`）：OpenStream 失败日志改用请求本地 URL 拷贝 `u.String()`，消除与 dialer 模式级联重试并发写 `requestURL.Path` 的 string 头撕裂（security_review 发现，MEDIUM）。
+- **HE `sortIPsInto` caller-owned buffer**（`dcbbad33`）：SortIPs **98→~59 ns · 1→0 alloc**、LargeList **578→~348 ns · 1→0 alloc**（optN12 实测）；`tcpRaceDialV2` 同步受益；单族输入保留零拷贝快路径。
+- **清理**（`f1bbc674`）：删除无调用者的 `sortIPs` 死代码；补 4 个 `sortIPsInto` 三态契约单测（空/单族/混合族别名+0 alloc/v6 优先）。
+
+### 基准（optN12，无回退）
+
+- buf.Copy ~74.7ns·4、XMUX Get ~34.1ns·0 / pool_1..32 ~46.4/~51.0/~60.4/~87.6/~148.4ns·0、HE Score ~532ns·0、H2C packet-up alloc **111**、H2+TLS alloc **198**、Modes 111/18——与 optN11 持平。
+- 多连接聚合 conns_1..16（~272 / 3053 / 9270 / 23666 MB/s）超 P0 峰值 +32~60%，历史 quiet2 回落已不存在。
+- stream-one vs stream-up 差距收窄至 ~4%（profile 无 XHTTP 热点，http2 双工固有开销，不动）。
+
+### 安全 / 上游跟进（45cf2898 v26.6.27 → 5ca6f4b7 v26.7.28）
+
+- **QUIC sniffer 越界防护**（`66567499`，对应上游 `8f15190c` / GHSA-xqmr-94vq-cxvx / GHSA-9h6x-9r9m-5qw2）：伪造 Initial 包 `4≤packetLen<20` 会触发 `b[hdrLen+4:hdrLen+4+16]` 越界 panic 的 DoS 已修复；额外补 `TestSniffQUICShortInitialPacketNoPanic` 回归测试（上游仅有修复无测试）。
+- **Stats GetOrRegister 原子化**（`66567499`，对应上游 `0bafca94`）：`Manager` 接口新增原子 `GetOrRegisterCounter/OnlineMap/Channel`，删除非原子包级 Get-then-Register 辅助函数（并发首用会撞 "already registered"）；16 处调用点迁移（含 Bray-only `bray_stats.go`）；新增 32-goroutine 并发回归测试。
+- 上游其余候选（XHTTP maxConnections 6→3、尾斜杠条件化、准确 localAddr、x/net 0.57、ECH 解析健壮化、HTTPUpgrade 容错）经核对已等价存在，无需合并；公网明文出站禁令（破坏性变更）**不跟进**。
 
 ---
 
