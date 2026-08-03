@@ -119,7 +119,8 @@ func TestStatsChannelBroadcastSurvivesEarlyCancel(t *testing.T) {
 	}
 }
 
-func TestStatsChannelUnsubscribe(t *testing.T) {	c := NewChannel(&ChannelConfig{Blocking: true})
+func TestStatsChannelUnsubscribe(t *testing.T) {
+	c := NewChannel(&ChannelConfig{Blocking: true})
 	common.Must(c.Start())
 	defer c.Close()
 
