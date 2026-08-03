@@ -15,7 +15,10 @@
 
 ### ⚠️ 升级注意（兼容性破坏）
 
-- **XHTTP 会话认证 fail-closed**：移除了公开默认密钥 `bray-default-session-key` 的自动注入。零配置（未设 `x-bray-session-secret` / `x-bray-session-uuid`）的部署**只支持 stream-one**；配置了 `packet-up` / `stream-up` 但未配密钥的部署会启动/拨号时报错（`XHTTP: session wire modes require x-bray-session-secret`）。**旧客户端（默认密钥）连接新服务端时，携带 sessionId 的请求会被拒绝**——请为会话模式配置显式密钥（高熵，≥32 随机字节）或使用 UUID 派生。stream-one 模式不受影响。
+- **XHTTP 会话认证 fail-closed**：移除了**无密钥时的公开默认密钥** `bray-default-session-key` 自动注入（该常量公开、任何人都能伪造 MAC）。行为变化：
+  - **VLESS + XHTTP 用户：无需任何配置**——conf 构建层仍自动从 VLESS 账号 UUID 派生 `x-bray-session-uuid`（会话 MAC 与账号绑定，继承 128 位熵），与之前一致。
+  - **非 VLESS / 绕过 conf 层直接构造配置**（如纯 XHTTP、API 直构）：`packet-up` / `stream-up` 需要显式配置高熵 `x-bray-session-secret`（≥32 随机字节），否则只支持 `stream-one`（锁定会话模式会报错 `XHTTP: session wire modes require x-bray-session-secret`）。
+  - **旧客户端（默认密钥）连接新服务端时，携带 sessionId 的请求会被拒绝**——这是 fail-closed 的预期行为。
 
 ### 安全
 
