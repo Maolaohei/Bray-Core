@@ -172,7 +172,7 @@ EOF
 sysctl --system
 ```
 
-说明：`tcp_initcwnd=60` 将初始拥塞窗口提到 ~840KB（首 RTT 即可大量发送）；`tcp_slow_start_after_idle=0` 空闲后不再重置 cwnd（连接保活期间吞吐不回退）；`tcp_fastopen=3` 启用 TFO 握手减 1 RTT。需 Linux 4.9+（默认内核即可）。
+说明：`tcp_initcwnd=60` 将初始拥塞窗口提到约 60 段（~85KB，MSS 1460B），首 RTT 即可发送更多数据；`tcp_slow_start_after_idle=0` 空闲后不再重置 cwnd（连接保活期间吞吐不回退）；`tcp_fastopen=3` 启用 TFO 握手减 1 RTT。需 Linux 4.9+（默认内核即可）。
 
 ---
 
