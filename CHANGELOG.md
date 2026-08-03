@@ -9,6 +9,31 @@
 
 ---
 
+## [Unreleased] — 深度修复批次（XHTTP / VLESS / REALITY / DNS）
+
+对应工作树修改（未提交）。
+
+### ⚠️ 升级注意（兼容性破坏）
+
+- **XHTTP 会话认证 fail-closed**：移除了公开默认密钥 `bray-default-session-key` 的自动注入。零配置（未设 `x-bray-session-secret` / `x-bray-session-uuid`）的部署**只支持 stream-one**；配置了 `packet-up` / `stream-up` 但未配密钥的部署会启动/拨号时报错（`XHTTP: session wire modes require x-bray-session-secret`）。**旧客户端（默认密钥）连接新服务端时，携带 sessionId 的请求会被拒绝**——请为会话模式配置显式密钥（高熵，≥32 随机字节）或使用 UUID 派生。stream-one 模式不受影响。
+
+### 安全
+
+- REALITY：握手读超时 10s（消除信号量 DoS 面）；mirror 路径 per-IP 限速（60s/20 次）；short_id / Mldsa65Seed 长度校验（消除配置 panic）；ReplayGuard 16 分片化；Show 日志脱敏（去 SNI/evidence/ClientTime）；客户端证书校验移除 reflect+unsafe；Spider 同 dest 60s 冷却。
+- DNS：UDP reqID 每查询 crypto/rand 随机 + 回绕冲突重试；响应 question 域名校验（不匹配/缺失即丢弃，RFC 5452）；TTL=0 不缓存、TTL 上限 86400、负缓存 60s；DoH 响应 64KB 上限；解析记录数上限 32；fakedns 改为 keyed hash（消除时间可预测性）；singleflight leader ctx 解耦；warmup 8 并发限流。
+- XHTTP：会话认证 fail-closed + 空 sessionId 严格拒绝；日志去敏（剥离 sessionId/seq）；CF 检测移除可伪造的 `Server` 请求头；packet-up body 30s 读取超时（含 chunked）；stream-one 并发/时长上限；padding 与 payload 解耦 + 样本 8。
+- VLESS：Addons 池归还；UUID 规范化冲突拒绝；UDP 大包显式报错；NfsKeys 每 ticket 上限；错误日志去敏；preconnect 用 math/rand/v2。
+
+### 性能
+
+- XHTTP：下行写聚合 Flush（孤立写直发）；H1 上传路径去死参数；高 RTT 窗口 24→12；H3 竞速 drain goroutine 泄漏修复；header 固定顺序（免 map 随机序）。实测（本机）：H2C 吞吐 82.5→360 MB/s、StreamUp 90.7→283 MB/s、TTFB 3.29ms→0.82ms、MemoryAlloc 23.9→112.5 MB/s。
+
+### 清理
+
+- `go vet ./...` 全仓库零告警（context cancel 泄漏、vmess/xray 死代码、unsafe.Pointer misuse 共 6 处）。
+
+---
+
 ## [26.8.1] — 2026-08-01
 
 对应提交：`23b7ea94`、`569b92f3`、`dcbbad33`、`f1bbc674`、`66567499`（`main` 相对 `origin/main` 领先）。
