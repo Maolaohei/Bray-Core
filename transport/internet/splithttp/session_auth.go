@@ -14,11 +14,22 @@ import (
 // Clients always generate signed IDs; servers reject unsigned or bad MACs so
 // unauthenticated session creation cannot fill the hub map.
 //
+// SECURITY: the wire tag is only 8 bytes of the HMAC, and the sessionId is
+// transmitted in plaintext on the request path. An operator-configured
+// x-bray-session-secret should therefore be high-entropy (≥ 32 random bytes /
+// 64 hex chars); a weak secret can be brute-forced offline from a captured
+// sessionId. Prefer the x-bray-session-uuid (VLESS account id) derivation,
+// which inherits the account's 128-bit entropy.
+//
 // Secret resolution (Bray-only, never on wire):
 //  1. explicit headers["x-bray-session-secret"]  (operator override)
 //  2. headers["x-bray-session-uuid"] one or more UUIDs (comma-separated),
 //     each derived via SHA-256(domain||uuid) — injected from VLESS id at conf build
-//  3. DefaultBraySessionSecret (non-VLESS / missing UUID zero-config fallback)
+//
+// Fail-closed: with neither configured, no MAC key exists. GenerateSessionID
+// returns an empty (stream-one) session id and the server rejects any non-empty
+// sessionId, so the session wire modes (stream-up/packet-up) require an explicit
+// secret or UUID seed.
 const (
 	sessionMACDomain   = "bray-xhttp-session-v1"
 	sessionMACTagBytes = 8
@@ -33,36 +44,9 @@ const (
 	// Multiple UUIDs (inbound multi-user) are comma-separated; verify accepts any.
 	BraySessionUUIDHeader = "x-bray-session-uuid"
 
-	// DefaultBraySessionSecret is injected when neither explicit secret nor UUID
-	// seed is present. Bray-only zero-config for non-VLESS or incomplete configs.
-	DefaultBraySessionSecret = "bray-default-session-key"
 )
 
-// fixedBraySessionSecret is the derived key for DefaultBraySessionSecret.
-// Host/path intentionally NOT mixed in: CDN multi-host and client/server
-// host field asymmetry must not desync MAC verification.
-var fixedBraySessionSecret = deriveSessionSecret([]byte(DefaultBraySessionSecret), "", "")
-
 var sessionSecretCache sync.Map // *Config -> [][]byte
-
-// ensureDefaultSessionSecret fills zero-config auth material when the operator
-// did not set an explicit secret or UUID seed. Safe to call on Dial/Listen and
-// from sessionSecrets(); never overwrites operator values.
-func (c *Config) ensureDefaultSessionSecret() {
-	if c == nil {
-		return
-	}
-	if lookupSessionSecretHeader(c.Headers) != "" {
-		return
-	}
-	if len(lookupSessionUUIDSeeds(c.Headers)) > 0 {
-		return
-	}
-	if c.Headers == nil {
-		c.Headers = make(map[string]string, 1)
-	}
-	c.Headers[BraySessionSecretHeader] = DefaultBraySessionSecret
-}
 
 func lookupSessionSecretHeader(headers map[string]string) string {
 	if headers == nil {
@@ -141,9 +125,8 @@ func normalizeSessionUUID(s string) string {
 // the primary key used for signing new session IDs on the client.
 func (c *Config) sessionSecrets() [][]byte {
 	if c == nil {
-		return [][]byte{fixedBraySessionSecret}
+		return nil
 	}
-	c.ensureDefaultSessionSecret()
 	if v, ok := sessionSecretCache.Load(c); ok {
 		return v.([][]byte)
 	}
@@ -154,9 +137,6 @@ func (c *Config) sessionSecrets() [][]byte {
 
 func resolveSessionSecrets(headers map[string]string) [][]byte {
 	if s := lookupSessionSecretHeader(headers); s != "" {
-		if s == DefaultBraySessionSecret {
-			return [][]byte{fixedBraySessionSecret}
-		}
 		return [][]byte{deriveSessionSecret([]byte(s), "", "")}
 	}
 	if uuids := lookupSessionUUIDSeeds(headers); len(uuids) > 0 {
@@ -166,13 +146,13 @@ func resolveSessionSecrets(headers map[string]string) [][]byte {
 		}
 		return out
 	}
-	return [][]byte{fixedBraySessionSecret}
+	return nil
 }
 
 func (c *Config) sessionSecret() []byte {
 	secrets := c.sessionSecrets()
 	if len(secrets) == 0 {
-		return fixedBraySessionSecret
+		return nil
 	}
 	return secrets[0]
 }
@@ -206,7 +186,7 @@ func deriveSessionSecretFromUUID(uuidStr string) []byte {
 }
 
 func signSessionID(raw string, secret []byte) string {
-	if raw == "" {
+	if raw == "" || secret == nil {
 		return ""
 	}
 	mac := hmac.New(sha256.New, secret)
@@ -240,12 +220,14 @@ func verifySessionID(sessionId string, secret []byte) bool {
 
 // verifySessionIDAny accepts a sessionId signed by any of the provided secrets.
 // Used on multi-user inbounds where each VLESS UUID yields a distinct key.
+// Empty sessionId is never accepted here: stream-one (no session) requests are
+// gated by the caller's mode check, not by session verification.
 func verifySessionIDAny(sessionId string, secrets [][]byte) bool {
 	if sessionId == "" {
-		return true
+		return false
 	}
 	if len(secrets) == 0 {
-		return verifySessionID(sessionId, fixedBraySessionSecret)
+		return false
 	}
 	for _, secret := range secrets {
 		if verifySessionID(sessionId, secret) {
@@ -269,7 +251,7 @@ func appendSeqTag(seq uint64, secret []byte) string {
 // VerifySessionIDExported is a test/helper wrapper around verifySessionIDAny.
 func VerifySessionIDExported(sessionId string, c *Config) bool {
 	if c == nil {
-		return verifySessionID(sessionId, fixedBraySessionSecret)
+		return false
 	}
 	return verifySessionIDAny(sessionId, c.sessionSecrets())
 }

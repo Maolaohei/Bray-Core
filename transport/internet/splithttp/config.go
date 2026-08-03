@@ -1,10 +1,12 @@
 package splithttp
 
 import (
+	"context"
 	"encoding/base64"
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/bytespool"
 	"github.com/xtls/xray-core/common/crypto"
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/common/uuid"
 	"github.com/xtls/xray-core/transport/internet"
@@ -329,6 +332,37 @@ func cloneHeaderShallow(src http.Header) http.Header {
 	return dst
 }
 
+// knownBrayControlKeys is the allowlist of x-bray-* local control headers.
+// Anything else with the x-bray- prefix is a typo that today silently falls
+// back to defaults — warn once so operators notice.
+var knownBrayControlKeys = map[string]struct{}{
+	"x-bray-session-secret":      {},
+	"x-bray-session-uuid":        {},
+	"x-bray-mode-degrade":        {},
+	"x-bray-sticky-mode":         {},
+	"x-bray-sticky-mode-ttl":     {},
+	"x-bray-sticky-endpoint":     {},
+	"x-bray-sticky-endpoint-ttl": {},
+	"x-bray-multi-endpoint":      {},
+	"x-bray-endpoints":           {},
+	"x-bray-sse":                 {},
+	"x-bray-x-accel":             {},
+}
+
+func validateBrayControlHeaders(headers map[string]string) {
+	if headers == nil {
+		return
+	}
+	for k := range headers {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		if strings.HasPrefix(lk, "x-bray-") {
+			if _, ok := knownBrayControlKeys[lk]; !ok {
+				errors.LogWarning(context.Background(), "unknown x-bray-* control header: ", k, " (typo? silently falls back to defaults)")
+			}
+		}
+	}
+}
+
 func (c *Config) GetRequestHeader() http.Header {
 	if c != nil {
 		if cached, ok := requestHeaderBaseCache.Load(c); ok {
@@ -337,15 +371,33 @@ func (c *Config) GetRequestHeader() http.Header {
 	}
 	header := http.Header{}
 	if c != nil {
-		for k, v := range c.Headers {
+		// Warn about unknown x-bray-* control headers (typos fall back silently).
+		validateBrayControlHeaders(c.Headers)
+		// Deterministic header order: map iteration order is random, and a
+		// per-request shuffled header order is a recognizable bot fingerprint
+		// (real browsers send stable orders). Sorted once per config thanks to
+		// requestHeaderBaseCache.
+		keys := make([]string, 0, len(c.Headers))
+		for k := range c.Headers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
 			// Bray control headers (x-bray-*) are client-local only; never send on wire.
 			if isBrayControlHeader(k) {
 				continue
 			}
-			header.Add(k, v)
+			header.Add(k, c.Headers[k])
 		}
 	}
 	utils.TryDefaultHeadersWith(header, "fetch")
+	// DisableCompression=true on the http2.Transport suppresses Go's automatic
+	// Accept-Encoding header; real browsers always send it, so its absence is
+	// a machine fingerprint. Emit a browser-like value — the XHTTP server
+	// never compresses (binary packet bodies), so this is purely cosmetic.
+	if c != nil && header.Get("Accept-Encoding") == "" {
+		header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	}
 	if c != nil {
 		// Store a frozen clone so callers mutating the returned header never
 		// poison the cache.

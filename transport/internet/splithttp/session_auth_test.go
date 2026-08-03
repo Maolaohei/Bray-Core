@@ -10,7 +10,8 @@ import (
 )
 
 func TestSessionAuth_SignVerifyRoundTrip(t *testing.T) {
-	c := &Config{Host: "example.com", Path: "/xhttp"}
+	secret := map[string]string{BraySessionSecretHeader: "roundtrip-secret"}
+	c := &Config{Host: "example.com", Path: "/xhttp", Headers: secret}
 	id := c.GenerateSessionID()
 	if id == "" || !strings.Contains(id, ".") {
 		t.Fatalf("expected signed session id, got %q", id)
@@ -18,10 +19,10 @@ func TestSessionAuth_SignVerifyRoundTrip(t *testing.T) {
 	if !VerifySessionIDExported(id, c) {
 		t.Fatal("verify should accept GenerateSessionID output")
 	}
-	// Different host/path still verifies with fixed default secret
-	c2 := &Config{Host: "other.cdn", Path: "/else"}
+	// Different host/path still verifies with same explicit secret
+	c2 := &Config{Host: "other.cdn", Path: "/else", Headers: secret}
 	if !VerifySessionIDExported(id, c2) {
-		t.Fatal("default secret must match across host/path")
+		t.Fatal("explicit secret must match across host/path")
 	}
 	// Tamper tag
 	parts := strings.Split(id, ".")
@@ -65,11 +66,14 @@ func TestSessionAuth_ExplicitSecret(t *testing.T) {
 	if VerifySessionIDExported(id, c3) {
 		t.Fatal("different secret must reject")
 	}
-	// Explicit secret must not accept default-signed id
+	// Zero-config cannot sign (fail-closed): no default-signed id exists.
 	cDef := &Config{}
 	defID := cDef.GenerateSessionID()
+	if defID != "" {
+		t.Fatalf("zero-config must not produce a signed id, got %q", defID)
+	}
 	if VerifySessionIDExported(defID, c1) {
-		t.Fatal("default-signed id must fail under explicit secret")
+		t.Fatal("empty zero-config id must not verify as a session id")
 	}
 }
 
@@ -162,50 +166,59 @@ func TestUploadQueue_OrderedOk(t *testing.T) {
 	}
 }
 
-func TestSessionAuth_DefaultHeaderInjected(t *testing.T) {
+func TestSessionAuth_ZeroConfigFailClosed(t *testing.T) {
 	c := &Config{Host: "example.com", Path: "/xhttp"}
-	// GenerateSessionID -> sessionSecret injects default header for zero-config.
-	_ = c.GenerateSessionID()
-	if c.Headers == nil {
-		t.Fatal("Headers map should be created")
+	// Zero-config: no secret injected, no session MAC capability (fail-closed).
+	id := c.GenerateSessionID()
+	if id != "" {
+		t.Fatalf("zero-config GenerateSessionID must be empty (fail-closed), got %q", id)
 	}
-	got, ok := c.Headers[BraySessionSecretHeader]
-	if !ok || got != DefaultBraySessionSecret {
-		t.Fatalf("want default header %q=%q, got ok=%v val=%q", BraySessionSecretHeader, DefaultBraySessionSecret, ok, got)
+	if c.Headers[BraySessionSecretHeader] != "" {
+		t.Fatalf("zero-config must not inject a default secret header: %q", c.Headers[BraySessionSecretHeader])
 	}
-	// UUID seed present: do NOT inject default secret
-	cUUID := &Config{Headers: map[string]string{BraySessionUUIDHeader: "550e8400-e29b-41d4-a716-446655440000"}}
-	_ = cUUID.GenerateSessionID()
-	if cUUID.Headers[BraySessionSecretHeader] == DefaultBraySessionSecret {
-		t.Fatal("default secret must not be injected when UUID seed is present")
-	}
-	// Explicit secret must be preserved (sessionSecret path must not overwrite).
+	// Explicit secret must produce a signed session id and be preserved.
 	c2 := &Config{Headers: map[string]string{BraySessionSecretHeader: "custom-secret"}}
-	_ = c2.GenerateSessionID()
+	if c2.GenerateSessionID() == "" {
+		t.Fatal("explicit secret must produce a signed session id")
+	}
 	if c2.Headers[BraySessionSecretHeader] != "custom-secret" {
 		t.Fatalf("explicit secret overwritten: %q", c2.Headers[BraySessionSecretHeader])
 	}
 	// Control header must never appear on wire request headers.
-	reqH := c.GetRequestHeader()
+	reqH := c2.GetRequestHeader()
 	if reqH.Get(BraySessionSecretHeader) != "" || reqH.Get("X-Bray-Session-Secret") != "" {
 		t.Fatal("session secret must not be sent on wire")
 	}
 }
 
-func TestSessionAuth_DefaultMatchesBothEnds(t *testing.T) {
-	client := &Config{Host: "cdn.example", Path: "/a"}
-	server := &Config{Host: "origin.internal", Path: "/b"}
+func TestSessionAuth_SharedSecretMatchesBothEnds(t *testing.T) {
+	client := &Config{Host: "cdn.example", Path: "/a", Headers: map[string]string{BraySessionSecretHeader: "shared-secret"}}
+	server := &Config{Host: "origin.internal", Path: "/b", Headers: map[string]string{BraySessionSecretHeader: "shared-secret"}}
 	id := client.GenerateSessionID()
+	if id == "" {
+		t.Fatal("client with explicit secret must sign session id")
+	}
 	if !VerifySessionIDExported(id, server) {
-		t.Fatal("zero-config client and server must share default session secret")
+		t.Fatal("client and server with same explicit secret must verify")
 	}
-	if client.Headers[BraySessionSecretHeader] != DefaultBraySessionSecret {
-		t.Fatalf("client default missing: %q", client.Headers[BraySessionSecretHeader])
+	// Mismatched secrets must fail.
+	other := &Config{Headers: map[string]string{BraySessionSecretHeader: "other-secret"}}
+	if VerifySessionIDExported(id, other) {
+		t.Fatal("mismatched secret must not verify")
 	}
-	if server.Headers[BraySessionSecretHeader] != DefaultBraySessionSecret {
-		_ = VerifySessionIDExported(id, server)
+	// Zero-config server must reject signed ids (fail-closed).
+	zero := &Config{Host: "origin.internal", Path: "/b"}
+	if VerifySessionIDExported(id, zero) {
+		t.Fatal("zero-config server must reject signed session ids (fail-closed)")
 	}
-	if server.Headers[BraySessionSecretHeader] != DefaultBraySessionSecret {
-		t.Fatalf("server default missing: %q", server.Headers[BraySessionSecretHeader])
+	// UUID seed also derives a working key.
+	cUUID := &Config{Headers: map[string]string{BraySessionUUIDHeader: "550e8400-e29b-41d4-a716-446655440000"}}
+	idU := cUUID.GenerateSessionID()
+	if idU == "" {
+		t.Fatal("UUID seed must produce a signed session id")
+	}
+	sUUID := &Config{Headers: map[string]string{BraySessionUUIDHeader: "550e8400-e29b-41d4-a716-446655440000"}}
+	if !VerifySessionIDExported(idU, sUUID) {
+		t.Fatal("UUID-seed client and server must verify")
 	}
 }

@@ -28,6 +28,8 @@ func TestBenchmark_PacketUpBulkDefaultPacing(t *testing.T) {
 		ProtocolSettings: &Config{
 			Path: "/sh",
 			Mode: "packet-up",
+			// Session wire modes require a shared MAC secret (fail-closed).
+			Headers: map[string]string{BraySessionSecretHeader: "bench-test-secret"},
 			// Keep defaults for max post size / interval (30ms) via nil fields.
 		},
 	}

@@ -39,9 +39,12 @@ var (
 	brayStatsMu    sync.Mutex
 	brayStatsBound stats.Manager
 
-	mirrorStop   chan struct{}
-	mirrorWG     sync.WaitGroup
-	mirrorActive atomic.Bool
+	// mirrorStartMu serializes start/stop so concurrent bind/unbind cannot
+	// leave two ticker goroutines running.
+	mirrorStartMu sync.Mutex
+	mirrorStop    chan struct{}
+	mirrorWG      sync.WaitGroup
+	mirrorActive  atomic.Bool
 )
 
 // BindBrayV2StatsManager stores a stats.Manager for later Publish calls.
@@ -126,7 +129,9 @@ func BrayV2StatsCounterNames() []string {
 }
 
 func startBrayStatsMirror() {
-	stopBrayStatsMirror()
+	mirrorStartMu.Lock()
+	defer mirrorStartMu.Unlock()
+	stopBrayStatsMirrorLocked()
 	if BrayV2StatsMirrorInterval <= 0 {
 		return
 	}
@@ -155,6 +160,14 @@ func startBrayStatsMirror() {
 }
 
 func stopBrayStatsMirror() {
+	mirrorStartMu.Lock()
+	defer mirrorStartMu.Unlock()
+	stopBrayStatsMirrorLocked()
+}
+
+// stopBrayStatsMirrorLocked stops the mirror goroutine. Caller must hold
+// mirrorStartMu so concurrent bind/unbind cannot create double tickers.
+func stopBrayStatsMirrorLocked() {
 	brayStatsMu.Lock()
 	stop := mirrorStop
 	mirrorStop = nil

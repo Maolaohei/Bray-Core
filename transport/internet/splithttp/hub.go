@@ -18,7 +18,6 @@ import (
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
 	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	http_proto "github.com/xtls/xray-core/common/protocol/http"
@@ -39,6 +38,7 @@ type requestHandler struct {
 	sessionMu      *sync.Mutex
 	sessions       sync.Map
 	sessionN       atomic.Int64 // O(1) live session count (Bray-only)
+	streamOneActive atomic.Int64 // live unauthenticated stream-one long-polls
 	localAddr      net.Addr
 	socketSettings *internet.SocketConfig
 	stopCh         chan struct{}
@@ -209,6 +209,34 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 	return s
 }
 
+// readBodyWithTimeout reads full body into buf with a hard deadline so a slow
+// peer cannot pin a goroutine and a large allocation indefinitely.
+func readBodyWithTimeout(request *http.Request, buf []byte, timeout time.Duration) (int, error) {
+	readCtx, cancel := context.WithTimeout(request.Context(), timeout)
+	defer cancel()
+	type bodyResult struct {
+		n   int
+		err error
+	}
+	done := make(chan bodyResult, 1)
+	go func() {
+		n, err := io.ReadFull(request.Body, buf)
+		done <- bodyResult{n, err}
+	}()
+	select {
+	case r := <-done:
+		return r.n, r.err
+	case <-readCtx.Done():
+		// The read goroutine is still blocked on request.Body (body reads do
+		// not observe context cancellation). Abort the body so the goroutine
+		// and its ≤ scMaxEachPostBytes buffer cannot linger indefinitely.
+		if closer, ok := request.Body.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		return 0, readCtx.Err()
+	}
+}
+
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	reqStart := time.Now()
 	if len(h.host) > 0 && !internet.IsValidHTTPHost(request.Host, h.host) {
@@ -223,9 +251,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
-	// Detect Cloudflare CDN once per listener
+	// Detect Cloudflare CDN once per listener. Only trust Cf-Ray (injected by
+	// Cloudflare edge; plain clients never send it). The forgeable
+	// "Server: cloudflare" request-header check was removed.
 	if !h.cfDetected.Load() {
-		if request.Header.Get("Cf-Ray") != "" || request.Header.Get("Server") == "cloudflare" {
+		if request.Header.Get("Cf-Ray") != "" {
 			h.cfDetected.Store(true)
 			errors.LogInfo(context.Background(), "Cloudflare CDN detected, session TTL set to 75s")
 		}
@@ -462,12 +492,24 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				// Allocate once for queue ownership. Avoid pool+clone double copy
 				// on the packet-up hot path (uploadQueue may retain the slice).
 				bodyPayload = make([]byte, bodyLen)
-				_, readErr = io.ReadFull(request.Body, bodyPayload)
+				// Slow-body guard: a peer may declare a large ContentLength and
+				// drip bytes forever; cap the read with a deadline so a single
+				// request cannot pin a goroutine + buffer indefinitely.
+				_, readErr = readBodyWithTimeout(request, bodyPayload, 30*time.Second)
 			} else {
-				bodyPayload, readErr = buf.ReadAllToBytes(io.LimitReader(request.Body, int64(scMaxEachPostBytes)+1))
+				// Chunked upload: bound both size and rate. ReadFull into a
+				// fixed cap; io.ErrUnexpectedEOF merely means the body ended
+				// before the cap (normal), not an error.
+				bodyPayload = make([]byte, scMaxEachPostBytes+1)
+				var n int
+				n, readErr = readBodyWithTimeout(request, bodyPayload, 30*time.Second)
+				bodyPayload = bodyPayload[:n]
+				if readErr == io.ErrUnexpectedEOF {
+					readErr = nil
+				}
 			}
 			if readErr != nil {
-				errors.LogDebug(context.Background(), "failed to read body payload")
+				errors.LogDebug(context.Background(), "failed to read body payload: ", readErr)
 				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
@@ -483,6 +525,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			payload = bodyPayload
 		case PlacementAuto:
 			totalLen := len(headerPayload) + len(cookiePayload) + len(bodyPayload)
+			// Reject before allocating the merged buffer: a peer that drives
+			// all three channels near scMaxEachPostBytes would otherwise force
+			// a transient 3x+ peak allocation on every oversized POST.
+			if totalLen > scMaxEachPostBytes {
+				errors.LogDebug(context.Background(), "assembled payload exceeds scMaxEachPostBytes")
+				writer.WriteHeader(http.StatusNotFound)
+				return
+			}
 			payload = make([]byte, 0, totalLen)
 			payload = append(payload, headerPayload...)
 			payload = append(payload, cookiePayload...)
@@ -531,6 +581,17 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 		// Locked packet-up/stream-up without session already rejected above.
 		// Locked packet-up with empty sessionId rejected by ServerModeAllowsStreamOne.
+		if sessionId == "" {
+			// Bray-only: unauthenticated stream-one long-polls are the biggest
+			// probe/DoS surface (no MAC, no body bound). Cap concurrency and
+			// lifetime per listener so fake streams cannot pin goroutines/fds.
+			if n := h.streamOneActive.Add(1); n > streamOneMaxActive {
+				h.streamOneActive.Add(-1)
+				writer.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			defer h.streamOneActive.Add(-1)
+		}
 		if sessionId != "" {
 			// after GET is done, the connection is finished. disable automatic
 			// session reaping, and handle it in defer
@@ -584,6 +645,15 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		h.ln.addConn(stat.Connection(&conn))
 
+		if sessionId == "" {
+			// Reap unauthenticated stream-one connections after a bounded
+			// lifetime so idle long-polls cannot accumulate forever.
+			timer := time.AfterFunc(streamOneMaxLifetime, func() {
+				_ = httpSC.Close()
+			})
+			defer timer.Stop()
+		}
+
 		// "A ResponseWriter may not be used after [Handler.ServeHTTP] has returned."
 		select {
 		case <-request.Context().Done():
@@ -602,7 +672,28 @@ type httpServerConn struct {
 	*done.Instance
 	io.Reader // no need to Close request.Body
 	http.ResponseWriter
+	// Downlink write aggregation: flushing every Write() forces one TCP
+	// segment / H2 DATA frame per chunk, which inflates frame count on
+	// high-chunk-rate tunnels. Bytes are buffered and flushed at a size
+	// threshold or short interval instead. flushAt is zero when idle.
+	writeBuf []byte
+	flushAt  time.Time
 }
+
+// streamFlushThreshold / streamFlushInterval bound downlink latency: a
+// stream chunk is flushed within ~10ms even when far below the size threshold.
+const (
+	streamFlushThreshold = 16 << 10
+	streamFlushInterval  = 10 * time.Millisecond
+)
+
+// streamOneMaxActive caps concurrent unauthenticated stream-one long-polls
+// per listener (probe/DoS surface bound: no MAC, no body limit on that path).
+const streamOneMaxActive = 2000
+
+// streamOneMaxLifetime caps how long an unauthenticated stream-one connection
+// may live before being reaped.
+const streamOneMaxLifetime = 10 * time.Minute
 
 func (c *httpServerConn) Write(b []byte) (int, error) {
 	// ServeHTTP may return while a handler goroutine is still writing
@@ -613,16 +704,75 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 	if c.Instance.Done() {
 		return 0, io.ErrClosedPipe
 	}
-	n, err := c.ResponseWriter.Write(b)
-	if err == nil {
-		c.ResponseWriter.(http.Flusher).Flush()
+	if len(b) == 0 {
+		return 0, nil
 	}
-	return n, err
+	if len(c.writeBuf) == 0 {
+		// Isolated write (request/response or echo pattern): flush immediately
+		// to keep first-byte latency. Aggregating here would add up to
+		// streamFlushInterval of delay per round trip.
+		n, err := c.ResponseWriter.Write(b)
+		if err == nil {
+			if f, ok := c.ResponseWriter.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+		return n, err
+	}
+	// Back-to-back writes: aggregate until the size threshold or short
+	// interval, so high-chunk-rate tunnels do not emit one TCP segment /
+	// H2 DATA frame per chunk.
+	c.writeBuf = append(c.writeBuf, b...)
+	now := time.Now()
+	if len(c.writeBuf) >= streamFlushThreshold || now.Sub(c.flushAt) >= streamFlushInterval {
+		if err := c.flushLocked(); err != nil {
+			return 0, err
+		}
+		c.flushAt = time.Time{}
+	} else if c.flushAt.IsZero() {
+		c.flushAt = now
+		// Guarantee delivery even when the writer goes quiet before the size
+		// threshold: schedule a one-shot flush so buffered bytes are never
+		// stranded (a passive observer would otherwise see a stall).
+		time.AfterFunc(streamFlushInterval, c.flushPending)
+	}
+	return len(b), nil
+}
+
+// flushPending is the scheduled one-shot flush for quiet writers.
+func (c *httpServerConn) flushPending() {
+	c.Lock()
+	defer c.Unlock()
+	if c.Instance.Done() {
+		return
+	}
+	if len(c.writeBuf) > 0 {
+		_ = c.flushLocked()
+		c.flushAt = time.Time{}
+	}
+}
+
+func (c *httpServerConn) flushLocked() error {
+	if len(c.writeBuf) == 0 {
+		return nil
+	}
+	_, err := c.ResponseWriter.Write(c.writeBuf)
+	c.writeBuf = c.writeBuf[:0] // keep capacity for the connection lifetime
+	if err == nil {
+		if f, ok := c.ResponseWriter.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+	return err
 }
 
 func (c *httpServerConn) Close() error {
 	c.Lock()
 	defer c.Unlock()
+	if !c.Instance.Done() {
+		// Deliver any buffered downlink bytes before the stream is torn down.
+		_ = c.flushLocked()
+	}
 	return c.Instance.Close()
 }
 
@@ -644,8 +794,6 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 	}
 	l.config = streamSettings.ProtocolSettings.(*Config)
 	if l.config != nil {
-		// Bray-only: inject default x-bray-session-secret so client/server MAC match zero-config.
-		l.config.ensureDefaultSessionSecret()
 		if streamSettings.SocketSettings == nil {
 			streamSettings.SocketSettings = &internet.SocketConfig{}
 		}
@@ -757,7 +905,13 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 			}
 		}
 		if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
-			l.listener = goreality.NewListener(l.listener, config.GetREALITYConfig())
+			rc, err := config.GetREALITYConfig()
+			if err != nil {
+				// Fail closed like tcp/grpc hubs: a bad REALITY config must
+				// not silently degrade to a plaintext listener.
+				return nil, errors.New("invalid REALITY config").Base(err).AtError()
+			}
+			l.listener = goreality.NewListener(l.listener, rc)
 		}
 
 		handler.localAddr = l.listener.Addr()
@@ -771,11 +925,11 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 			ReadHeaderTimeout: time.Second * 4,
 			MaxHeaderBytes:    l.config.GetNormalizedServerMaxHeaderBytes(),
 			Protocols:         protocols,
-			// Match client http2.Transport MaxReadFrameSize so bulk packet-up
-			// DATA frames are not stuck at the 16KiB default SETTINGS ceiling.
+			// Match client http2.Transport frame size so bulk packet-up DATA
+			// frames are not stuck above the browser-like 16KiB SETTINGS ceiling.
 			// Peer write size is limited by what THIS endpoint will read.
 			HTTP2: &http.HTTP2Config{
-				MaxReadFrameSize: 256 << 10,
+				MaxReadFrameSize: 16384,
 			},
 		}
 		go func() {

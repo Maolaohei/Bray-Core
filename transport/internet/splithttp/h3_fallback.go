@@ -127,10 +127,17 @@ func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error)
 	h2Ch := make(chan raceResult, 1)
 	ctx := req.Context()
 
+	// h2Started tracks whether the H2 racer actually launched (timer fired
+	// before H3 finished). Only then does h2Ch ever receive, so only then do
+	// we need a drain goroutine — otherwise every settled H3 race would leak
+	// a 10s drain goroutine waiting on a channel that never fires.
+	var h2Started atomic.Bool
 	// Ensure response bodies are closed if we return early (e.g., context cancel)
 	defer func() {
 		go t.drainLateResponse(h3Ch)
-		go t.drainLateResponse(h2Ch)
+		if h2Started.Load() {
+			go t.drainLateResponse(h2Ch)
+		}
 	}()
 
 	// H3 is the preferred path — start it immediately.
@@ -151,6 +158,7 @@ func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error)
 		case <-timer.C:
 		}
 
+		h2Started.Store(true)
 		h2Req := req.Clone(ctx)
 		resp, err := t.h2.RoundTrip(h2Req)
 		h2Ch <- raceResult{resp, err}

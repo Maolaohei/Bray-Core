@@ -141,7 +141,10 @@ func packetUploadWindow(scMaxBufferedPosts int, rtt time.Duration) int {
 	w := packetUploadDefaultWindow
 	switch {
 	case rtt >= 200*time.Millisecond:
-		w = packetUploadMaxWindow
+		// Was 24 (packetUploadMaxWindow): on high-RTT/jittery links a lost
+		// seq's retry backoff can exceed the server 2s gap timeout and abort
+		// the whole session. Cap lower to keep retries inside the gap window.
+		w = 12
 	case rtt >= 80*time.Millisecond:
 		w = 18
 	case rtt >= 20*time.Millisecond:
@@ -231,18 +234,6 @@ func packetUploadLaunchIntervalMs(configuredMs int32, hasBacklog bool, fullChunk
 		return 0
 	}
 	return configuredMs
-}
-
-// cloneMultiBuffer deep-copies payload so PostPacket consumers that take
-// ownership never free a buffer the caller still needs.
-func cloneMultiBuffer(src buf.MultiBuffer) buf.MultiBuffer {
-	if src.IsEmpty() {
-		return nil
-	}
-	n := int(src.Len())
-	raw := make([]byte, n)
-	src.Copy(raw)
-	return buf.MergeBytes(nil, raw)
 }
 
 // multiFromDurable wraps a durable byte snapshot as an unmanaged MultiBuffer.

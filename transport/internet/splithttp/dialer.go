@@ -656,9 +656,9 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			ReadIdleTimeout: h2KeepAlive,
 			// Binary packet-up bodies must not be gzipped; skip Accept-Encoding work.
 			DisableCompression: true,
-			// Larger frames cut syscall/header overhead on bulk packet-up POSTs (TLS path).
-			// http2 default is 16KiB; 256KiB stays well under the 16MiB-1 cap.
-			MaxReadFrameSize: 256 << 10,
+			// 16KiB frame matches browser HTTP/2 SETTINGS (anti-fingerprint);
+			// the 256KiB value is a recognizable non-browser machine marker.
+			MaxReadFrameSize: 16384,
 		}
 
 		transport = newHappyEyeballsTransport(h3Transport, h2Transport)
@@ -680,9 +680,9 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			ReadIdleTimeout: keepAlivePeriod,
 			// Binary packet-up bodies must not be gzipped; skip Accept-Encoding work.
 			DisableCompression: true,
-			// Larger frames cut syscall/header overhead on bulk packet-up POSTs (TLS path).
-			// http2 default is 16KiB; 256KiB stays well under the 16MiB-1 cap.
-			MaxReadFrameSize: 256 << 10,
+			// 16KiB frame matches browser HTTP/2 SETTINGS (anti-fingerprint);
+			// the 256KiB value is a recognizable non-browser machine marker.
+			MaxReadFrameSize: 16384,
 		}
 	} else {
 		httpDialContext := func(ctxInner context.Context, network string, addr string) (net.Conn, error) {
@@ -783,10 +783,6 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}
 
 	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
-	// Bray-only: inject default x-bray-session-secret so client/server MAC match zero-config.
-	if transportConfiguration != nil {
-		transportConfiguration.ensureDefaultSessionSecret()
-	}
 	// Wave-7: sticky TTL headers are per-entry at remember time (no process globals).
 	stickyModeTTL, _ := StickyTTLFromHeaders(transportConfiguration.Headers)
 	var requestURL url.URL
@@ -915,6 +911,32 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 	// Wave-3: try mode cascade (stream-one -> stream-up -> packet-up) on open failure.
 	// Each attempt gets a fresh pipe so partial writes never cross modes.
+	// Fail-closed guard: session wire modes (stream-up/packet-up) require a MAC
+	// secret to sign session IDs. Without one only stream-one is usable — skip
+	// session modes instead of emitting unsigned requests the server rejects.
+	{
+		filtered := modeCascade[:0]
+		for _, m := range modeCascade {
+			if m == "stream-one" {
+				filtered = append(filtered, m)
+				continue
+			}
+			if transportConfiguration.sessionSecret() != nil {
+				filtered = append(filtered, m)
+			}
+		}
+		if len(filtered) == 0 {
+			// Auto/empty mode degrades to stream-one (the only mode that does
+			// not need a session secret); a locked session mode without a
+			// secret is a configuration error and fails loudly.
+			if transportConfiguration.Mode == "" {
+				filtered = append(filtered, "stream-one")
+			} else {
+				return nil, errors.New("XHTTP: session wire modes require x-bray-session-secret (fail-closed); no mode available")
+			}
+		}
+		modeCascade = filtered
+	}
 	var lastErr error
 	for mi, mode := range modeCascade {
 		sessionId := ""

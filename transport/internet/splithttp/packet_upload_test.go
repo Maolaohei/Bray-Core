@@ -126,20 +126,6 @@ func TestPostPacketReliable_RespectsCancel(t *testing.T) {
 	}
 }
 
-func TestCloneMultiBuffer(t *testing.T) {
-	src := buf.MergeBytes(nil, []byte("abc"))
-	cp := cloneMultiBuffer(src)
-	if cp.String() != "abc" {
-		t.Fatal(cp.String())
-	}
-	buf.ReleaseMulti(src)
-	// clone independent
-	if cp.String() != "abc" {
-		t.Fatal("clone tied to source")
-	}
-	buf.ReleaseMulti(cp)
-}
-
 func TestPacketUploadWindow(t *testing.T) {
 	if got := packetUploadWindow(0, 0); got != packetUploadDefaultWindow {
 		t.Fatalf("zero buffered=%d", got)
@@ -163,7 +149,7 @@ func TestPacketUploadWindow(t *testing.T) {
 	if got := packetUploadWindow(64, 100*time.Millisecond); got != 18 {
 		t.Fatalf("mid rtt=%d", got)
 	}
-	if got := packetUploadWindow(64, 250*time.Millisecond); got != packetUploadMaxWindow {
+	if got := packetUploadWindow(64, 250*time.Millisecond); got != 12 {
 		t.Fatalf("high rtt=%d", got)
 	}
 	// server buffer still caps high-RTT growth (half of 8 = 4)

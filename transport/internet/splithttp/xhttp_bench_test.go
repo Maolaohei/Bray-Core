@@ -25,6 +25,10 @@ import (
 // interleave with go test bench result lines or burn CPU on console writes.
 type benchNopLogHandler struct{}
 
+// testBenchHeaders is the shared session MAC secret for benchmark configs
+// (session wire modes are fail-closed without one).
+var testBenchHeaders = map[string]string{BraySessionSecretHeader: "bench-test-secret"}
+
 func (benchNopLogHandler) Handle(msg log.Message) {}
 
 func init() {
@@ -39,7 +43,7 @@ func BenchmarkXHTTP_H2C_Throughput(b *testing.B) {
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up"},
+		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
 	}
 
 	listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
@@ -81,7 +85,7 @@ func BenchmarkXHTTP_H2_Throughput(b *testing.B) {
 	ct, ctHash := cert.MustGenerate(nil, cert.CommonName("localhost"))
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up"},
+		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
 		SecurityType:     "tls",
 		SecuritySettings: &tls.Config{
 			Certificate:          []*tls.Certificate{tls.ParseCertificate(ct)},
@@ -128,7 +132,7 @@ func BenchmarkXHTTP_StreamUp_Throughput(b *testing.B) {
 	ct, ctHash := cert.MustGenerate(nil, cert.CommonName("localhost"))
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh", Mode: "stream-up"},
+		ProtocolSettings: &Config{Path: "/sh", Mode: "stream-up", Headers: testBenchHeaders},
 		SecurityType:     "tls",
 		SecuritySettings: &tls.Config{
 			Certificate:          []*tls.Certificate{tls.ParseCertificate(ct)},
@@ -174,7 +178,7 @@ func BenchmarkXHTTP_Parallel_H2C(b *testing.B) {
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up"},
+		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
 	}
 
 	listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
@@ -222,7 +226,7 @@ func BenchmarkXHTTP_TTFB(b *testing.B) {
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up"},
+		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
 	}
 
 	listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
@@ -275,7 +279,7 @@ func burstXHTTP(b *testing.B, payloadSize int, bursts int) {
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up"},
+		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
 	}
 
 	listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
@@ -318,7 +322,7 @@ func BenchmarkXHTTP_ConnectionStorm(b *testing.B) {
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up"},
+		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
 	}
 
 	listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
@@ -357,7 +361,7 @@ func BenchmarkXHTTP_Modes(b *testing.B) {
 			p := tcp.PickPort()
 			settings := &internet.MemoryStreamConfig{
 				ProtocolName:     "splithttp",
-				ProtocolSettings: &Config{Path: "/sh", Mode: mode},
+				ProtocolSettings: &Config{Path: "/sh", Mode: mode, Headers: testBenchHeaders},
 			}
 
 			listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
@@ -402,7 +406,7 @@ func BenchmarkXHTTP_ConcurrentConnections(b *testing.B) {
 			p := tcp.PickPort()
 			settings := &internet.MemoryStreamConfig{
 				ProtocolName:     "splithttp",
-				ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up"},
+				ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
 			}
 
 			listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
@@ -459,7 +463,7 @@ func BenchmarkXHTTP_MemoryAllocations(b *testing.B) {
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName:     "splithttp",
-		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up"},
+		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
 	}
 
 	listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {

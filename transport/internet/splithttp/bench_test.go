@@ -49,6 +49,8 @@ func benchThroughput(t *testing.T, useTLS bool, mode string, payloadSize int) {
 			ProtocolSettings: &Config{
 				Path: "/sh",
 				Mode: mode,
+				// Session wire modes require a shared MAC secret (fail-closed).
+				Headers: map[string]string{BraySessionSecretHeader: "bench-test-secret"},
 			},
 			SecurityType: "tls",
 			SecuritySettings: &tls.Config{
@@ -62,6 +64,8 @@ func benchThroughput(t *testing.T, useTLS bool, mode string, payloadSize int) {
 			ProtocolSettings: &Config{
 				Path: "/sh",
 				Mode: mode,
+				// Session wire modes require a shared MAC secret (fail-closed).
+				Headers: map[string]string{BraySessionSecretHeader: "bench-test-secret"},
 			},
 		}
 	}

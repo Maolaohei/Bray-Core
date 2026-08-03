@@ -59,6 +59,8 @@ func startEchoServer(t *testing.T, mode string, useTLS bool) *echoServer {
 				Path:               "/sh",
 				Mode:               mode,
 				ScMaxEachPostBytes: &RangeConfig{From: 500000, To: 500000},
+				// Session wire modes require a shared MAC secret (fail-closed).
+				Headers: map[string]string{BraySessionSecretHeader: "stress-test-secret"},
 			},
 			SecurityType: "tls",
 			SecuritySettings: &tls.Config{
@@ -73,6 +75,8 @@ func startEchoServer(t *testing.T, mode string, useTLS bool) *echoServer {
 				Path:               "/sh",
 				Mode:               mode,
 				ScMaxEachPostBytes: &RangeConfig{From: 500000, To: 500000},
+				// Session wire modes require a shared MAC secret (fail-closed).
+				Headers: map[string]string{BraySessionSecretHeader: "stress-test-secret"},
 			},
 		}
 	}

@@ -49,40 +49,6 @@ var urlURLPool = sync.Pool{
 	},
 }
 
-// reqBytesLocal holds H1 pipeline request wire snapshots for pooling.
-// Store *reqBytesLocal so Put never captures a stack-local slice header.
-type reqBytesLocal struct {
-	b []byte
-}
-
-var reqBytesPool = sync.Pool{
-	New: func() any {
-		return &reqBytesLocal{b: make([]byte, 0, 2048)}
-	},
-}
-
-func acquireReqBytes(src []byte) *reqBytesLocal {
-	dl := reqBytesPool.Get().(*reqBytesLocal)
-	if cap(dl.b) < len(src) {
-		dl.b = make([]byte, len(src))
-	} else {
-		dl.b = dl.b[:len(src)]
-	}
-	copy(dl.b, src)
-	return dl
-}
-
-func releaseReqBytes(dl *reqBytesLocal) {
-	if dl == nil {
-		return
-	}
-	if cap(dl.b) > maxBufferPoolCap {
-		return
-	}
-	dl.b = dl.b[:0]
-	reqBytesPool.Put(dl)
-}
-
 // interface to abstract between use of browser dialer, vs net/http
 type DialerClient interface {
 	IsClosed() bool
@@ -318,6 +284,53 @@ func (t *trackedConn) Close() error {
 	return err
 }
 
+// redactURLForLog returns a log-safe URL string: the session-id path segment
+// (raw.tag) and session/seq query keys are stripped so failure logs never leak
+// the session MAC tag.
+func redactURLForLog(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	cp := *u
+	segs := strings.Split(cp.Path, "/")
+	for i, s := range segs {
+		if isSessionIDSegment(s) {
+			segs[i] = "[redacted]"
+		}
+	}
+	cp.Path = strings.Join(segs, "/")
+	if cp.RawQuery != "" {
+		q := cp.Query()
+		for k := range q {
+			if strings.HasPrefix(k, "session") || strings.HasPrefix(k, "sess") || strings.HasPrefix(k, "seq") {
+				q.Del(k)
+			}
+		}
+		cp.RawQuery = q.Encode()
+	}
+	return cp.String()
+}
+
+// isSessionIDSegment reports whether a path segment looks like rawID.tag where
+// tag is a base64url-encoded 8-byte HMAC (11 chars).
+func isSessionIDSegment(s string) bool {
+	dot := strings.IndexByte(s, '.')
+	if dot <= 0 || dot == len(s)-1 {
+		return false
+	}
+	tag := s[dot+1:]
+	if len(tag) < 8 || len(tag) > 12 {
+		return false
+	}
+	for i := 0; i < len(tag); i++ {
+		c := tag[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
 	t0 := time.Now()
 	var addrMu sync.Mutex
@@ -404,7 +417,8 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 			}
 			// Log the request-local copy: base is the dialer's URL, which a
 			// mode-cascade retry may mutate concurrently (data race on Path).
-			errors.LogInfoInner(ctx, doErr, "failed to "+method+" "+u.String())
+			// Session id/seq are stripped so logs never leak the session MAC tag.
+			errors.LogInfoInner(ctx, doErr, "failed to "+method+" "+redactURLForLog(u))
 			common.Close(body)
 			addrMu.Lock()
 			r, l := gotRemote, gotLocal
@@ -676,13 +690,17 @@ func (c *DefaultDialerClient) postPacket(ctx context.Context, rawURL string, ses
 	releaseHeaderMap(req.Header)
 	req.Header = nil
 	req.Body = nil
-	reqHold := acquireReqBytes(requestBuff.Bytes())
-	reqBytes := reqHold.b
-	if requestBuff.Cap() <= maxBufferPoolCap {
-		requestBuff.Reset()
-		requestBuffPool.Put(requestBuff)
-	}
-	defer releaseReqBytes(reqHold)
+	// Borrow the serialized request directly: pipelinePost is fully
+	// synchronous (Write + ReadResponse inside the call) and never retains
+	// the slice afterwards, so the acquireReqBytes copy is pure overhead.
+	// Return the buffer to the pool only after every attempt completes.
+	reqBytes := requestBuff.Bytes()
+	defer func() {
+		if requestBuff.Cap() <= maxBufferPoolCap {
+			requestBuff.Reset()
+			requestBuffPool.Put(requestBuff)
+		}
+	}()
 
 	start := time.Now()
 	// Acquire a shared hot conn (pipeline depth > 1) or dial fresh.
@@ -691,7 +709,7 @@ func (c *DefaultDialerClient) postPacket(ctx context.Context, rawURL string, ses
 		return err
 	}
 	postErr := h1UploadConn.pipelinePost(reqBytes)
-	c.releaseH1UploadConn(h1UploadConn, newConnection, postErr)
+	c.releaseH1UploadConn(h1UploadConn, postErr)
 	if postErr != nil {
 		if newConnection || h1UploadConn.isDead() {
 			c.markFatal(postErr)
@@ -705,7 +723,7 @@ func (c *DefaultDialerClient) postPacket(ctx context.Context, rawURL string, ses
 			}
 			// Force new path: do not reuse the dead hot.
 			postErr = h2.pipelinePost(reqBytes)
-			c.releaseH1UploadConn(h2, true, postErr)
+			c.releaseH1UploadConn(h2, postErr)
 			if postErr != nil {
 				c.markFatal(postErr)
 				return postErr
@@ -801,7 +819,7 @@ func (c *DefaultDialerClient) acquireH1UploadConn(ctx context.Context) (*H1Conn,
 
 // releaseH1UploadConn drops a shared user and returns the conn to the idle pool
 // when no users remain. On error the conn is closed and cleared from hot.
-func (c *DefaultDialerClient) releaseH1UploadConn(h *H1Conn, newConnection bool, postErr error) {
+func (c *DefaultDialerClient) releaseH1UploadConn(h *H1Conn, postErr error) {
 	if h == nil {
 		return
 	}
