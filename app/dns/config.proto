@@ -73,4 +73,8 @@ message Config {
   bool disableFallbackIfMatch = 11;
 
   bool enableParallelQuery = 14;
+
+  // WarmupDomains is resolved in the background at startup to prime the DNS
+  // cache (best-effort; errors are ignored).
+  repeated string warmup_domains = 15;
 }

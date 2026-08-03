@@ -208,6 +208,14 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- e
 				}
 				return
 			}
+			// Cache-poisoning guard: the echoed question must match the request.
+			if !responseMatchesRequest(req.domain, rec) {
+				errors.LogErrorInner(ctx, errors.New("question mismatch"), "QUIC DNS response discarded")
+				if noResponseErrCh != nil {
+					noResponseErrCh <- errors.New("response question mismatch")
+				}
+				return
+			}
 			s.cacheController.updateRecord(r, rec)
 		}(req)
 	}

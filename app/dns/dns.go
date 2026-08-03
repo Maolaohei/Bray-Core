@@ -284,6 +284,10 @@ func (s *DNS) ClearCache() {
 	}
 }
 
+// warmupConcurrency bounds background warmup queries so a large domain list
+// cannot fire 2N parallel DNS queries at startup.
+const warmupConcurrency = 8
+
 // warmup resolves the given domains in the background to prime the DNS
 // cache. Errors are silently ignored since warmup is best-effort.
 func (s *DNS) warmup(domains []string) {
@@ -291,6 +295,7 @@ func (s *DNS) warmup(domains []string) {
 	defer cancel()
 
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, warmupConcurrency)
 	for _, domain := range domains {
 		ch := make(chan struct{})
 		s.warmupInFlight.Store(domain, ch)
@@ -301,6 +306,8 @@ func (s *DNS) warmup(domains []string) {
 			defer s.wgs.Done()
 			defer close(ch)
 			defer s.warmupInFlight.Delete(d)
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			s.LookupIP(d, *s.ipOption)
 		}(domain)
 	}
@@ -455,6 +462,8 @@ func (s *DNS) sortClients(domain string) []*Client {
 			return entry.clients
 		}
 		s.clientCache.Delete(domain)
+		// Keep the counter accurate so the >2048 sweep stays rare.
+		atomic.AddInt64(&s.clientCacheSize, -1)
 	}
 
 	clients := s.doSortClients(domain)

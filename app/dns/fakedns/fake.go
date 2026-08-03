@@ -2,10 +2,12 @@ package fakedns
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"math"
 	"math/big"
 	"sync"
-	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/cache"
@@ -18,6 +20,11 @@ type Holder struct {
 	domainToIP cache.Lru
 	ipRange    *net.IPNet
 	mu         sync.Mutex
+
+	// secret keys the domain→fake-IP offset derivation so fake IPs are
+	// deterministic per domain (reverse lookup stable) but unpredictable to
+	// onlookers (the previous time-based offset was trivially guessable).
+	secret [32]byte
 
 	config *FakeDnsPool
 }
@@ -60,6 +67,9 @@ func NewFakeDNSHolder() (*Holder, error) {
 	if fkdns, err = NewFakeDNSHolderConfigOnly(nil); err != nil {
 		return nil, errors.New("Unable to create Fake Dns Engine").Base(err).AtError()
 	}
+	if _, err = rand.Read(fkdns.secret[:]); err != nil {
+		return nil, errors.New("Unable to seed Fake Dns Engine").Base(err).AtError()
+	}
 	err = fkdns.initialize(dns.FakeIPv4Pool, 65535)
 	if err != nil {
 		return nil, err
@@ -88,9 +98,34 @@ func (fkdns *Holder) initialize(ipPoolCidr string, lruSize int) error {
 	if math.Log2(float64(lruSize)) >= float64(rooms) {
 		return errors.New("LRU size is bigger than subnet size").AtError()
 	}
+	// Seed the offset key: the config-only factory (production path) never
+	// rand.Read()s, leaving the secret all-zero and the derived offsets
+	// offline-computable. Re-seed whenever the secret is still the zero value.
+	var zero [32]byte
+	if fkdns.secret == zero {
+		if _, err := rand.Read(fkdns.secret[:]); err != nil {
+			return errors.New("Unable to seed Fake Dns Engine").Base(err).AtError()
+		}
+	}
 	fkdns.domainToIP = cache.NewLru(lruSize)
 	fkdns.ipRange = ipRange
 	return nil
+}
+
+// domainToFakeOffset derives the pool offset for a domain: HMAC-style keyed
+// hash (instance secret + domain) truncated to the pool bit-width.
+func (fkdns *Holder) domainToFakeOffset(domain string) uint64 {
+	ones, bits := fkdns.ipRange.Mask.Size()
+	rooms := bits - ones
+	h := sha256.New()
+	h.Write(fkdns.secret[:])
+	h.Write([]byte(domain))
+	sum := h.Sum(nil)
+	offset := binary.BigEndian.Uint64(sum[:8])
+	if rooms < 64 {
+		offset &= (uint64(1) << uint(rooms)) - 1
+	}
+	return offset
 }
 
 // GetFakeIPForDomain checks and generates a fake IP for a domain name
@@ -100,14 +135,12 @@ func (fkdns *Holder) GetFakeIPForDomain(domain string) []net.Address {
 	if v, ok := fkdns.domainToIP.Get(domain); ok {
 		return []net.Address{v.(net.Address)}
 	}
-	currentTimeMillis := uint64(time.Now().UnixMilli())
-	ones, bits := fkdns.ipRange.Mask.Size()
-	rooms := bits - ones
-	if rooms < 64 {
-		currentTimeMillis %= (uint64(1) << rooms)
-	}
+	// Stable, keyed offset: same domain → same pool position (reverse lookup
+	// stays deterministic), but the position is unpredictable to observers
+	// (previous time.UnixMilli() offset let anyone predict upcoming fake IPs).
+	offset := fkdns.domainToFakeOffset(domain)
 	bigIntIP := big.NewInt(0).SetBytes(fkdns.ipRange.IP)
-	bigIntIP = bigIntIP.Add(bigIntIP, new(big.Int).SetUint64(currentTimeMillis))
+	bigIntIP = bigIntIP.Add(bigIntIP, new(big.Int).SetUint64(offset))
 	var ip net.Address
 	for {
 		ip = net.IPAddress(bigIntIP.Bytes())

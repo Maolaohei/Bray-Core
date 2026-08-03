@@ -54,6 +54,9 @@ type IPRecord struct {
 	Expire    time.Time
 	RCode     dnsmessage.RCode
 	RawHeader *dnsmessage.Header
+	// Question is the echoed question name (fqdn with trailing dot), used by
+	// callers to verify the response belongs to the request (RFC 5452).
+	Question string
 }
 
 func (r *IPRecord) getIPs() ([]net.IP, int32, error) {
@@ -257,6 +260,25 @@ func buildReqMsgs(domain string, option dns_feature.IPOption, reqIDGen func() ui
 	return reqs, nil
 }
 
+// negativeCacheTTL bounds negative caching (NXDOMAIN / empty responses) so a
+// poisoned or broken answer cannot block a domain for minutes.
+const negativeCacheTTL = 60
+
+// maxRecordedIPs caps the number of A/AAAA addresses collected per response
+// (memory bound against hostile/broken servers).
+const maxRecordedIPs = 32
+
+// responseMatchesRequest verifies the echoed question matches the request
+// domain (cache-poisoning guard, RFC 5452). A response whose question is
+// missing or does not match is discarded by callers before it can populate
+// the cache.
+func responseMatchesRequest(domain string, ipRec *IPRecord) bool {
+	if ipRec == nil || ipRec.Question == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSuffix(ipRec.Question, "."), strings.TrimSuffix(domain, "."))
+}
+
 // parseResponse parses DNS answers from the returned payload
 func parseResponse(payload []byte) (*IPRecord, error) {
 	var parser dnsmessage.Parser
@@ -264,8 +286,18 @@ func parseResponse(payload []byte) (*IPRecord, error) {
 	if err != nil {
 		return nil, errors.New("failed to parse DNS response").Base(err).AtWarning()
 	}
-	if err := parser.SkipAllQuestions(); err != nil {
-		return nil, errors.New("failed to skip questions in DNS response").Base(err).AtWarning()
+	// Read the echoed question (if present) so callers can verify the response
+	// belongs to the request; skip any additional questions.
+	var parsedQuestion string
+	if qh, err := parser.Question(); err == nil {
+		parsedQuestion = qh.Name.String()
+	} else if err != dnsmessage.ErrSectionDone {
+		return nil, errors.New("failed to read question in DNS response").Base(err).AtWarning()
+	}
+	for {
+		if _, err := parser.Question(); err != nil {
+			break
+		}
 	}
 
 	now := time.Now()
@@ -273,11 +305,13 @@ func parseResponse(payload []byte) (*IPRecord, error) {
 		ReqID:     h.ID,
 		RCode:     h.RCode,
 		RawHeader: &h,
+		Question:  parsedQuestion,
 	}
 	defer func() {
-		// set to default TTL if no valid TTL is found
+		// Negative caching: default 60s (was 300s) so a poisoned NXDOMAIN or
+		// empty response cannot block a domain for five minutes.
 		if ipRecord.Expire.IsZero() {
-			ipRecord.Expire = now.Add(time.Second * dns_feature.DefaultTTL)
+			ipRecord.Expire = now.Add(time.Second * negativeCacheTTL)
 		}
 	}()
 
@@ -293,7 +327,13 @@ L:
 
 		ttl := ah.TTL
 		if ttl == 0 {
-			ttl = 1
+			// RFC 1035: TTL 0 means "do not cache". Serve the record once and
+			// mark it immediately expired so it is never reused.
+			ipRecord.Expire = now
+		}
+		if ttl > 86400 {
+			// Cap absurd TTLs (malicious/broken servers) at one day.
+			ttl = 86400
 		}
 		expire := now.Add(time.Duration(ttl) * time.Second)
 		if ipRecord.Expire.IsZero() || ipRecord.Expire.After(expire) {
@@ -307,6 +347,9 @@ L:
 				errors.LogInfoInner(context.Background(), err, "failed to parse A record for domain: ", ah.Name)
 				break L
 			}
+			if len(ipRecord.IP) >= maxRecordedIPs {
+				break L
+			}
 			ipRecord.IP = append(ipRecord.IP, net.IPAddress(ans.A[:]).IP())
 		case dnsmessage.TypeAAAA:
 			ans, err := parser.AAAAResource()
@@ -316,6 +359,9 @@ L:
 			}
 			newIP := net.IPAddress(ans.AAAA[:]).IP()
 			if len(newIP) == net.IPv6len {
+				if len(ipRecord.IP) >= maxRecordedIPs {
+					break L
+				}
 				ipRecord.IP = append(ipRecord.IP, newIP)
 			}
 		default:

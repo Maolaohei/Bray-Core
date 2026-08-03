@@ -274,6 +274,14 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 				}
 				return
 			}
+			// Cache-poisoning guard: the echoed question must match the request.
+			if !responseMatchesRequest(req.domain, rec) {
+				errors.LogErrorInner(ctx, errors.New("question mismatch"), "DNS over TCP response discarded")
+				if noResponseErrCh != nil {
+					noResponseErrCh <- errors.New("response question mismatch")
+				}
+				return
+			}
 
 			s.cacheController.updateRecord(r, rec)
 			connOK = true

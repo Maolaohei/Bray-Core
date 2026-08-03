@@ -231,6 +231,14 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 				}
 				return
 			}
+			// Cache-poisoning guard: the echoed question must match the request.
+			if !responseMatchesRequest(req.domain, rec) {
+				errors.LogErrorInner(ctx, errors.New("question mismatch"), "DOH response discarded")
+				if noResponseErrCh != nil {
+					noResponseErrCh <- errors.New("response question mismatch")
+				}
+				return
+			}
 			s.cacheController.updateRecord(r, rec)
 		}(req)
 	}
@@ -261,8 +269,13 @@ func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, 
 		return nil, fmt.Errorf("DOH server returned code %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	// Bound the read: a broken/hostile server must not force an unbounded
+	// allocation. DNS responses are tiny; 64KB is far beyond any real answer.
+	return io.ReadAll(io.LimitReader(resp.Body, dohMaxResponseBytes+1))
 }
+
+// dohMaxResponseBytes caps a single DOH response body.
+const dohMaxResponseBytes = 64 << 10
 
 // QueryIP implements Server.
 func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option dns_feature.IPOption) ([]net.IP, uint32, error) {

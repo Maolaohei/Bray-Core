@@ -27,6 +27,9 @@ type staticHandler struct{}
 func (*staticHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	ans := new(dns.Msg)
 	ans.Id = r.Id
+	// RFC 1035: a response must echo the request question; without it clients
+	// (and this module's RFC 5452 guard) cannot verify response ownership.
+	ans.Question = r.Question
 
 	var clientIP net.IP
 

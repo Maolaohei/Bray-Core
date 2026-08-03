@@ -85,7 +85,17 @@ func fetch(ctx context.Context, s CachedNameserver, fqdn string, option dns.IPOp
 	}
 
 	v, _, _ := s.getCacheController().requestGroup.Do(key, func() (any, error) {
-		return doFetch(ctx, s, fqdn, option), nil
+		// Leader-independent context: the merged flight must not fail every
+		// follower just because the first caller's context was cancelled. Keep
+		// the deadline (if any) so the query still times out, but sever the
+		// cancellation coupling.
+		fctx := context.WithoutCancel(ctx)
+		if dl, ok := ctx.Deadline(); ok {
+			var cancel context.CancelFunc
+			fctx, cancel = context.WithDeadline(fctx, dl)
+			defer cancel()
+		}
+		return doFetch(fctx, s, fqdn, option), nil
 	})
 	ret := v.(result)
 

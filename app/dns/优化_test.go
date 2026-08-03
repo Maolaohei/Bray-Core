@@ -25,6 +25,7 @@ type returnsOnly114Handler struct{}
 func (*returnsOnly114Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	ans := new(dns.Msg)
 	ans.Id = r.Id
+	ans.Question = r.Question // RFC 1035: echo the question; RFC 5452 guard relies on it
 	ans.RecursionAvailable = true
 	for _, q := range r.Question {
 		if q.Qtype == dns.TypeA {

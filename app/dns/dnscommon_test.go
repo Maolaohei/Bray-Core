@@ -54,7 +54,7 @@ func Test_parseResponse(t *testing.T) {
 	}{
 		{
 			"empty",
-			&IPRecord{0, []net.IP(nil), time.Time{}, dnsmessage.RCodeSuccess, nil},
+			&IPRecord{0, []net.IP(nil), time.Time{}, dnsmessage.RCodeSuccess, nil, ""},
 			false,
 		},
 		{
@@ -70,12 +70,13 @@ func Test_parseResponse(t *testing.T) {
 				time.Time{},
 				dnsmessage.RCodeSuccess,
 				nil,
+				"",
 			},
 			false,
 		},
 		{
 			"aaaa record",
-			&IPRecord{2, []net.IP{net.ParseIP("2001:4860:4860::8888"), net.ParseIP("2001:4860:4860::8844")}, time.Time{}, dnsmessage.RCodeSuccess, nil},
+			&IPRecord{2, []net.IP{net.ParseIP("2001:4860:4860::8888"), net.ParseIP("2001:4860:4860::8844")}, time.Time{}, dnsmessage.RCodeSuccess, nil, ""},
 			false,
 		},
 	}

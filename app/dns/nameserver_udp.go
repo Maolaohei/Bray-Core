@@ -2,6 +2,8 @@ package dns
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,6 +50,13 @@ func NewClassicNameServer(address net.Destination, dispatcher routing.Dispatcher
 		address:         &address,
 		requests:        make(map[uint16]*udpDnsRequest),
 		clientIP:        clientIP,
+	}
+	// Randomize the ID sequence start: a sequential-from-zero counter is
+	// predictable — a captured response echoes the current ID, letting an
+	// on-path attacker lock the next ID and forge answers (RFC 5452).
+	var seedB [4]byte
+	if _, err := rand.Read(seedB[:]); err == nil {
+		s.reqID = binary.BigEndian.Uint32(seedB[:])
 	}
 	s.requestsCleanup = &task.Periodic{
 		Interval: time.Minute,
@@ -115,6 +124,14 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 		return
 	}
 
+	// Cache-poisoning guard: the echoed question must match the request
+	// domain (RFC 5452). Discard mismatches before they reach the cache.
+	if !responseMatchesRequest(req.domain, ipRec) {
+		errors.LogErrorInner(ctx, errors.New("question mismatch"), s.Name(), " response discarded")
+		releaseDnsRequest(&req.dnsRequest)
+		return
+	}
+
 	// if truncated, retry with EDNS0 option(udp payload size: 1350)
 	if ipRec.RawHeader.Truncated {
 		// if already has EDNS0 option, no need to retry
@@ -129,7 +146,11 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 			newMsg.Additionals = append(newMsg.Additionals, *opt)
 			newMsg.ID = s.newReqID()
 			newReq.msg = &newMsg
-			s.addPendingRequest(&newReq)
+			if err := s.addPendingRequest(&newReq); err != nil {
+				errors.LogErrorInner(ctx, err, s.Name(), " EDNS0 retry dropped")
+				releaseDnsRequest(&req.dnsRequest)
+				return
+			}
 			b, _ := dns.PackMessage(newReq.msg)
 			s.udpServer.Dispatch(toDnsContext(newReq.ctx, s.address.String()), *s.address, b)
 			releaseDnsRequest(&req.dnsRequest)
@@ -142,16 +163,44 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 }
 
 func (s *ClassicNameServer) newReqID() uint16 {
+	// RFC 5452: the query ID should be unpredictable per query. A random
+	// starting point with sequential increments lets an observer who sees one
+	// query predict the next ID; generate fresh random IDs instead. Collisions
+	// (16-bit space) are resolved by addPendingRequest's re-roll loop.
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return binary.BigEndian.Uint16(b[:])
+	}
+	// crypto/rand failure is effectively fatal; fall back to a counter so the
+	// resolver keeps working rather than stalling queries.
 	return uint16(atomic.AddUint32(&s.reqID, 1))
 }
 
-func (s *ClassicNameServer) addPendingRequest(req *udpDnsRequest) {
+func (s *ClassicNameServer) addPendingRequest(req *udpDnsRequest) error {
 	s.Lock()
 	id := req.msg.ID
 	req.expire = time.Now().Add(time.Second * 8)
+	// ID wraparound / collision: never silently overwrite an in-flight request
+	// (its response would be misattributed). Re-roll until the ID is free;
+	// bound the retries so a fully-occupied table cannot spin forever.
+	for i := 0; i < 16; i++ {
+		if _, exists := s.requests[id]; !exists {
+			break
+		}
+		id = s.newReqID()
+	}
+	if _, exists := s.requests[id]; exists {
+		s.Unlock()
+		// All re-rolls collided (table effectively full): fail loudly instead
+		// of overwriting an in-flight request and misattributing its response.
+		return errors.New(s.Name(), " request ID table full, query dropped")
+	}
+	req.msg.ID = id
 	s.requests[id] = req
+	// Unlock before Start: RequestsCleanup takes the same lock immediately.
 	s.Unlock()
 	common.Must(s.requestsCleanup.Start())
+	return nil
 }
 
 // getCacheController implements CachedNameserver.
