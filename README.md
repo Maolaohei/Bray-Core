@@ -151,13 +151,28 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v3 go build -o xray.exe -trimpat
 
 ### Linux 服务端参考（可选）
 
+以下参数消除 **TCP 慢启动冷启动**（新建连接首段吞吐爬升），对高码率流（4K 视频、大文件下载）首段卡顿改善明显；下行由服务端发送，故调优在服务端生效。
+
+**方式一：当前生效（重启后失效）**
+
 ```bash
-sysctl -w net.core.default_qdisc=fq
-sysctl -w net.ipv4.tcp_congestion_control=bbr
+sysctl -w net.ipv4.tcp_initcwnd=60
+sysctl -w net.ipv4.tcp_slow_start_after_idle=0
 sysctl -w net.ipv4.tcp_fastopen=3
-sysctl -w net.core.rmem_max=16777216
-sysctl -w net.core.wmem_max=16777216
 ```
+
+**方式二：永久生效（写入配置文件并加载）**
+
+```bash
+cat > /etc/sysctl.d/99-bray.conf <<'EOF'
+net.ipv4.tcp_initcwnd=60
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_fastopen=3
+EOF
+sysctl --system
+```
+
+说明：`tcp_initcwnd=60` 将初始拥塞窗口提到 ~840KB（首 RTT 即可大量发送）；`tcp_slow_start_after_idle=0` 空闲后不再重置 cwnd（连接保活期间吞吐不回退）；`tcp_fastopen=3` 启用 TFO 握手减 1 RTT。需 Linux 4.9+（默认内核即可）。
 
 ---
 
