@@ -339,8 +339,14 @@ func (w *MultiLengthPacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	mb2Write := make(buf.MultiBuffer, 0, len(mb))
 	for _, b := range mb {
 		length := b.Len()
-		if length == 0 || length+2 > buf.Size {
+		if length == 0 {
 			continue
+		}
+		if length+2 > buf.Size {
+			// A single UDP datagram larger than the 2-byte length prefix can
+			// frame is silently dropped by upstream Xray; surface it instead so
+			// the caller can react instead of losing traffic without notice.
+			return errors.New("UDP datagram too large for VLESS length-prefix framing: ", length, " > ", buf.Size-2)
 		}
 		eb := buf.New()
 		if err := eb.WriteByte(byte(length >> 8)); err != nil {

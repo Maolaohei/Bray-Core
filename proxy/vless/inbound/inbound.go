@@ -285,7 +285,9 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 
 	first := buf.New()
 	firstLen, errR := first.ReadFrom(connection)
-	if errR != nil {
+	// Tolerate a half-close where the client sends the header then closes its
+	// write side (n > 0 with EOF): treat it as a normal header, not an error.
+	if errR != nil && !(firstLen > 0 && errR == io.EOF) {
 		return errR
 	}
 
@@ -298,6 +300,14 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	var request *protocol.RequestHeader
 	var requestAddons *encoding.Addons
 	var err error
+	// Return the pooled request addons once the whole request (including any
+	// fallback path) is done — the pool otherwise never sees it back and every
+	// request pays a fresh heap allocation.
+	defer func() {
+		if requestAddons != nil {
+			encoding.PutAddons(requestAddons)
+		}
+	}()
 
 	napfb := h.fallbacks
 	isfb := napfb != nil
@@ -314,7 +324,6 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 				errors.LogWarningInner(ctx, err, "unable to set back read deadline")
 			}
 			errors.LogInfoInner(ctx, err, "fallback starts")
-
 			name := ""
 			alpn := ""
 			if tlsConn, ok := iConn.(*tls.Conn); ok {
@@ -542,6 +551,15 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	}
 
 	responseAddons := &encoding.Addons{}
+
+	// P0 anti-replay: validate the client seed (timestamp window + replay).
+	// A nil seed is accepted for legacy clients; a bad seed aborts here so a
+	// replayed header cannot drive a new dispatch.
+	if requestAddons != nil && requestAddons.Seed != nil {
+		if serr := encoding.ValidateSeed(requestAddons.Seed); serr != nil {
+			return errors.New("invalid request seed").Base(serr).AtWarning()
+		}
+	}
 
 	var input *bytes.Reader
 	var rawInput *bytes.Buffer

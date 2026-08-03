@@ -39,7 +39,9 @@ func (v *MemoryValidator) Add(u *protocol.MemoryUser) error {
 			return errors.New("User ", u.Email, " already exists.")
 		}
 	}
-	v.users.Store(ProcessUUID(u.Account.(*MemoryAccount).ID.UUID()), u)
+	if _, loaded := v.users.LoadOrStore(ProcessUUID(u.Account.(*MemoryAccount).ID.UUID()), u); loaded {
+		return errors.New("User ", u.Email, " conflicts with an existing account: normalized UUID already registered")
+	}
 	return nil
 }
 

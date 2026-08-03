@@ -6,10 +6,10 @@ import (
 	"crypto/ecdh"
 	"crypto/mlkem"
 	"crypto/rand"
-	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common/crypto"
@@ -18,9 +18,15 @@ import (
 )
 
 type ServerSession struct {
-	PfsKey  []byte
-	NfsKeys sync.Map
+	PfsKey   []byte
+	NfsKeys  sync.Map
+	nfsKeyN  atomic.Int64 // live nfsKey entries (cap guard, see Handshake)
 }
+
+// maxNfsKeysPerSession bounds replay-guard growth for a single 0-RTT ticket
+// session. A well-behaved client uses a handful of connections per ticket;
+// anything beyond this is an abuse signal (replay-map inflation).
+const maxNfsKeysPerSession = 4096
 
 type ServerInstance struct {
 	NfsSKeys      []any
@@ -177,7 +183,8 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 		}
 		lastCTR.XORKeyStream(relays, relays[:32])
 		if !bytes.Equal(relays[:32], i.Hash32s[j+1][:]) {
-			return nil, errors.New("unexpected hash32: ", fmt.Sprintf("%v", relays[:32]))
+			// Do not echo the attacker-controlled relay bytes (32B noise).
+			return nil, errors.New("unexpected hash32 mismatch in relay chain")
 		}
 		relays = relays[32:]
 	}
@@ -234,9 +241,13 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 			conn.Write(noises) // make client do new handshake
 			return nil, errors.New("expired ticket")
 		}
+		if s.nfsKeyN.Load() >= maxNfsKeysPerSession {
+			return nil, errors.New("session replay map full")
+		}
 		if _, loaded := s.NfsKeys.LoadOrStore([32]byte(nfsKey), true); loaded { // prevents bad client also
 			return nil, errors.New("replay detected")
 		}
+		s.nfsKeyN.Add(1)
 		c.UnitedKey = append(s.PfsKey, nfsKey...) // the same nfsKey links the upload & download (prevents server -> client's another request)
 		c.PreWrite = make([]byte, 16)
 		rand.Read(c.PreWrite) // always trust yourself, not the client (also prevents being parsed as TLS thus causing false interruption for "native" and "xorpub")

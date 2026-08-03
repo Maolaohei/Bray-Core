@@ -40,8 +40,15 @@ func TestDecodeHeader_Bounds(t *testing.T) {
 	}
 	h = []byte{23, 3, 3, 0, 1}
 	_, err := DecodeHeader(h)
-	if err == nil || !strings.Contains(err.Error(), "invalid header: ") {
-		t.Fatalf("want 'invalid header: ' prefix, got %v", err)
+	if err == nil {
+		t.Fatal("expected invalid header error")
+	}
+	// Error must not echo the attacker-controlled record header bytes.
+	if !strings.Contains(err.Error(), "invalid header") {
+		t.Fatalf("want 'invalid header' identity, got %v", err)
+	}
+	if strings.Contains(err.Error(), "17") || strings.Contains(err.Error(), "23 3 3") {
+		t.Fatalf("error must not echo record header bytes, got %v", err)
 	}
 }
 

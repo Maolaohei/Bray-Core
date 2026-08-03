@@ -5,7 +5,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	stderrors "errors"
-	"fmt"
 	"io"
 	"net"
 	"reflect"
@@ -288,7 +287,9 @@ func DecodeHeader(h []byte) (l int, err error) {
 		l = 0
 	}
 	if l < 17 || l > 16640 { // TLS 1.3 max record: 16384 + 256 (RFC 8446 §5.2)
-		err = fmt.Errorf("%w: %v", ErrInvalidHeader, h[:5]) // Error() contains "invalid header:" for string match
+		// Record header bytes are attacker-controlled; do not echo them into
+		// logs (they are already covered by the wrapped error identity).
+		err = ErrInvalidHeader
 	}
 	return
 }
@@ -366,14 +367,16 @@ func ExtractBuffers(conn interface{}) (input *bytes.Reader, rawInput *bytes.Buff
 	val := reflect.ValueOf(conn)
 	if val.Kind() == reflect.Ptr {
 		t := val.Type().Elem()
-		p := val.Pointer()
+		// UnsafePointer avoids the uintptr round-trip that go vet flags as a
+		// possible unsafe.Pointer misuse; Add keeps offsets within the pointer.
+		p := val.UnsafePointer()
 
 		fi, _ := t.FieldByName("input")
 		fr, _ := t.FieldByName("rawInput")
 
 		if fi.Name != "" && fr.Name != "" {
-			input = (*bytes.Reader)(unsafe.Pointer(p + fi.Offset))
-			rawInput = (*bytes.Buffer)(unsafe.Pointer(p + fr.Offset))
+			input = (*bytes.Reader)(unsafe.Add(p, fi.Offset))
+			rawInput = (*bytes.Buffer)(unsafe.Add(p, fr.Offset))
 		}
 	}
 	return

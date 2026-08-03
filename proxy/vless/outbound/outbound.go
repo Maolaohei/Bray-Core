@@ -5,7 +5,7 @@ import (
 	"context"
 	gotls "crypto/tls"
 	"encoding/base64"
-	"math/rand"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -181,10 +181,10 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 							continue
 						}
 						failCount = 0
-						ttl := time.Minute*2 - time.Minute/2 + time.Duration(rand.Int63n(int64(time.Minute)))
+						ttl := time.Minute*2 - time.Minute/2 + time.Duration(rand.Int64N(int64(time.Minute)))
 						h.preConns <- &ConnExpire{Conn: conn, Expire: time.Now().Add(ttl)}
 						// ±50% jitter around 200ms → 100–300ms.
-						jitter := time.Duration(rand.Int63n(int64(time.Millisecond * 200)))
+						jitter := time.Duration(rand.Int64N(int64(time.Millisecond * 200)))
 						time.Sleep(time.Millisecond*100 + jitter)
 					}
 				}()
@@ -278,6 +278,10 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	requestAddons := &encoding.Addons{
 		Flow: account.Flow,
 	}
+	// P0 anti-replay: stamp every request with a fresh timestamp+nonce seed.
+	// Legacy servers ignore the extra addons field; nil seeds are accepted by
+	// this build for backward compatibility with old clients.
+	requestAddons.Seed = encoding.NewSeed()
 
 	var input *bytes.Reader
 	var rawInput *bytes.Buffer
@@ -409,6 +413,10 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		if err != nil {
 			return errors.New("failed to decode response header").Base(err).AtInfo()
 		}
+		// DecodeBodyAddons only reads addons.Flow; it does not retain the
+		// pointer, so the pooled addons can be returned once the response
+		// reader is set up.
+		defer encoding.PutAddons(responseAddons)
 
 		serverReader := encoding.DecodeBodyAddons(conn, request, responseAddons)
 		if requestAddons.Flow == vless.XRV {
