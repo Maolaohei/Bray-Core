@@ -3,6 +3,7 @@ package stats
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -75,6 +76,9 @@ func (c *Channel) Publish(ctx context.Context, msg interface{}) {
 		return
 	default:
 		pub := channelMessage{context: ctx, message: msg}
+		if dl, ok := ctx.Deadline(); ok {
+			pub.deadline = dl
+		}
 		if c.blocking {
 			pub.publish(c.channel)
 		} else {
@@ -136,10 +140,12 @@ func (c *Channel) Close() error {
 }
 
 // channelMessage is the published message with guaranteed delivery.
-// message is discarded only when the context is early cancelled.
+// message is discarded only when the context is early cancelled (enqueue
+// phase) or the delivery deadline expires (broadcast phase).
 type channelMessage struct {
-	context context.Context
-	message interface{}
+	context  context.Context
+	deadline time.Time
+	message  interface{}
 }
 
 func (c channelMessage) publish(publisher chan channelMessage) {
@@ -158,9 +164,21 @@ func (c channelMessage) publishNonBlocking(publisher chan channelMessage) {
 }
 
 func (c channelMessage) broadcast(subscriber chan interface{}) {
+	if c.deadline.IsZero() {
+		select {
+		case subscriber <- c.message:
+		case <-c.context.Done():
+		}
+		return
+	}
+	// Broadcast honors the delivery deadline, not early context cancellation:
+	// the publisher may return before subscribers drain their channels, and
+	// cancelling on return would drop messages that are already enqueued.
+	timer := time.NewTimer(time.Until(c.deadline))
+	defer timer.Stop()
 	select {
 	case subscriber <- c.message:
-	case <-c.context.Done():
+	case <-timer.C:
 	}
 }
 
