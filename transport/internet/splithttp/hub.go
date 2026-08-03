@@ -643,18 +643,25 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			conn.reader = currentSession.uploadQueue
 		}
 
-		h.ln.addConn(stat.Connection(&conn))
-
 		if sessionId == "" {
 			// Reap unauthenticated stream-one connections only when idle:
 			// active transfers (long downloads, video playback) must never be
-			// cut mid-stream. touch() resets this timer on every read/write
-			// activity, so only quiet long-polls are reaped.
+			// cut mid-stream. touch() resets the timer and the lastActive
+			// stamp on every read/write; the callback double-checks the stamp
+			// to close the Reset-vs-fire race at the deadline boundary.
+			// Timer must be attached before addConn so concurrent traffic
+			// never reads a half-initialized idleTimer.
+			httpSC.lastActive.Store(time.Now().UnixNano())
 			httpSC.idleTimer = time.AfterFunc(streamOneIdleLifetime, func() {
+				if time.Since(time.Unix(0, httpSC.lastActive.Load())) < streamOneIdleLifetime {
+					return // activity landed inside the race window; keep alive
+				}
 				_ = httpSC.Close()
 			})
 			defer httpSC.idleTimer.Stop()
 		}
+
+		h.ln.addConn(stat.Connection(&conn))
 
 		// "A ResponseWriter may not be used after [Handler.ServeHTTP] has returned."
 		select {
@@ -683,6 +690,9 @@ type httpServerConn struct {
 	// idleTimer reaps idle unauthenticated stream-one long-polls; every
 	// Read/Write activity resets it so live transfers are never cut.
 	idleTimer *time.Timer
+	// lastActive is the last activity stamp (UnixNano) used to double-check
+	// the reaper at its deadline boundary (Reset-vs-fire race).
+	lastActive atomic.Int64
 }
 
 // streamFlushThreshold / streamFlushInterval bound downlink latency: a
@@ -707,10 +717,10 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 	// HTTP server finishing the response, or Flush races ResponseWriter.
 	c.Lock()
 	defer c.Unlock()
-	c.touch() // write activity resets the stream-one idle reaper
 	if c.Instance.Done() {
 		return 0, io.ErrClosedPipe
 	}
+	c.touch() // write activity resets the stream-one idle reaper
 	if len(b) == 0 {
 		return 0, nil
 	}
@@ -758,8 +768,9 @@ func (c *httpServerConn) Read(p []byte) (int, error) {
 
 // touch resets the stream-one idle reaper. Active transfers (downloads,
 // video) never expire; only quiet long-polls are reaped. timer.Reset is
-// concurrent-safe, so no lock is needed here.
+// concurrent-safe and the atomic stamp backs the deadline-boundary check.
 func (c *httpServerConn) touch() {
+	c.lastActive.Store(time.Now().UnixNano())
 	if c.idleTimer != nil {
 		c.idleTimer.Reset(streamOneIdleLifetime)
 	}
