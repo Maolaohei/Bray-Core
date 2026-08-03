@@ -929,7 +929,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			// Auto/empty mode degrades to stream-one (the only mode that does
 			// not need a session secret); a locked session mode without a
 			// secret is a configuration error and fails loudly.
-			if transportConfiguration.Mode == "" {
+			m := NormalizeXHTTPMode(transportConfiguration.Mode)
+			if m == "" || m == "auto" {
 				filtered = append(filtered, "stream-one")
 			} else {
 				return nil, errors.New("XHTTP: session wire modes require x-bray-session-secret (fail-closed); no mode available")
