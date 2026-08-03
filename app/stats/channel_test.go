@@ -102,6 +102,7 @@ func TestStatsChannel(t *testing.T) {
 // run against the captured delivery deadline, not the early cancellation.
 func TestStatsChannelBroadcastSurvivesEarlyCancel(t *testing.T) {
 	c := NewChannel(&ChannelConfig{BufferSize: 0, Blocking: true})
+	defer c.Close()
 	a, err := stats.SubscribeRunnableChannel(c)
 	common.Must(err)
 
