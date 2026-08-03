@@ -44,13 +44,33 @@ func questionOf(r *IPRecord) string {
 // query ID was a sequential counter from zero (predictable → forgeable).
 func TestAttack_SeededIDUnpredictability(t *testing.T) {
 	s := &ClassicNameServer{requests: make(map[uint16]*udpDnsRequest)}
-	seen := make(map[uint16]struct{})
+
+	// 256 samples in a 16-bit space collide with ~39% probability (birthday
+	// paradox), so "no collision" is NOT a valid assertion. The sequential
+	// counter regression is detected by coverage: 256 sequential IDs max out
+	// at 255, while random 16-bit IDs reach >=4096 with overwhelming
+	// probability. Collisions are bounded far above the random expectation
+	// (~0.5) to catch weak PRNGs.
+	seen := make(map[uint16]int)
+	maxID := uint16(0)
 	for i := 0; i < 256; i++ {
 		id := s.newReqID()
-		if _, dup := seen[id]; dup {
-			t.Fatalf("collision in 256 samples (16-bit space), id=%d", id)
+		seen[id]++
+		if id > maxID {
+			maxID = id
 		}
-		seen[id] = struct{}{}
+	}
+	if maxID < 4096 {
+		t.Fatalf("query IDs look sequential (max=%d < 4096): forgeable", maxID)
+	}
+	collisions := 0
+	for _, c := range seen {
+		if c > 1 {
+			collisions += c - 1
+		}
+	}
+	if collisions > 6 {
+		t.Fatalf("too many ID collisions (%d in 256 samples): weak PRNG", collisions)
 	}
 	_ = dnsmessage.TypeA // keep import used
 }

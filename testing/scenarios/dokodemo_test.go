@@ -119,13 +119,34 @@ func TestDokodemoTCP(t *testing.T) {
 
 		client, _ := InitializeServerConfig(clientConfig)
 		if client != nil && WaitConnAvailableWithTest(t, testTCPConn(net.Port(clientPort), 1024, time.Second*2)) {
-			defer CloseServer(client)
-			break
+			// Verify the whole port range, not just the base port: under
+			// parallel CI load a sibling package can grab a port inside the
+			// range after pickFreeTCPPortRange, making that listener fail to
+			// bind. Listeners come up asynchronously, so probe each port with
+			// short retries before deciding the range is broken.
+			allPortsOK := true
+			for p := clientPort; p <= clientPort+clientPortRange; p++ {
+				portOK := false
+				for try := 0; try < 5; try++ {
+					if err := testTCPConn(net.Port(p), 1024, 300*time.Millisecond)(); err == nil {
+						portOK = true
+						break
+					}
+				}
+				if !portOK {
+					allPortsOK = false
+					break
+				}
+			}
+			if allPortsOK {
+				defer CloseServer(client)
+				break
+			}
 		}
 		if client != nil {
 			CloseServer(client)
 		}
-		if retry >= 5 {
+		if retry >= 8 {
 			t.Fatal("All attempts failed to start client")
 		}
 	}

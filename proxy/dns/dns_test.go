@@ -28,7 +28,8 @@ type staticHandler struct{}
 
 func (*staticHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	ans := new(dns.Msg)
-	ans.Id = r.Id
+	ans.SetReply(r) // RFC 1035: responses must echo the question; the DNS
+	// cache-poisoning guard (RFC 5452) discards responses without it.
 
 	var clientIP net.IP
 
