@@ -95,8 +95,31 @@ func TestStatsChannel(t *testing.T) {
 	}
 }
 
-func TestStatsChannelUnsubscribe(t *testing.T) {
-	c := NewChannel(&ChannelConfig{Blocking: true})
+// TestStatsChannelBroadcastSurvivesEarlyCancel pins the regression where
+// TestRoute published with a WithTimeout context and deferred cancel: the
+// message is enqueued, then the publisher returns and cancels while the
+// broadcast to an unbuffered subscriber is still pending. The broadcast must
+// run against the captured delivery deadline, not the early cancellation.
+func TestStatsChannelBroadcastSurvivesEarlyCancel(t *testing.T) {
+	c := NewChannel(&ChannelConfig{BufferSize: 0, Blocking: true})
+	a, err := stats.SubscribeRunnableChannel(c)
+	common.Must(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	c.Publish(ctx, "hello")
+	cancel() // publisher returns and cancels immediately
+
+	select {
+	case v := <-a:
+		if v != "hello" {
+			t.Fatalf("got %v, want hello", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("message dropped by early context cancellation")
+	}
+}
+
+func TestStatsChannelUnsubscribe(t *testing.T) {	c := NewChannel(&ChannelConfig{Blocking: true})
 	common.Must(c.Start())
 	defer c.Close()
 
