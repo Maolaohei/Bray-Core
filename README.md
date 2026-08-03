@@ -5,7 +5,7 @@ Bray-Core 是基于 [Xray-core](https://github.com/XTLS/Xray-core) 的 **Bray �
 
 | 项目 | 当前状态 |
 |------|----------|
-| 基线版本 | Xray-core **26.8.1** |
+| 基线版本 | Xray-core **26.8.2** |
 | 语言版本 | Go **1.26.4** |
 | 模块路径 | `github.com/xtls/xray-core` |
 | REALITY | [Maolaohei/REALITY](https://github.com/Maolaohei/REALITY) **v0.5.5**（子模块 `./REALITY`） |

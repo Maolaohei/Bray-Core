@@ -1,7 +1,7 @@
 # Bray-Core Changelog
 
 基于 [Xray-core](https://github.com/XTLS/Xray-core) 的 **Bray 专属魔改**变更记录。  
-基线版本以 `core` 包中的版本号为准（当前 **26.8.1**）。REALITY 独立版本见 [Maolaohei/REALITY Releases](https://github.com/Maolaohei/REALITY/releases)。
+基线版本以 `core` 包中的版本号为准（当前 **26.8.2**）。REALITY 独立版本见 [Maolaohei/REALITY Releases](https://github.com/Maolaohei/REALITY/releases)。
 
 **兼容策略（2026-07 起）**：`main` 默认 **Bray 客户端 ↔ Bray 服务端**；不再承诺与上游 Xray 内核互访兼容。
 
@@ -9,7 +9,7 @@
 
 ---
 
-## [Unreleased] — 深度修复批次（XHTTP / VLESS / REALITY / DNS）
+## [26.8.2] — 2026-08-04
 
 对应工作树修改（未提交）。
 
