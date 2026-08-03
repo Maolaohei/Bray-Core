@@ -67,8 +67,11 @@ const (
 	// clientIdleTimeout is the maximum time a client can remain unused (no active streams)
 	// before being evicted. This is a safety net, not the primary failure recovery mechanism.
 	// Primary mechanism: Fast Eviction (immediate eviction on fatal errors).
-	// 120s balances ISP NAT timeouts (30-300s) and Go's IdleConnTimeout (90s).
-	clientIdleTimeout = 120 * time.Second
+	// 15min keeps pooled connections warm across video/viewing gaps so new
+	// sessions reuse the established TCP/TLS path instead of restarting the
+	// slow-start ramp; ISP NAT timeouts still apply server-side (10min idle
+	// reaper covers the unauthenticated long-poll surface).
+	clientIdleTimeout = 15 * time.Minute
 
 	// probeTimeout is the maximum time to wait for a connection probe (HEAD request)
 	// to complete. If the probe doesn't finish within this time, the connection is

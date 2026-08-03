@@ -379,7 +379,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			}
 			httpSC := &httpServerConn{
 				Instance:       done.New(),
-				Reader:         request.Body,
+				reader:         request.Body,
 				ResponseWriter: writer,
 			}
 			err = currentSession.uploadQueue.Push(Packet{
@@ -630,7 +630,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		httpSC := &httpServerConn{
 			Instance:       done.New(),
-			Reader:         request.Body,
+			reader:         request.Body,
 			ResponseWriter: writer,
 		}
 		conn := splitConn{
@@ -646,12 +646,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		h.ln.addConn(stat.Connection(&conn))
 
 		if sessionId == "" {
-			// Reap unauthenticated stream-one connections after a bounded
-			// lifetime so idle long-polls cannot accumulate forever.
-			timer := time.AfterFunc(streamOneMaxLifetime, func() {
+			// Reap unauthenticated stream-one connections only when idle:
+			// active transfers (long downloads, video playback) must never be
+			// cut mid-stream. touch() resets this timer on every read/write
+			// activity, so only quiet long-polls are reaped.
+			httpSC.idleTimer = time.AfterFunc(streamOneIdleLifetime, func() {
 				_ = httpSC.Close()
 			})
-			defer timer.Stop()
+			defer httpSC.idleTimer.Stop()
 		}
 
 		// "A ResponseWriter may not be used after [Handler.ServeHTTP] has returned."
@@ -670,7 +672,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 type httpServerConn struct {
 	sync.Mutex
 	*done.Instance
-	io.Reader // no need to Close request.Body
+	reader io.Reader // request body (no need to Close)
 	http.ResponseWriter
 	// Downlink write aggregation: flushing every Write() forces one TCP
 	// segment / H2 DATA frame per chunk, which inflates frame count on
@@ -678,6 +680,9 @@ type httpServerConn struct {
 	// threshold or short interval instead. flushAt is zero when idle.
 	writeBuf []byte
 	flushAt  time.Time
+	// idleTimer reaps idle unauthenticated stream-one long-polls; every
+	// Read/Write activity resets it so live transfers are never cut.
+	idleTimer *time.Timer
 }
 
 // streamFlushThreshold / streamFlushInterval bound downlink latency: a
@@ -691,9 +696,10 @@ const (
 // per listener (probe/DoS surface bound: no MAC, no body limit on that path).
 const streamOneMaxActive = 2000
 
-// streamOneMaxLifetime caps how long an unauthenticated stream-one connection
-// may live before being reaped.
-const streamOneMaxLifetime = 10 * time.Minute
+// streamOneIdleLifetime is how long an unauthenticated stream-one connection
+// may sit idle before being reaped. Active transfers reset the timer on every
+// read/write, so long downloads and video playback are never interrupted.
+const streamOneIdleLifetime = 10 * time.Minute
 
 func (c *httpServerConn) Write(b []byte) (int, error) {
 	// ServeHTTP may return while a handler goroutine is still writing
@@ -701,6 +707,7 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 	// HTTP server finishing the response, or Flush races ResponseWriter.
 	c.Lock()
 	defer c.Unlock()
+	c.touch() // write activity resets the stream-one idle reaper
 	if c.Instance.Done() {
 		return 0, io.ErrClosedPipe
 	}
@@ -737,6 +744,25 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 		time.AfterFunc(streamFlushInterval, c.flushPending)
 	}
 	return len(b), nil
+}
+
+// Read forwards the request body (upstream data) and resets the stream-one
+// idle reaper on activity.
+func (c *httpServerConn) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	if n > 0 {
+		c.touch()
+	}
+	return n, err
+}
+
+// touch resets the stream-one idle reaper. Active transfers (downloads,
+// video) never expire; only quiet long-polls are reaped. timer.Reset is
+// concurrent-safe, so no lock is needed here.
+func (c *httpServerConn) touch() {
+	if c.idleTimer != nil {
+		c.idleTimer.Reset(streamOneIdleLifetime)
+	}
 }
 
 // flushPending is the scheduled one-shot flush for quiet writers.
