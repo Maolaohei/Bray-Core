@@ -36,7 +36,7 @@ func getKeyLogWriter(path string) *os.File {
 	return f
 }
 
-func (c *Config) GetREALITYConfig() *reality.Config {
+func (c *Config) GetREALITYConfig() (*reality.Config, error) {
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
 	}
@@ -80,6 +80,10 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 	}
 
 	if c.Mldsa65Seed != nil {
+		if len(c.Mldsa65Seed) != 32 {
+			// Length-mismatched seed would panic in NewKeyFromSeed; fail loudly.
+			return nil, errors.New("REALITY: Mldsa65Seed must be exactly 32 bytes, got ", len(c.Mldsa65Seed))
+		}
 		_, key := mldsa65.NewKeyFromSeed((*[32]byte)(c.Mldsa65Seed))
 		config.Mldsa65Key = key.Bytes()
 	}
@@ -99,9 +103,13 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 	}
 	config.ShortIds = make(map[[8]byte]bool)
 	for _, shortId := range c.ShortIds {
+		if len(shortId) != 8 {
+			// Length-mismatched short_id would panic on the fixed-size cast.
+			return nil, errors.New("REALITY: each short_id must be exactly 8 bytes, got ", len(shortId))
+		}
 		config.ShortIds[*(*[8]byte)(shortId)] = true
 	}
-	return config
+	return config, nil
 }
 
 func KeyLogWriterFromConfig(c *Config) io.Writer {

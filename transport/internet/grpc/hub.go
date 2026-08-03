@@ -138,7 +138,13 @@ func Listen(ctx context.Context, address net.Address, port net.Port, settings *i
 		encoding.RegisterGRPCServiceServerX(s, listener, grpcSettings.getServiceName(), grpcSettings.getTunStreamName(), grpcSettings.getTunMultiStreamName())
 
 		if config := reality.ConfigFromStreamSettings(settings); config != nil {
-			streamListener = goreality.NewListener(streamListener, config.GetREALITYConfig())
+			rc, err := config.GetREALITYConfig()
+			if err != nil {
+				errors.LogErrorInner(ctx, err, "invalid REALITY config")
+				_ = streamListener.Close()
+				return
+			}
+			streamListener = goreality.NewListener(streamListener, rc)
 		}
 		if err = s.Serve(streamListener); err != nil {
 			errors.LogInfoInner(ctx, err, "Listener for gRPC ended")

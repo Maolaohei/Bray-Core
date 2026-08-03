@@ -21,7 +21,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	"github.com/Maolaohei/REALITY"
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
@@ -81,30 +80,32 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 		errors.LogDebug(context.Background(), "REALITY localAddr: ", localAddr, "\tis using X25519MLKEM768 for TLS' communication: ", c.HandshakeState.ServerHello.ServerShare.Group == utls.X25519MLKEM768)
 		errors.LogDebug(context.Background(), "REALITY localAddr: ", localAddr, "\tis using ML-DSA-65 for cert's extra verification: ", len(c.Config.Mldsa65Verify) > 0)
 	}
-	p, ok := reflect.TypeOf(c.Conn).Elem().FieldByName("peerCertificates")
-	if !ok {
-		return errors.New("REALITY: peerCertificates field not found via reflect")
-	}
-	certs := *(*([]*x509.Certificate))(unsafe.Pointer(uintptr(unsafe.Pointer(c.Conn)) + p.Offset))
-	if len(certs) == 0 {
+	if len(rawCerts) == 0 {
 		return errors.New("REALITY: no peer certificates")
 	}
-	if pub, ok := certs[0].PublicKey.(ed25519.PublicKey); ok {
+	// rawCerts[0] is the leaf certificate in DER. Parse it directly instead of
+	// reflect/unsafe-reading the unexported tls.Conn.peerCertificates field
+	// (layout-dependent and go vet-flagged).
+	cert0, parseErr := x509.ParseCertificate(rawCerts[0])
+	if parseErr != nil {
+		return errors.New("REALITY: failed to parse peer certificate").Base(parseErr)
+	}
+	if pub, ok := cert0.PublicKey.(ed25519.PublicKey); ok {
 		h := hmac.New(sha512.New, c.AuthKey)
 		h.Write(pub)
-		if hmac.Equal(h.Sum(nil), certs[0].Signature) {
+		if hmac.Equal(h.Sum(nil), cert0.Signature) {
 			if len(c.Config.Mldsa65Verify) > 0 {
 				// Prefer REALITY auth OID extension; fall back to Extensions[0] for legacy servers.
 				var mldsaSig []byte
 				realityOID := []int{1, 3, 6, 1, 4, 1, 20226, 1, 1}
-				for _, e := range certs[0].Extensions {
+				for _, e := range cert0.Extensions {
 					if e.Id.Equal(realityOID) && len(e.Value) > 0 {
 						mldsaSig = e.Value
 						break
 					}
 				}
-				if len(mldsaSig) == 0 && len(certs[0].Extensions) > 0 {
-					mldsaSig = certs[0].Extensions[0].Value
+				if len(mldsaSig) == 0 && len(cert0.Extensions) > 0 {
+					mldsaSig = cert0.Extensions[0].Value
 				}
 				if len(mldsaSig) > 0 {
 					h.Write(c.HandshakeState.Hello.Raw)
@@ -132,10 +133,16 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 		DNSName:       c.ServerName,
 		Intermediates: x509.NewCertPool(),
 	}
-	for _, cert := range certs[1:] {
-		opts.Intermediates.AddCert(cert)
+	if len(rawCerts) > 1 {
+		for _, der := range rawCerts[1:] {
+			inter, ierr := x509.ParseCertificate(der)
+			if ierr != nil {
+				continue
+			}
+			opts.Intermediates.AddCert(inter)
+		}
 	}
-	if _, err := certs[0].Verify(opts); err != nil {
+	if _, err := cert0.Verify(opts); err != nil {
 		return err
 	}
 	return nil
@@ -214,6 +221,12 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 	}
 	if !uConn.Verified {
 		errors.LogError(ctx, "REALITY: standard x509 fallback, serverName=", uConn.ServerName)
+		// Cooldown gate: a burst of forced-verification-failure connections
+		// (active MITM / flaky path) must not spawn an unbounded pile of
+		// background crawlers against the same dest.
+		if !spiderAllowed(uConn.ServerName) {
+			return nil, errors.New("REALITY: connection rejected").AtWarning()
+		}
 		if len(config.SpiderY) < 10 {
 			return nil, errors.New("REALITY: SpiderY requires 10 elements, got ", len(config.SpiderY)).AtWarning()
 		}
@@ -320,6 +333,46 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 }
 
 const maxPathsPerHost = 500 // cap on Spider path pool per host
+
+// spiderCooldown is the minimum gap between crawler launches for the same
+// server name. See spiderAllowed.
+const spiderCooldown = 60 * time.Second
+
+// spiderLaunchMaxEntries caps the per-serverName crawler-launch table.
+const spiderLaunchMaxEntries = 10000
+
+// spiderLaunch tracks the last crawler start per dest so repeated failed
+// verifications (MITM / probe) cannot stack unbounded background crawlers.
+var spiderLaunch struct {
+	mu      sync.Mutex
+	lastRun map[string]time.Time
+}
+
+func spiderAllowed(serverName string) bool {
+	spiderLaunch.mu.Lock()
+	defer spiderLaunch.mu.Unlock()
+	if spiderLaunch.lastRun == nil {
+		spiderLaunch.lastRun = make(map[string]time.Time)
+	}
+	// Cap the table: an attacker cycling serverNames must not grow it forever.
+	if len(spiderLaunch.lastRun) >= spiderLaunchMaxEntries {
+		now := time.Now()
+		for k, v := range spiderLaunch.lastRun {
+			if now.Sub(v) >= spiderCooldown {
+				delete(spiderLaunch.lastRun, k)
+			}
+		}
+		if len(spiderLaunch.lastRun) >= spiderLaunchMaxEntries {
+			spiderLaunch.lastRun = make(map[string]time.Time)
+		}
+	}
+	last, ok := spiderLaunch.lastRun[serverName]
+	if ok && time.Since(last) < spiderCooldown {
+		return false
+	}
+	spiderLaunch.lastRun[serverName] = time.Now()
+	return true
+}
 
 var (
 	href  = regexp.MustCompile(`href="([/h].*?)"`)

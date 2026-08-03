@@ -12,7 +12,7 @@ func TestGetREALITYConfig_DefaultMinClientVer(t *testing.T) {
 		PrivateKey: make([]byte, 32),
 		// MinClientVer intentionally empty
 	}
-	rc := cfg.GetREALITYConfig()
+	rc, _ := cfg.GetREALITYConfig()
 	if rc == nil {
 		t.Fatal("nil REALITY config")
 	}
@@ -29,7 +29,7 @@ func TestGetREALITYConfig_ExplicitMinClientVerPreserved(t *testing.T) {
 		PrivateKey:   make([]byte, 32),
 		MinClientVer: []byte{1, 2, 3},
 	}
-	rc := cfg.GetREALITYConfig()
+	rc, _ := cfg.GetREALITYConfig()
 	if rc.MinClientVer[0] != 1 || rc.MinClientVer[1] != 2 || rc.MinClientVer[2] != 3 {
 		t.Fatalf("MinClientVer=%v want [1 2 3]", rc.MinClientVer)
 	}
@@ -43,7 +43,7 @@ func TestGetREALITYConfig_DefaultMaxTimeDiff(t *testing.T) {
 		PrivateKey: make([]byte, 32),
 		// MaxTimeDiff intentionally left 0 (unset)
 	}
-	rc := cfg.GetREALITYConfig()
+	rc, _ := cfg.GetREALITYConfig()
 	if rc.MaxTimeDiff != 90*time.Second {
 		t.Fatalf("MaxTimeDiff=%v want 90s", rc.MaxTimeDiff)
 	}
@@ -57,7 +57,7 @@ func TestGetREALITYConfig_ExplicitMaxTimeDiffPreserved(t *testing.T) {
 		PrivateKey:  make([]byte, 32),
 		MaxTimeDiff: 30000, // 30s in ms
 	}
-	if rc := cfg.GetREALITYConfig(); rc.MaxTimeDiff != 30*time.Second {
+	if rc, _ := cfg.GetREALITYConfig(); rc.MaxTimeDiff != 30*time.Second {
 		t.Fatalf("MaxTimeDiff=%v want 30s", rc.MaxTimeDiff)
 	}
 }
