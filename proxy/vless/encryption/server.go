@@ -18,9 +18,9 @@ import (
 )
 
 type ServerSession struct {
-	PfsKey   []byte
-	NfsKeys  sync.Map
-	nfsKeyN  atomic.Int64 // live nfsKey entries (cap guard, see Handshake)
+	PfsKey  []byte
+	NfsKeys sync.Map
+	nfsKeyN atomic.Int64 // live nfsKey entries (cap guard, see Handshake)
 }
 
 // maxNfsKeysPerSession bounds replay-guard growth for a single 0-RTT ticket

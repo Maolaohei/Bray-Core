@@ -141,10 +141,10 @@ func TestAttack_REALITYActiveProbe(t *testing.T) {
 	// Attack payloads: garbage, partial TLS records, fake TLS ClientHello with
 	// no REALITY auth payload (random session id), and an oversized write.
 	probes := [][]byte{
-		{0x16, 0x03, 0x01},                                            // partial record header only
-		bytes.Repeat([]byte{0x41}, 512),                               // plain garbage
+		{0x16, 0x03, 0x01},              // partial record header only
+		bytes.Repeat([]byte{0x41}, 512), // plain garbage
 		append([]byte{0x16, 0x03, 0x01, 0x00, 0x2a}, bytes.Repeat([]byte{0x00}, 42)...), // short ClientHello, no auth
-		bytes.Repeat([]byte{0x00}, 4096), // null flood
+		bytes.Repeat([]byte{0x00}, 4096),                                                // null flood
 	}
 
 	for i, payload := range probes {

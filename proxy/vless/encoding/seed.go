@@ -17,9 +17,9 @@ import (
 // accepted by the server (old clients) and an unknown addons field is ignored
 // by old servers.
 const (
-	seedLength      = 8
-	seedWindow      = 90 * time.Second
-	seedReplayMax   = 65536
+	seedLength    = 8
+	seedWindow    = 90 * time.Second
+	seedReplayMax = 65536
 )
 
 // NewSeed returns a fresh 8-byte anti-replay seed for a request header.

@@ -43,7 +43,6 @@ const (
 	// default session MAC key(s). Local-only; never sent on wire.
 	// Multiple UUIDs (inbound multi-user) are comma-separated; verify accepts any.
 	BraySessionUUIDHeader = "x-bray-session-uuid"
-
 )
 
 var sessionSecretCache sync.Map // *Config -> [][]byte

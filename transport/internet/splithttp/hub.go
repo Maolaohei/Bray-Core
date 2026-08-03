@@ -31,19 +31,19 @@ import (
 )
 
 type requestHandler struct {
-	config         *Config
-	host           string
-	path           string
-	ln             *Listener
-	sessionMu      *sync.Mutex
-	sessions       sync.Map
-	sessionN       atomic.Int64 // O(1) live session count (Bray-only)
+	config          *Config
+	host            string
+	path            string
+	ln              *Listener
+	sessionMu       *sync.Mutex
+	sessions        sync.Map
+	sessionN        atomic.Int64 // O(1) live session count (Bray-only)
 	streamOneActive atomic.Int64 // live unauthenticated stream-one long-polls
-	localAddr      net.Addr
-	socketSettings *internet.SocketConfig
-	stopCh         chan struct{}
-	cfDetected     atomic.Bool
-	avgRTTNs       atomic.Int64 // EWMA of handler service time (ns) for adaptive session TTL
+	localAddr       net.Addr
+	socketSettings  *internet.SocketConfig
+	stopCh          chan struct{}
+	cfDetected      atomic.Bool
+	avgRTTNs        atomic.Int64 // EWMA of handler service time (ns) for adaptive session TTL
 }
 
 type httpSession struct {
