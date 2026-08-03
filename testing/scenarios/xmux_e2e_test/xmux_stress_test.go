@@ -163,6 +163,9 @@ func buildStressProxy(t *testing.T, serverPort, clientPort xraynet.Port) func() 
 
 // TestXMUXStressHighConcurrency: 100 goroutines × 20 requests = 2000 total.
 func TestXMUXStressHighConcurrency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("long stress suite: skipped in -short mode (CI)")
+	}
 	sites := startHTTPStressSites(t, 5, 27060)
 	for _, s := range sites {
 		defer s.server.Close()
@@ -203,6 +206,9 @@ func TestXMUXStressHighConcurrency(t *testing.T) {
 
 // TestXMUXStressRandomShuffle: 100 goroutines × 50 requests, random site selection.
 func TestXMUXStressRandomShuffle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("long stress suite: skipped in -short mode (CI)")
+	}
 	sites := startHTTPStressSites(t, 5, 27080)
 	for _, s := range sites {
 		defer s.server.Close()
@@ -243,6 +249,9 @@ func TestXMUXStressRandomShuffle(t *testing.T) {
 
 // TestXMUXStressContinuousSwitch: 50 goroutines × 200 requests, rapid A→B switching.
 func TestXMUXStressContinuousSwitch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("long stress suite: skipped in -short mode (CI)")
+	}
 	sites := startHTTPStressSites(t, 2, 27100)
 	for _, s := range sites {
 		defer s.server.Close()

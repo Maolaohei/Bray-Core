@@ -14,6 +14,9 @@ import (
 )
 
 func TestDOHNameServer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("https+local://1.1.1.1/dns-query")
 	common.Must(err)
 
@@ -31,6 +34,9 @@ func TestDOHNameServer(t *testing.T) {
 }
 
 func TestDOHNameServerWithCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("https+local://1.1.1.1/dns-query")
 	common.Must(err)
 
@@ -59,6 +65,9 @@ func TestDOHNameServerWithCache(t *testing.T) {
 }
 
 func TestDOHNameServerWithIPv4Override(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("https+local://1.1.1.1/dns-query")
 	common.Must(err)
 
@@ -82,6 +91,9 @@ func TestDOHNameServerWithIPv4Override(t *testing.T) {
 }
 
 func TestDOHNameServerWithIPv6Override(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("https+local://1.1.1.1/dns-query")
 	common.Must(err)
 

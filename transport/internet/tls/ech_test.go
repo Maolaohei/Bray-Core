@@ -12,6 +12,9 @@ import (
 )
 
 func TestECHDial(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	config := &Config{
 		ServerName:    "cloudflare.com",
 		EchConfigList: "encryptedsni.com+udp://1.1.1.1",

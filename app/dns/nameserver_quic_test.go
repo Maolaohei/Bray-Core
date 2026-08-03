@@ -14,6 +14,9 @@ import (
 )
 
 func TestQUICNameServer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("quic://dns.adguard-dns.com")
 	common.Must(err)
 	s, err := NewQUICNameServer(url, false, false, 0, net.IP(nil))
@@ -41,6 +44,9 @@ func TestQUICNameServer(t *testing.T) {
 }
 
 func TestQUICNameServerWithIPv4Override(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("quic://dns.adguard-dns.com")
 	common.Must(err)
 	s, err := NewQUICNameServer(url, false, false, 0, net.IP(nil))
@@ -64,6 +70,9 @@ func TestQUICNameServerWithIPv4Override(t *testing.T) {
 }
 
 func TestQUICNameServerWithIPv6Override(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("quic://dns.adguard-dns.com")
 	common.Must(err)
 	s, err := NewQUICNameServer(url, false, false, 0, net.IP(nil))

@@ -36,6 +36,9 @@ func skipIfExternalDNSUnreliable(t *testing.T, err error) {
 }
 
 func TestTCPLocalNameServer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("tcp+local://8.8.8.8")
 	common.Must(err)
 	s, err := NewTCPLocalNameServer(url, false, false, 0, net.IP(nil))
@@ -53,6 +56,9 @@ func TestTCPLocalNameServer(t *testing.T) {
 }
 
 func TestTCPLocalNameServerWithCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("tcp+local://8.8.8.8")
 	common.Must(err)
 	s, err := NewTCPLocalNameServer(url, false, false, 0, net.IP(nil))
@@ -81,6 +87,9 @@ func TestTCPLocalNameServerWithCache(t *testing.T) {
 }
 
 func TestTCPLocalNameServerWithIPv4Override(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("tcp+local://8.8.8.8")
 	common.Must(err)
 	s, err := NewTCPLocalNameServer(url, false, false, 0, net.IP(nil))
@@ -105,6 +114,9 @@ func TestTCPLocalNameServerWithIPv4Override(t *testing.T) {
 }
 
 func TestTCPLocalNameServerWithIPv6Override(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: skipped in -short mode (CI)")
+	}
 	url, err := url.Parse("tcp+local://8.8.8.8")
 	common.Must(err)
 	s, err := NewTCPLocalNameServer(url, false, false, 0, net.IP(nil))
