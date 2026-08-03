@@ -649,16 +649,22 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			// cut mid-stream. touch() resets the timer and the lastActive
 			// stamp on every read/write; the callback double-checks the stamp
 			// to close the Reset-vs-fire race at the deadline boundary.
-			// Timer must be attached before addConn so concurrent traffic
-			// never reads a half-initialized idleTimer.
+			// A hard absolute cap (streamOneHardCapLifetime) still bounds
+			// hostile long-lived connections regardless of activity.
 			httpSC.lastActive.Store(time.Now().UnixNano())
+			httpSC.hardCapTimer = time.AfterFunc(streamOneHardCapLifetime, func() {
+				_ = httpSC.Close()
+			})
 			httpSC.idleTimer = time.AfterFunc(streamOneIdleLifetime, func() {
 				if time.Since(time.Unix(0, httpSC.lastActive.Load())) < streamOneIdleLifetime {
 					return // activity landed inside the race window; keep alive
 				}
 				_ = httpSC.Close()
 			})
-			defer httpSC.idleTimer.Stop()
+			defer func() {
+				httpSC.hardCapTimer.Stop()
+				httpSC.idleTimer.Stop()
+			}()
 		}
 
 		h.ln.addConn(stat.Connection(&conn))
@@ -690,6 +696,9 @@ type httpServerConn struct {
 	// idleTimer reaps idle unauthenticated stream-one long-polls; every
 	// Read/Write activity resets it so live transfers are never cut.
 	idleTimer *time.Timer
+	// hardCapTimer bounds the absolute lifetime of an unauthenticated
+	// stream-one connection regardless of activity (DoS backstop).
+	hardCapTimer *time.Timer
 	// lastActive is the last activity stamp (UnixNano) used to double-check
 	// the reaper at its deadline boundary (Reset-vs-fire race).
 	lastActive atomic.Int64
@@ -710,6 +719,12 @@ const streamOneMaxActive = 2000
 // may sit idle before being reaped. Active transfers reset the timer on every
 // read/write, so long downloads and video playback are never interrupted.
 const streamOneIdleLifetime = 10 * time.Minute
+
+// streamOneHardCapLifetime bounds the absolute lifetime of an unauthenticated
+// stream-one connection even while active: an attacker feeding a byte every
+// few minutes must still be reaped eventually (DoS backstop). Far beyond any
+// real transfer, so genuine downloads/video are unaffected.
+const streamOneHardCapLifetime = 4 * time.Hour
 
 func (c *httpServerConn) Write(b []byte) (int, error) {
 	// ServeHTTP may return while a handler goroutine is still writing
@@ -960,6 +975,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		l.server = http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: time.Second * 4,
+			IdleTimeout:       10 * time.Minute, // reap dead keep-alive conns; active requests unaffected
 			MaxHeaderBytes:    l.config.GetNormalizedServerMaxHeaderBytes(),
 			Protocols:         protocols,
 			// Match client http2.Transport frame size so bulk packet-up DATA
