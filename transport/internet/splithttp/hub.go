@@ -975,7 +975,6 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		l.server = http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: time.Second * 4,
-			IdleTimeout:       10 * time.Minute, // reap dead keep-alive conns; active requests unaffected
 			MaxHeaderBytes:    l.config.GetNormalizedServerMaxHeaderBytes(),
 			Protocols:         protocols,
 			// Match client http2.Transport frame size so bulk packet-up DATA
