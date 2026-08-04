@@ -43,7 +43,7 @@ type requestHandler struct {
 	socketSettings  *internet.SocketConfig
 	stopCh          chan struct{}
 	cfDetected      atomic.Bool
-	avgRTTNs        atomic.Int64 // EWMA of handler service time (ns) for adaptive session TTL
+	avgRTTNs        atomic.Int64        // EWMA of handler service time (ns) for adaptive session TTL
 	macVerifier     *sessionMacVerifier // per-listener session MAC verifier with pooled HMAC instances
 }
 
