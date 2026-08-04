@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
+	"hash"
 	"strings"
 	"sync"
 )
@@ -215,6 +216,74 @@ func verifySessionID(sessionId string, secret []byte) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(tag), []byte(want)) == 1
+}
+
+// sessionMacVerifier verifies session-id MAC tags on the per-packet hot path
+// without re-allocating an HMAC-SHA256 instance per request. Each secret gets
+// a dedicated sync.Pool of key-bound HMAC instances (hmac.Reset keeps the
+// creation key); instances are reset before use and returned after Sum, so
+// concurrent handlers never share a live instance. Wire format and
+// ConstantTimeCompare semantics are identical to verifySessionIDAny.
+type sessionMacVerifier struct {
+	secrets [][]byte
+	pools   []*sync.Pool // pools[i] holds hmac instances bound to secrets[i]
+}
+
+func newSessionMacVerifier(secrets [][]byte) *sessionMacVerifier {
+	v := &sessionMacVerifier{
+		secrets: secrets,
+		pools:   make([]*sync.Pool, len(secrets)),
+	}
+	for i, secret := range secrets {
+		key := secret
+		v.pools[i] = &sync.Pool{New: func() any {
+			return hmac.New(sha256.New, key)
+		}}
+	}
+	return v
+}
+
+// verify reports whether sessionId carries a valid Bray MAC for any secret.
+// Empty sessionId is rejected here; stream-one gating lives at the caller.
+func (v *sessionMacVerifier) verify(sessionId string) bool {
+	if sessionId == "" || len(v.pools) == 0 {
+		return false
+	}
+	for i := range v.pools {
+		if v.verifyWith(sessionId, i) {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *sessionMacVerifier) verifyWith(sessionId string, i int) bool {
+	dot := strings.LastIndexByte(sessionId, '.')
+	if dot <= 0 || dot >= len(sessionId)-1 {
+		return false
+	}
+	raw := sessionId[:dot]
+	tag := sessionId[dot+1:]
+
+	macAny := v.pools[i].Get()
+	mac := macAny.(hash.Hash)
+	mac.Reset()
+	mac.Write([]byte(raw))
+	sum := mac.Sum(nil)
+	// Return the instance before using sum: sum is a freshly allocated slice
+	// that does not alias hmac internals, so reuse by another goroutine is safe.
+	v.pools[i].Put(macAny)
+
+	// Encode into a stack buffer instead of allocating via EncodeToString.
+	// wantBuf escapes only if the compiler decides it must; the encode itself
+	// is always allocation-free. EncodedLen(8) = 11 ≤ 16.
+	var wantBuf [16]byte
+	base64.RawURLEncoding.Encode(wantBuf[:], sum[:sessionMACTagBytes])
+	n := base64.RawURLEncoding.EncodedLen(sessionMACTagBytes)
+	if len(tag) != n {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(tag), wantBuf[:n]) == 1
 }
 
 // verifySessionIDAny accepts a sessionId signed by any of the provided secrets.

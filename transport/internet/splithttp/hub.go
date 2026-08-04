@@ -44,6 +44,7 @@ type requestHandler struct {
 	stopCh          chan struct{}
 	cfDetected      atomic.Bool
 	avgRTTNs        atomic.Int64 // EWMA of handler service time (ns) for adaptive session TTL
+	macVerifier     *sessionMacVerifier // per-listener session MAC verifier with pooled HMAC instances
 }
 
 type httpSession struct {
@@ -209,6 +210,25 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 	return s
 }
 
+// readBodyWithDeadline reads full body into buf with a hard read deadline via
+// ResponseController.SetReadDeadline (HTTP/1 and HTTP/2 native support: the
+// deadline is enforced by the connection/stream read path without spawning a
+// goroutine or allocating a channel/context). When the underlying protocol
+// does not support read deadlines (e.g. HTTP/3), it falls back to the
+// goroutine-based readBodyWithTimeout so slow-body protection is never lost.
+// The deadline is always cleared afterwards so it cannot leak into
+// connection reuse.
+func readBodyWithDeadline(writer http.ResponseWriter, request *http.Request, buf []byte, timeout time.Duration) (int, error) {
+	if rc := http.NewResponseController(writer); rc != nil {
+		if err := rc.SetReadDeadline(time.Now().Add(timeout)); err == nil {
+			n, readErr := io.ReadFull(request.Body, buf)
+			_ = rc.SetReadDeadline(time.Time{}) // clear: absolute deadline must not poison reuse
+			return n, readErr
+		}
+	}
+	return readBodyWithTimeout(request, buf, timeout)
+}
+
 // readBodyWithTimeout reads full body into buf with a hard deadline so a slow
 // peer cannot pin a goroutine and a large allocation indefinitely.
 func readBodyWithTimeout(request *http.Request, buf []byte, timeout time.Duration) (int, error) {
@@ -313,10 +333,18 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	// Bray-only: reject unsigned / forged session IDs before upsertSession.
 	// Empty sessionId remains stream-one only (gated below).
-	if sessionId != "" && !verifySessionIDAny(sessionId, h.config.sessionSecrets()) {
-		errors.LogDebug(context.Background(), "invalid session MAC")
-		writer.WriteHeader(http.StatusNotFound)
-		return
+	if sessionId != "" {
+		macOK := false
+		if h.macVerifier != nil {
+			macOK = h.macVerifier.verify(sessionId)
+		} else {
+			macOK = verifySessionIDAny(sessionId, h.config.sessionSecrets())
+		}
+		if !macOK {
+			errors.LogDebug(context.Background(), "invalid session MAC")
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
 	}
 
 	// Empty sessionId is stream-one shape only. Locked stream-up/packet-up reject it.
@@ -495,14 +523,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				// Slow-body guard: a peer may declare a large ContentLength and
 				// drip bytes forever; cap the read with a deadline so a single
 				// request cannot pin a goroutine + buffer indefinitely.
-				_, readErr = readBodyWithTimeout(request, bodyPayload, 30*time.Second)
+				_, readErr = readBodyWithDeadline(writer, request, bodyPayload, 30*time.Second)
 			} else {
 				// Chunked upload: bound both size and rate. ReadFull into a
 				// fixed cap; io.ErrUnexpectedEOF merely means the body ended
 				// before the cap (normal), not an error.
 				bodyPayload = make([]byte, scMaxEachPostBytes+1)
 				var n int
-				n, readErr = readBodyWithTimeout(request, bodyPayload, 30*time.Second)
+				n, readErr = readBodyWithDeadline(writer, request, bodyPayload, 30*time.Second)
 				bodyPayload = bodyPayload[:n]
 				if readErr == io.ErrUnexpectedEOF {
 					readErr = nil
@@ -863,6 +891,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		sessions:       sync.Map{},
 		socketSettings: streamSettings.SocketSettings,
 		stopCh:         make(chan struct{}),
+		macVerifier:    newSessionMacVerifier(l.config.sessionSecrets()),
 	}
 	l.handler = handler
 	tlsConfig := getTLSConfig(streamSettings)
