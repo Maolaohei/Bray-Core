@@ -15,6 +15,10 @@ import (
 // returning (ordered read loop). Failures fail-closed and mark the conn dead.
 // Depth 3 is the stability-first ceiling for product packet-up windows without
 // unbounded H1 HOL risk on flaky middleboxes.
+//
+// Writes are batched: concurrent requests are coalesced into a single
+// writev/WSASend via net.Buffers (double-buffered zero-alloc queue sized to
+// the inflight ceiling), so N in-flight POSTs cost ~1 syscall instead of N.
 const h1UploadMaxInflight = 3
 
 type H1Conn struct {
@@ -24,14 +28,28 @@ type H1Conn struct {
 	RespBufReader        *bufio.Reader
 	net.Conn
 
-	mu          sync.Mutex
-	writeMu     sync.Mutex
-	cond        *sync.Cond
-	writeSeq    int
-	readSeq     int
-	dead        bool
-	deadErr     error
-	inflight    int
+	mu       sync.Mutex
+	cond     *sync.Cond
+	writeSeq int
+	readSeq  int
+	dead     bool
+	deadErr  error
+	inflight int
+
+	// Batched-write state (all under mu): producers append reqBytes to
+	// *writeIn (a fixed array sized to the inflight ceiling — zero alloc);
+	// the first producer becomes the writer and swaps the writeIn/writeOut
+	// POINTERS, so it owns the old array exclusively — the batch slice keeps
+	// referencing that array (the swap only rewrites the pointer fields),
+	// while producers keep appending to the other array. Batch is flushed
+	// with a single syscall.
+	writePos     int // monotonically assigned write positions
+	writtenPos   int // write watermark: positions <= writtenPos are flushed
+	writeIn      *[h1UploadMaxInflight][]byte
+	writeOut     *[h1UploadMaxInflight][]byte
+	writeInCount int
+	writing      bool
+
 	activeUsers int
 }
 
@@ -39,6 +57,8 @@ func NewH1Conn(conn net.Conn) *H1Conn {
 	h := &H1Conn{
 		RespBufReader: bufio.NewReaderSize(conn, 32*1024),
 		Conn:          conn,
+		writeIn:       new([h1UploadMaxInflight][]byte),
+		writeOut:      new([h1UploadMaxInflight][]byte),
 	}
 	h.cond = sync.NewCond(&h.mu)
 	return h
@@ -71,14 +91,60 @@ func (h *H1Conn) pipelinePost(reqBytes []byte) error {
 	h.writeSeq++
 	h.inflight++
 	h.UnreadResponsesCount = h.inflight
-	h.mu.Unlock()
 
-	h.writeMu.Lock()
-	_, werr := h.Conn.Write(reqBytes)
-	h.writeMu.Unlock()
-	if werr != nil {
-		h.failPipeline(werr)
-		return werr
+	// Batched write: enqueue our bytes and either become the writer (draining
+	// the queue with coalesced syscalls) or wait until our position is flushed.
+	myWritePos := h.writePos
+	h.writePos++
+	h.writeIn[h.writeInCount] = reqBytes
+	h.writeInCount++
+	if h.writing {
+		// Another goroutine is the writer; wait until our write is flushed.
+		for !h.dead && h.writtenPos <= myWritePos {
+			h.cond.Wait()
+		}
+		if h.dead {
+			err := h.deadErr
+			h.mu.Unlock()
+			if err == nil {
+				err = net.ErrClosed
+			}
+			return err
+		}
+		h.mu.Unlock()
+	} else {
+		h.writing = true
+		h.mu.Unlock()
+
+		// We are the writer. Take the batch from writeIn (the array producers
+		// append to), then swap so we own the taken array exclusively while
+		// producers keep appending to the other one.
+		for {
+			h.mu.Lock()
+			if h.writeInCount == 0 {
+				h.writing = false
+				h.mu.Unlock()
+				break
+			}
+			n := h.writeInCount
+			batch := h.writeIn[:n]
+			h.writeInCount = 0
+			h.writeIn, h.writeOut = h.writeOut, h.writeIn
+			h.mu.Unlock()
+
+			werr := h.writeBatch(batch)
+
+			h.mu.Lock()
+			if werr != nil {
+				h.writing = false
+				h.mu.Unlock()
+				h.failPipeline(werr)
+				return werr
+			}
+			h.writtenPos += n
+			h.cond.Broadcast()
+			h.mu.Unlock()
+		}
 	}
 
 	// Wait until it is our turn to read. Release mu before ReadResponse so a
@@ -124,6 +190,19 @@ func (h *H1Conn) pipelinePost(reqBytes []byte) error {
 		return err
 	}
 	return nil
+}
+
+// writeBatch flushes one coalesced batch with a single writev/WSASend syscall
+// when the batch holds multiple requests; a lone request goes through the
+// plain Write fast path (identical cost to the pre-batching implementation).
+func (h *H1Conn) writeBatch(batch [][]byte) error {
+	if len(batch) == 1 {
+		_, err := h.Conn.Write(batch[0])
+		return err
+	}
+	bufs := net.Buffers(batch)
+	_, err := bufs.WriteTo(h.Conn)
+	return err
 }
 
 func (h *H1Conn) failPipeline(err error) {
