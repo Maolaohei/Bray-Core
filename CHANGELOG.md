@@ -1,11 +1,35 @@
 # Bray-Core Changelog
 
 基于 [Xray-core](https://github.com/XTLS/Xray-core) 的 **Bray 专属魔改**变更记录。  
-基线版本以 `core` 包中的版本号为准（当前 **26.8.2**）。REALITY 独立版本见 [Maolaohei/REALITY Releases](https://github.com/Maolaohei/REALITY/releases)。
+基线版本以 `core` 包中的版本号为准（当前 **26.8.3**）。REALITY 独立版本见 [Maolaohei/REALITY Releases](https://github.com/Maolaohei/REALITY/releases)。
 
 **兼容策略（2026-07 起）**：`main` 默认 **Bray 客户端 ↔ Bray 服务端**；不再承诺与上游 Xray 内核互访兼容。
 
 格式大致遵循 [Keep a Changelog](https://keepachangelog.com/) 语义：新增 / 变更 / 修复 / 文档。
+
+---
+
+## [26.8.3] — 2026-08-05
+
+对应提交：`9de077d9` 至 `b7f24639`（XHTTP 热路径性能批次 + Go 工具链升级）。
+
+### 性能（XHTTP packet-up 热路径）
+
+- **每包分配 -15%**（MemoryAllocations 110 → 93 allocs/op）：
+  - packet-up body 读取改为 `ResponseController.SetReadDeadline` 同步读（去掉每次 goroutine + channel + context；h3 无读截止线时保留原超时守卫）；
+  - session MAC 验证改为 per-listener `sessionMacVerifier`（sync.Pool 键控 HMAC-SHA256 实例复用，常量时间比较语义不变）；
+  - MAC tag base64 改为栈上编码（消除 EncodeToString 分配）。
+- **h1 并发 POST 批量写**：`H1Conn` 双缓冲零分配队列把同批并发请求合并为单次 writev/WSASend（单请求快速路径不变，零新增延迟，wire 格式与 stock Xray 兼容）；并发吞吐峰值 1494-1554 MB/s（历史最佳）。
+- 回测确认：延迟 / 吞吐 / allocs 无回退（Windows 1.26.5）。
+
+### 构建
+
+- Go 工具链升级 1.26.4 → **1.26.5**（CVE-2026-42505 crypto/tls ECH、CVE-2026-39822 os.Root 逃逸、Green Tea GC AVX-512 span 扫描 SIGILL 崩溃修复）。
+
+### 上游同步
+
+- XHTTP & gRPC 服务端获取准确 localAddr（`session.Inbound.Local` 不再是 0.0.0.0:0，routing `local` 规则恢复正确）。
+- Routing `process` 排除 iOS（Go `darwin` tag 在 iOS 下亦为真，iOS 构建不再带 macOS 专属实现）。
 
 ---
 
