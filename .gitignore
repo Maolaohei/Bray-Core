@@ -58,6 +58,9 @@ bin/xray-*
 # Coverage reports
 coverage.*
 
+# benchcompare harness output (throwaway per-run artifacts)
+bench_results/compare/
+
 # Profiling outputs
 *.prof
 

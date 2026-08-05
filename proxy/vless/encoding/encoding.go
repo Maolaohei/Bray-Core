@@ -154,21 +154,39 @@ func EncodeResponseHeader(writer io.Writer, request *protocol.RequestHeader, res
 
 // DecodeResponseHeader decodes and returns (if successful) a ResponseHeader from an input stream.
 func DecodeResponseHeader(reader io.Reader, request *protocol.RequestHeader) (*Addons, error) {
-	buffer := buf.StackNew()
-	defer buffer.Release()
-
-	if _, err := buffer.ReadFullFrom(reader, 1); err != nil {
+	// Hot path: the response header is a 1-byte version + a tiny addons blob
+	// (length is a single byte, so at most 255 bytes). Avoid a pooled 8KB
+	// buf.Buffer here — buf.StackNew costs ~2 allocs and escapes on this path —
+	// and decode straight from stack buffers instead.
+	var hdr [2]byte
+	if _, err := io.ReadFull(reader, hdr[:1]); err != nil {
 		return nil, errors.New("failed to read response version").Base(err)
 	}
 
-	if buffer.Byte(0) != request.Version {
-		return nil, errors.New("unexpected response version. Expecting ", int(request.Version), " but actually ", int(buffer.Byte(0)))
+	if hdr[0] != request.Version {
+		return nil, errors.New("unexpected response version. Expecting ", int(request.Version), " but actually ", int(hdr[0]))
 	}
 
 	responseAddons := GetAddons()
-	if err := DecodeHeaderAddons(&buffer, reader, responseAddons); err != nil {
+	if _, err := io.ReadFull(reader, hdr[1:2]); err != nil {
 		PutAddons(responseAddons)
-		return nil, errors.New("failed to decode response header addons").Base(err)
+		return nil, errors.New("failed to decode response header addons").Base(errAddonsProtobufLength)
+	}
+
+	if length := int(hdr[1]); length != 0 {
+		var data [64]byte
+		buf := data[:length]
+		if length > len(data) {
+			buf = make([]byte, length)
+		}
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			PutAddons(responseAddons)
+			return nil, errors.New("failed to decode response header addons").Base(errAddonsProtobufValue)
+		}
+		if err := unmarshalAddons(buf, responseAddons); err != nil {
+			PutAddons(responseAddons)
+			return nil, errors.New("failed to decode response header addons").Base(err)
+		}
 	}
 
 	return responseAddons, nil
