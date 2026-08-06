@@ -95,7 +95,7 @@ func prepareTargets(suites []*benchSuite, targets []string, upstreamPath string)
 				}
 			}
 			for _, rel := range s.Inject[name] {
-				src := filepath.Join(repoRoot, "tools", "benchcompare", filepath.FromSlash(rel))
+				src := filepath.Join(repoRoot, "tools", "benchcompare", "testdata", filepath.FromSlash(rel))
 				dst := filepath.Join(bt.Dir, filepath.FromSlash(s.Pkg), "zz_benchcmp_"+filepath.Base(rel))
 				data, err := os.ReadFile(src)
 				if err != nil {

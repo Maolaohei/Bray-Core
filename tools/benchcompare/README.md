@@ -55,7 +55,7 @@ go run ./tools/benchcompare --cpuprofile --benchtime 5s --count 1   # 热点 pro
 
 ## 扩展场景
 
-三步：1) `benches/<common|bray>/` 加 bench 文件；2) `scenarios.go` 的
+三步：1) `testdata/benches/<common|bray>/` 加 bench 源文件（testdata 目录不会被 `go test ./...` 编译，bench 文件只是注入模板）；2) `scenarios.go` 的
 `defaultSuites()` 加一条（含 Targets/Inject/Remove/可选 BenchTime）；3) 跑 `--suite <name>`。
 注意：注入式 bench 对"一侧有池化回收"的场景会失真（见 dns），需按目标评估生命周期语义。
 
