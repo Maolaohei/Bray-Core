@@ -1,6 +1,7 @@
 package encoding_test
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -131,4 +132,22 @@ func TestMuxRequest(t *testing.T) {
 	if r := cmp.Diff(actualAddons, expectedAddons, cmp.Comparer(addonsComparer)); r != "" {
 		t.Error(r)
 	}
+}
+
+// TestDecodeResponseHeaderLargeAddons guards the stack-buffer fast path in
+// DecodeResponseHeader: addons blobs longer than the 64-byte stack array must
+// fall back to heap allocation, not slice out of range (regression: CI
+// TestVless EOF after a length>64 response addons panicked the server).
+func TestDecodeResponseHeaderLargeAddons(t *testing.T) {
+	req := &protocol.RequestHeader{Version: Version}
+	var encoded bytes.Buffer
+	addons := &Addons{Flow: vless.XRV, Seed: make([]byte, 80)}
+	common.Must(EncodeResponseHeader(&encoded, req, addons))
+
+	decoded, err := DecodeResponseHeader(bytes.NewReader(encoded.Bytes()), req)
+	common.Must(err)
+	if !bytes.Equal(decoded.Seed, addons.Seed) {
+		t.Fatalf("seed mismatch: got %d bytes, want 80", len(decoded.Seed))
+	}
+	PutAddons(decoded)
 }

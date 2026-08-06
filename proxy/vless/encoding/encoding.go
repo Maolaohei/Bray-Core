@@ -175,8 +175,10 @@ func DecodeResponseHeader(reader io.Reader, request *protocol.RequestHeader) (*A
 
 	if length := int(hdr[1]); length != 0 {
 		var data [64]byte
-		buf := data[:length]
-		if length > len(data) {
+		var buf []byte
+		if length <= len(data) {
+			buf = data[:length]
+		} else {
 			buf = make([]byte, length)
 		}
 		if _, err := io.ReadFull(reader, buf); err != nil {
