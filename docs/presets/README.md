@@ -147,7 +147,7 @@ Use `stream-one` + `x-bray-mode-degrade` only if you accept the cascade ladder f
 }
 ```
 
-See `docs/bray-v2-wave2.md` ... `docs/bray-v2-wave6.md`, and full-body `docs/bray-v2-full.md`.
+Wave-by-wave delivery history (wave2–6) and the full-body overview are archived in [`../archive/README.md`](../archive/README.md).
 
 ## Green-zone hardening (default-safe)
 
