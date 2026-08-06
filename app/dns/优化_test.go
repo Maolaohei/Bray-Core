@@ -1,6 +1,8 @@
 package dns_test
 
 import (
+	stdnet "net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -245,15 +247,19 @@ func TestRecordPoolReuse(t *testing.T) {
 }
 
 func TestTCPLocalNameServerWithConnectionPool(t *testing.T) {
-	port := udp.PickPort()
+	// Hold the TCP listener for the whole test so the port can never be stolen
+	// between a probe (listen+close) and Serve. The old udp.PickPort() +
+	// ListenAndServe + fixed 1s sleep had a race window that flaked on
+	// parallel CI runners: "dial tcp ... connectex: actively refused".
+	ln, err := stdnet.Listen("tcp", "127.0.0.1:0")
+	common.Must(err)
+	port := strconv.Itoa(ln.Addr().(*stdnet.TCPAddr).Port)
 
 	dnsServer := dns.Server{
-		Addr:    "127.0.0.1:" + port.String(),
-		Net:     "tcp",
-		Handler: &staticHandler{},
+		Listener: ln,
+		Handler:  &staticHandler{},
 	}
-	go dnsServer.ListenAndServe()
-	time.Sleep(time.Second)
+	go func() { _ = dnsServer.ActivateAndServe() }()
 
 	config := &core.Config{
 		App: []*serial.TypedMessage{
@@ -263,7 +269,7 @@ func TestTCPLocalNameServerWithConnectionPool(t *testing.T) {
 						Address: &net.Endpoint{
 							Network: net.Network_TCP,
 							Address: &net.IPOrDomain{
-								Address: &net.IPOrDomain_Domain{Domain: "tcp+local://127.0.0.1:" + port.String()},
+								Address: &net.IPOrDomain_Domain{Domain: "tcp+local://127.0.0.1:" + port},
 							},
 						},
 					},
