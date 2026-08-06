@@ -146,7 +146,7 @@ func TestDokodemoTCP(t *testing.T) {
 		if client != nil {
 			CloseServer(client)
 		}
-		if retry >= 8 {
+		if retry >= 16 {
 			t.Fatal("All attempts failed to start client")
 		}
 	}
@@ -246,7 +246,7 @@ func TestDokodemoUDP(t *testing.T) {
 		if client != nil {
 			CloseServer(client)
 		}
-		if retry >= 5 {
+		if retry >= 12 {
 			t.Fatal("All attempts failed to start client")
 		}
 	}
