@@ -508,6 +508,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 
 		var bodyPayload []byte
+		bodyPooled := false // true when bodyPayload came from the postBodyPool
 		if dataPlacement == PlacementAuto || dataPlacement == PlacementBody {
 			var readErr error
 			if request.ContentLength > int64(scMaxEachPostBytes) {
@@ -517,9 +518,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			}
 			if request.ContentLength > 0 {
 				bodyLen := int(request.ContentLength)
-				// Allocate once for queue ownership. Avoid pool+clone double copy
-				// on the packet-up hot path (uploadQueue may retain the slice).
-				bodyPayload = make([]byte, bodyLen)
+				// Allocate once for queue ownership (pooled; uploadQueue returns
+				// it after consumption). Avoid pool+clone double copy on the
+				// packet-up hot path (uploadQueue may retain the slice).
+				bodyPayload = allocPostBody(bodyLen)
+				bodyPooled = true
 				// Slow-body guard: a peer may declare a large ContentLength and
 				// drip bytes forever; cap the read with a deadline so a single
 				// request cannot pin a goroutine + buffer indefinitely.
@@ -528,7 +531,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				// Chunked upload: bound both size and rate. ReadFull into a
 				// fixed cap; io.ErrUnexpectedEOF merely means the body ended
 				// before the cap (normal), not an error.
-				bodyPayload = make([]byte, scMaxEachPostBytes+1)
+				bodyPayload = allocPostBody(scMaxEachPostBytes + 1)
+				bodyPooled = true
 				var n int
 				n, readErr = readBodyWithDeadline(writer, request, bodyPayload, 30*time.Second)
 				bodyPayload = bodyPayload[:n]
@@ -537,6 +541,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				}
 			}
 			if readErr != nil {
+				if bodyPooled {
+					freePostBody(bodyPayload)
+				}
 				errors.LogDebug(context.Background(), "failed to read body payload: ", readErr)
 				writer.WriteHeader(http.StatusNotFound)
 				return
@@ -544,6 +551,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 
 		var payload []byte
+		payloadPooled := false
 		switch dataPlacement {
 		case PlacementHeader:
 			payload = headerPayload
@@ -551,23 +559,36 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			payload = cookiePayload
 		case PlacementBody:
 			payload = bodyPayload
+			payloadPooled = bodyPooled
 		case PlacementAuto:
 			totalLen := len(headerPayload) + len(cookiePayload) + len(bodyPayload)
 			// Reject before allocating the merged buffer: a peer that drives
 			// all three channels near scMaxEachPostBytes would otherwise force
 			// a transient 3x+ peak allocation on every oversized POST.
 			if totalLen > scMaxEachPostBytes {
+				if bodyPooled {
+					freePostBody(bodyPayload)
+				}
 				errors.LogDebug(context.Background(), "assembled payload exceeds scMaxEachPostBytes")
 				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
-			payload = make([]byte, 0, totalLen)
-			payload = append(payload, headerPayload...)
+			// Merged buffer is pooled; the body slice is consumed here and
+			// returned immediately (its bytes were copied into payload).
+			payload = allocPostBody(totalLen)
+			payload = append(payload[:0], headerPayload...)
 			payload = append(payload, cookiePayload...)
 			payload = append(payload, bodyPayload...)
+			if bodyPooled {
+				freePostBody(bodyPayload)
+			}
+			payloadPooled = true
 		}
 
 		if len(payload) > scMaxEachPostBytes {
+			if payloadPooled {
+				freePostBody(payload)
+			}
 			errors.LogDebug(context.Background(), "assembled payload exceeds scMaxEachPostBytes")
 			writer.WriteHeader(http.StatusNotFound)
 			return
@@ -575,6 +596,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		seq, err := strconv.ParseUint(seqStr, 10, 64)
 		if err != nil {
+			if payloadPooled {
+				freePostBody(payload)
+			}
 			errors.LogDebug(context.Background(), "invalid packet-up seq")
 			writer.WriteHeader(http.StatusNotFound)
 			return
@@ -585,6 +609,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		err = currentSession.uploadQueue.Push(Packet{
 			Payload: payload,
 			Seq:     seq,
+			Pooled:  payloadPooled,
 		})
 		if err != nil {
 			errors.LogDebug(context.Background(), "failed to upload (PushPayload)")

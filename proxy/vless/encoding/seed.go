@@ -35,10 +35,27 @@ func NewSeed() []byte {
 }
 
 // seedReplay tracks recently accepted seeds (bounded) so an attacker cannot
-// replay a captured header within the acceptance window.
-var seedReplay struct {
+// replay a captured header within the acceptance window. Sharded by seed hash
+// so concurrent header validation (one per new connection) does not serialize
+// on a single global mutex; each shard caps at seedReplayMax/shardCount.
+const seedReplayShards = 64
+
+type seedReplayShard struct {
 	mu   sync.Mutex
 	seen map[[seedLength]byte]int64 // seed -> unix seconds
+}
+
+var seedReplay = [seedReplayShards]seedReplayShard{}
+
+func seedShardIndex(key *[seedLength]byte) int {
+	// Mix both the timestamp half and the random nonce half so seeds with
+	// equal seconds (same timestamp, different nonce) still spread across
+	// shards.
+	h := uint32(0)
+	for _, b := range key {
+		h = h*31 + uint32(b)
+	}
+	return int(h % seedReplayShards)
 }
 
 // ValidateSeed checks length, timestamp window and replay status. A nil seed
@@ -59,25 +76,27 @@ func ValidateSeed(seed []byte) error {
 		return errors.New("seed timestamp out of window")
 	}
 
-	seedReplay.mu.Lock()
-	defer seedReplay.mu.Unlock()
-	if seedReplay.seen == nil {
-		seedReplay.seen = make(map[[seedLength]byte]int64)
+	shard := &seedReplay[seedShardIndex(&key)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if shard.seen == nil {
+		shard.seen = make(map[[seedLength]byte]int64)
 	}
-	if _, dup := seedReplay.seen[key]; dup {
+	if _, dup := shard.seen[key]; dup {
 		return errors.New("seed replay detected")
 	}
-	if len(seedReplay.seen) >= seedReplayMax {
+	perShard := seedReplayMax / seedReplayShards
+	if len(shard.seen) >= perShard {
 		// Capacity bound: drop expired entries (usually all of them).
-		for k, v := range seedReplay.seen {
+		for k, v := range shard.seen {
 			if now-v > window {
-				delete(seedReplay.seen, k)
+				delete(shard.seen, k)
 			}
 		}
-		if len(seedReplay.seen) >= seedReplayMax {
+		if len(shard.seen) >= perShard {
 			return errors.New("seed replay map full")
 		}
 	}
-	seedReplay.seen[key] = now
+	shard.seen[key] = now
 	return nil
 }

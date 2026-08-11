@@ -550,7 +550,8 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 		return errors.New("for safety reasons, user " + account.ID.String() + " is not allowed to use forward proxy")
 	}
 
-	responseAddons := &encoding.Addons{}
+	// No response addons are ever sent by this server: pass nil and let
+	// EncodeResponseHeader use its shared empty addons (no per-request alloc).
 
 	// P0 anti-replay: validate the client seed (timestamp window + replay).
 	// A nil seed is accepted for legacy clients; a bad seed aborts here so a
@@ -621,7 +622,7 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	}
 
 	bufferWriter := buf.NewBufferedWriter(buf.NewWriter(connection))
-	if err := encoding.EncodeResponseHeader(bufferWriter, request, responseAddons); err != nil {
+	if err := encoding.EncodeResponseHeader(bufferWriter, request, nil); err != nil {
 		return errors.New("failed to encode response header").Base(err).AtWarning()
 	}
 	clientWriter := encoding.EncodeBodyAddons(bufferWriter, request, requestAddons, trafficState, false, ctx, connection, nil)

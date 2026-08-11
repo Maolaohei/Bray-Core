@@ -238,21 +238,29 @@ func decodeVarint(data []byte) (uint32, int, error) {
 	return 0, 0, errUnexpectedEndOfVarint
 }
 
+// visionFlowWire is the pre-encoded protobuf bytes for the common
+// Flow="xtls-rprx-vision" addons (0x0a 0x10 + 16 ASCII chars). Package-level
+// and read-only so the per-connection header encode does not allocate a fresh
+// slice every call.
+var visionFlowWire = []byte{0x0a, 0x10,
+	'x', 't', 'l', 's', '-', 'r', 'p', 'r', 'x', '-', 'v', 'i', 's', 'i', 'o', 'n'}
+
 func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
 	switch addons.Flow {
 	case vless.XRV:
-		bytes := marshalAddons(addons)
-		if len(bytes) > 255 {
-			return errors.New("addons payload too large: ", len(bytes), " bytes (max 255)")
-		}
-		if err := buffer.WriteByte(byte(len(bytes))); err != nil {
-			return errors.New("failed to write addons protobuf length").Base(err)
-		}
-		if len(bytes) > 0 {
-			if _, err := buffer.Write(bytes); err != nil {
+		if len(addons.Seed) == 0 {
+			// Fast path: constant wire bytes, no marshal allocation. The
+			// payload is 18 bytes, always within the 255-byte length prefix.
+			if err := buffer.WriteByte(byte(len(visionFlowWire))); err != nil {
+				return errors.New("failed to write addons protobuf length").Base(err)
+			}
+			if _, err := buffer.Write(visionFlowWire); err != nil {
 				return errors.New("failed to write addons protobuf value").Base(err)
 			}
+			return nil
 		}
+		// XRV flow with a seed: fall through to the full marshal (Flow+Seed).
+		fallthrough
 	default:
 		// Serialize non-empty addons for non-XRV flows.
 		if addons.Flow != "" {

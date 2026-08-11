@@ -133,6 +133,11 @@ func DecodeRequestHeader(ctx context.Context, isfb bool, first *buf.Buffer, read
 }
 
 // EncodeResponseHeader writes encoded response header into the given writer.
+// emptyAddons is a shared zero-value Addons for headers carrying no addons
+// payload. EncodeHeaderAddons only reads Flow/Seed and never mutates the
+// struct, so one instance is safe for all callers.
+var emptyAddons = &Addons{}
+
 func EncodeResponseHeader(writer io.Writer, request *protocol.RequestHeader, responseAddons *Addons) error {
 	buffer := buf.StackNew()
 	defer buffer.Release()
@@ -141,6 +146,9 @@ func EncodeResponseHeader(writer io.Writer, request *protocol.RequestHeader, res
 		return errors.New("failed to write response version").Base(err)
 	}
 
+	if responseAddons == nil {
+		responseAddons = emptyAddons
+	}
 	if err := EncodeHeaderAddons(&buffer, responseAddons); err != nil {
 		return errors.New("failed to encode response header addons").Base(err)
 	}
