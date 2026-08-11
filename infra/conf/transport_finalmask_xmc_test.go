@@ -34,3 +34,35 @@ func TestXMCBuildRequiresProfile(t *testing.T) {
 		t.Fatalf("expected required profiles error, got %v", err)
 	}
 }
+
+func TestXMCBuildPasswordTooLong(t *testing.T) {
+	_, err := (&XMC{
+		Password: strings.Repeat("a", 114),
+		Profiles: []XMCProfile{
+			{
+				Username:          "TestUser",
+				UUID:              "00112233-4455-6677-8899-aabbccddeeff",
+				TexturesValue:     "textures-value",
+				TexturesSignature: "textures-signature",
+			},
+		},
+	}).Build()
+	if err == nil || !strings.Contains(err.Error(), "password too long") {
+		t.Fatalf("expected password too long error, got %v", err)
+	}
+
+	// 113 bytes is the exact RSA-1024 limit and must still build.
+	if _, err := (&XMC{
+		Password: strings.Repeat("a", 113),
+		Profiles: []XMCProfile{
+			{
+				Username:          "TestUser",
+				UUID:              "00112233-4455-6677-8899-aabbccddeeff",
+				TexturesValue:     "textures-value",
+				TexturesSignature: "textures-signature",
+			},
+		},
+	}).Build(); err != nil {
+		t.Fatalf("113-byte password should build, got %v", err)
+	}
+}

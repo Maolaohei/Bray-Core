@@ -2011,6 +2011,9 @@ func (c *XMC) Build() (proto.Message, error) {
 	if c.Password == "" {
 		return nil, fmt.Errorf("empty password")
 	}
+	if len(c.Password) > 113 {
+		return nil, fmt.Errorf("password too long: %d bytes (max 113: RSA-1024 PKCS1v15 plaintext is 117 bytes minus 4-byte verify token)", len(c.Password))
+	}
 
 	rsaPrivateKey, err := xmc.DeriveRSAKey(c.Password)
 	if err != nil {
