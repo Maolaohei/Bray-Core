@@ -151,3 +151,22 @@ func TestVerifyPeerCACert(t *testing.T) {
 		t.Fatal("expected to fail verifying leaf cert with incorrect pinned CA hash, but got no error")
 	}
 }
+
+func TestVerifyPeerCACertNoServerName(t *testing.T) {
+	caCert, caHash := cert.MustGenerate(nil, cert.Authority(true), cert.KeyUsage(x509.KeyUsageCertSign))
+	ca := common.Must2(x509.ParseCertificate(caCert.Certificate))
+
+	leafCert, _ := cert.MustGenerate(caCert, cert.DNSNames("example.com"))
+	leaf := common.Must2(x509.ParseCertificate(leafCert.Certificate))
+
+	r := &RandCarrier{
+		Config:               &tls.Config{},
+		PinnedPeerCertSha256: [][]byte{caHash[:]},
+	}
+
+	rawCerts := [][]byte{leaf.Raw, ca.Raw}
+	err := r.verifyPeerCert(rawCerts, nil)
+	if err == nil {
+		t.Fatal("expected to fail verifying pinned CA without ServerName, but got no error")
+	}
+}
