@@ -50,4 +50,3 @@ func TestHistoryEmpty(t *testing.T) {
 		t.Fatal("empty history should return nil Loss")
 	}
 }
-

@@ -187,7 +187,6 @@ func ToDomain(pattern string) (string, error) {
 	return pattern, nil
 }
 
-
 // CompositeMatches flattens the matches slice to produce a single matched indices slice.
 func CompositeMatches(matches [][]uint32) []uint32 {
 	switch len(matches) {
@@ -223,4 +222,3 @@ func CompositeMatchesReverse(matches [][]uint32) []uint32 {
 		return result
 	}
 }
-

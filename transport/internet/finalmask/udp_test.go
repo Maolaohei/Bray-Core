@@ -687,7 +687,6 @@ func TestSudokuBDD(t *testing.T) {
 		}
 	})
 
-
 	t.Run("GivenSudokuMultiTableTCPMask_WhenRoundTrip_ThenPayloadMatches", func(t *testing.T) {
 		cfg := &sudoku.Config{
 			Password:     "sudoku-multi-tcp",
