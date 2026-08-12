@@ -68,20 +68,6 @@ func (p *Pool) IntN(n int) int {
 	}
 }
 
-// Uint8 returns a uniformly-distributed random byte from the pool.
-// Cheaper than IntN(256): no modulo, no rejection loop — just one buffered
-// byte read plus a bounds check. Use this when the caller wants a small
-// power-of-two range (via bitmask) or a raw random byte.
-func (p *Pool) Uint8() uint8 {
-	for {
-		p.ensure()
-		old := p.offset.Add(1) - 1
-		if old < uint32(len(p.buf)) {
-			return p.buf[old]
-		}
-	}
-}
-
 // Uint32 returns a uniformly-distributed random uint32 from the pool.
 // Cheaper than IntN: no modulo-reduction, no rejection loop — just one
 // buffered 4-byte read. Use this when the caller wants a small power-of-two

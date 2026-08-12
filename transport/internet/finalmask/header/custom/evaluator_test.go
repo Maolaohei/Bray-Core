@@ -45,9 +45,15 @@ func TestEvaluatorSliceReturnsWindow(t *testing.T) {
 		},
 	}
 
-	got, err := evaluateTCPSequence(sequence)
-	if err != nil {
-		t.Fatal(err)
+	// Inline the removed evaluateTCPSequence: fold every item through evaluateItem.
+	ctx := newEvalContext()
+	var got []byte
+	for _, item := range sequence.Sequence {
+		value, err := evaluateItem(item.Rand, item.RandMin, item.RandMax, item.Packet, item.Save, item.Var, item.Expr, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, value...)
 	}
 
 	if !bytes.Equal(got, []byte{2, 3}) {

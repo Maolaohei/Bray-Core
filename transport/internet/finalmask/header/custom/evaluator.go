@@ -113,19 +113,6 @@ func measureItem(randLen int32, packet []byte, save, varName string, expr *Expr,
 	return size, nil
 }
 
-func evaluateTCPSequence(sequence *TCPSequence) ([]byte, error) {
-	ctx := newEvalContext()
-	var out []byte
-	for _, item := range sequence.Sequence {
-		value, err := evaluateItem(item.Rand, item.RandMin, item.RandMax, item.Packet, item.Save, item.Var, item.Expr, ctx)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, value...)
-	}
-	return out, nil
-}
-
 func evaluateItem(randLen, randMin, randMax int32, packet []byte, save, varName string, expr *Expr, ctx *evalContext) ([]byte, error) {
 	var value []byte
 	switch {

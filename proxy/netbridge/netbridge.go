@@ -3,7 +3,6 @@ package netbridge
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/xtls/xray-core/common"
@@ -243,8 +242,4 @@ func (w *udpResponseWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 
 func (w *udpResponseWriter) Close() error {
 	return nil
-}
-
-func hex32(v uint32) string {
-	return fmt.Sprintf("%08X", v)
 }

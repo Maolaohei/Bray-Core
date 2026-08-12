@@ -8,24 +8,31 @@ import (
 	. "github.com/xtls/xray-core/common/geodata/strmatcher"
 )
 
+// matcherGroup mirrors the production MatcherGroup interface for benchmark
+// helpers (the production Add* helpers were removed).
+type matcherGroup interface {
+	Match(string) []uint32
+	MatchAny(string) bool
+}
+
 func BenchmarkFullMatcher(b *testing.B) {
 	b.Run("SimpleMatcherGroup------", func(b *testing.B) {
-		benchmarkMatcherType(b, Full, func() MatcherGroup {
+		benchmarkMatcherType(b, Full, func() matcherGroup {
 			return new(SimpleMatcherGroup)
 		})
 	})
 	b.Run("FullMatcherGroup--------", func(b *testing.B) {
-		benchmarkMatcherType(b, Full, func() MatcherGroup {
+		benchmarkMatcherType(b, Full, func() matcherGroup {
 			return NewFullMatcherGroup()
 		})
 	})
 	b.Run("ACAutomationMatcherGroup", func(b *testing.B) {
-		benchmarkMatcherType(b, Full, func() MatcherGroup {
+		benchmarkMatcherType(b, Full, func() matcherGroup {
 			return NewACAutomatonMatcherGroup()
 		})
 	})
 	b.Run("MphMatcherGroup---------", func(b *testing.B) {
-		benchmarkMatcherType(b, Full, func() MatcherGroup {
+		benchmarkMatcherType(b, Full, func() matcherGroup {
 			return NewMphMatcherGroup()
 		})
 	})
@@ -33,22 +40,22 @@ func BenchmarkFullMatcher(b *testing.B) {
 
 func BenchmarkDomainMatcher(b *testing.B) {
 	b.Run("SimpleMatcherGroup------", func(b *testing.B) {
-		benchmarkMatcherType(b, Domain, func() MatcherGroup {
+		benchmarkMatcherType(b, Domain, func() matcherGroup {
 			return new(SimpleMatcherGroup)
 		})
 	})
 	b.Run("DomainMatcherGroup------", func(b *testing.B) {
-		benchmarkMatcherType(b, Domain, func() MatcherGroup {
+		benchmarkMatcherType(b, Domain, func() matcherGroup {
 			return NewDomainMatcherGroup()
 		})
 	})
 	b.Run("ACAutomationMatcherGroup", func(b *testing.B) {
-		benchmarkMatcherType(b, Domain, func() MatcherGroup {
+		benchmarkMatcherType(b, Domain, func() matcherGroup {
 			return NewACAutomatonMatcherGroup()
 		})
 	})
 	b.Run("MphMatcherGroup---------", func(b *testing.B) {
-		benchmarkMatcherType(b, Domain, func() MatcherGroup {
+		benchmarkMatcherType(b, Domain, func() matcherGroup {
 			return NewMphMatcherGroup()
 		})
 	})
@@ -56,17 +63,17 @@ func BenchmarkDomainMatcher(b *testing.B) {
 
 func BenchmarkSubstrMatcher(b *testing.B) {
 	b.Run("SimpleMatcherGroup------", func(b *testing.B) {
-		benchmarkMatcherType(b, Substr, func() MatcherGroup {
+		benchmarkMatcherType(b, Substr, func() matcherGroup {
 			return new(SimpleMatcherGroup)
 		})
 	})
 	b.Run("SubstrMatcherGroup------", func(b *testing.B) {
-		benchmarkMatcherType(b, Substr, func() MatcherGroup {
+		benchmarkMatcherType(b, Substr, func() matcherGroup {
 			return new(SubstrMatcherGroup)
 		})
 	})
 	b.Run("ACAutomationMatcherGroup", func(b *testing.B) {
-		benchmarkMatcherType(b, Substr, func() MatcherGroup {
+		benchmarkMatcherType(b, Substr, func() matcherGroup {
 			return NewACAutomatonMatcherGroup()
 		})
 	})
@@ -74,7 +81,7 @@ func BenchmarkSubstrMatcher(b *testing.B) {
 
 // Utility functions for benchmark
 
-func benchmarkMatcherType(b *testing.B, t Type, ctor func() MatcherGroup) {
+func benchmarkMatcherType(b *testing.B, t Type, ctor func() matcherGroup) {
 	b.Run("Match", func(b *testing.B) {
 		b.Run("Succ", func(b *testing.B) {
 			benchmarkMatch(b, ctor(), map[Type]bool{t: true})
@@ -93,50 +100,83 @@ func benchmarkMatcherType(b *testing.B, t Type, ctor func() MatcherGroup) {
 	})
 }
 
-func benchmarkMatch(b *testing.B, g MatcherGroup, enabledTypes map[Type]bool) {
-	prepareMatchers(g, enabledTypes)
+func benchmarkMatch(b *testing.B, g matcherGroup, enabledTypes map[Type]bool) {
+	prepareMatchers(b, g, enabledTypes)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = g.Match("0.example.com")
 	}
 }
 
-func benchmarkMatchAny(b *testing.B, g MatcherGroup, enabledTypes map[Type]bool) {
-	prepareMatchers(g, enabledTypes)
+func benchmarkMatchAny(b *testing.B, g matcherGroup, enabledTypes map[Type]bool) {
+	prepareMatchers(b, g, enabledTypes)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = g.MatchAny("0.example.com")
 	}
 }
 
-func prepareMatchers(g MatcherGroup, enabledTypes map[Type]bool) {
+// mustAddToGroup adds matcher to a concrete MatcherGroup via static dispatch,
+// replacing the removed AddMatcherToGroup helper.
+func mustAddToGroup(tb testing.TB, g matcherGroup, matcher Matcher, value uint32) {
+	switch g := g.(type) {
+	case *SimpleMatcherGroup:
+		g.AddMatcher(matcher, value)
+	case *FullMatcherGroup:
+		g.AddFullMatcher(matcher.(FullMatcher), value)
+	case *DomainMatcherGroup:
+		g.AddDomainMatcher(matcher.(DomainMatcher), value)
+	case *SubstrMatcherGroup:
+		g.AddSubstrMatcher(matcher.(SubstrMatcher), value)
+	case *ACAutomatonMatcherGroup:
+		switch m := matcher.(type) {
+		case FullMatcher:
+			g.AddFullMatcher(m, value)
+		case DomainMatcher:
+			g.AddDomainMatcher(m, value)
+		case SubstrMatcher:
+			g.AddSubstrMatcher(m, value)
+		default:
+			tb.Fatalf("unsupported matcher %T for ACAutomatonMatcherGroup", matcher)
+		}
+	case *MphMatcherGroup:
+		switch m := matcher.(type) {
+		case FullMatcher:
+			g.AddFullMatcher(m, value)
+		case DomainMatcher:
+			g.AddDomainMatcher(m, value)
+		default:
+			tb.Fatalf("unsupported matcher %T for MphMatcherGroup", matcher)
+		}
+	default:
+		tb.Fatalf("unsupported MatcherGroup type %T", g)
+	}
+}
+
+func prepareMatchers(tb testing.TB, g matcherGroup, enabledTypes map[Type]bool) {
 	for matcherType, hasMatch := range enabledTypes {
 		switch matcherType {
 		case Domain:
 			if hasMatch {
-				AddMatcherToGroup(g, DomainMatcher("example.com"), 0)
+				mustAddToGroup(tb, g, DomainMatcher("example.com"), 0)
 			}
 			for i := 1; i < 1024; i++ {
-				AddMatcherToGroup(g, DomainMatcher(strconv.Itoa(i)+".example.com"), uint32(i))
+				mustAddToGroup(tb, g, DomainMatcher(strconv.Itoa(i)+".example.com"), uint32(i))
 			}
 		case Full:
 			if hasMatch {
-				AddMatcherToGroup(g, FullMatcher("0.example.com"), 0)
+				mustAddToGroup(tb, g, FullMatcher("0.example.com"), 0)
 			}
 			for i := 1; i < 64; i++ {
-				AddMatcherToGroup(g, FullMatcher(strconv.Itoa(i)+".example.com"), uint32(i))
+				mustAddToGroup(tb, g, FullMatcher(strconv.Itoa(i)+".example.com"), uint32(i))
 			}
 		case Substr:
 			if hasMatch {
-				AddMatcherToGroup(g, SubstrMatcher("example.com"), 0)
+				mustAddToGroup(tb, g, SubstrMatcher("example.com"), 0)
 			}
 			for i := 1; i < 4; i++ {
-				AddMatcherToGroup(g, SubstrMatcher(strconv.Itoa(i)+".example.com"), uint32(i))
+				mustAddToGroup(tb, g, SubstrMatcher(strconv.Itoa(i)+".example.com"), uint32(i))
 			}
-		case Regex:
-			matcher, err := Regex.New("^[^.]*$") // Dotless domain matcher automatically inserted in DNS app when "localhost" DNS is used.
-			common.Must(err)
-			AddMatcherToGroup(g, matcher, 0)
 		}
 	}
 	if g, ok := g.(buildable); ok {

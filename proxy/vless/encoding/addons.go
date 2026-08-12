@@ -377,39 +377,6 @@ func (w *MultiLengthPacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	return w.Writer.WriteMultiBuffer(mb2Write)
 }
 
-func NewLengthPacketWriter(writer io.Writer) *LengthPacketWriter {
-	return &LengthPacketWriter{
-		Writer: writer,
-		cache:  make([]byte, 0, 65536),
-	}
-}
-
-type LengthPacketWriter struct {
-	io.Writer
-	cache []byte
-}
-
-func (w *LengthPacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	length := mb.Len() // none of mb is nil
-	// fmt.Println("Write", length)
-	if length == 0 {
-		return nil
-	}
-	defer func() {
-		w.cache = w.cache[:0]
-	}()
-	w.cache = append(w.cache, byte(length>>8), byte(length))
-	for i, b := range mb {
-		w.cache = append(w.cache, b.Bytes()...)
-		b.Release()
-		mb[i] = nil
-	}
-	if _, err := w.Write(w.cache); err != nil {
-		return errors.New("failed to write a packet").Base(err)
-	}
-	return nil
-}
-
 func NewLengthPacketReader(reader io.Reader) *LengthPacketReader {
 	return &LengthPacketReader{
 		Reader: reader,

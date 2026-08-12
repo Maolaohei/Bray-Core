@@ -119,7 +119,6 @@ var (
 	defaultRangeConfigStreamUpSecs         = &RangeConfig{From: 20, To: 80}
 	defaultRangeConfigUplinkChunkCookie    = &RangeConfig{From: 2 * 1024, To: 3 * 1024}
 	defaultRangeConfigUplinkChunkHeader    = &RangeConfig{From: 3 * 1000, To: 4 * 1000}
-	defaultRangeConfigZero                 = &RangeConfig{From: 0, To: 0}
 	defaultRangeConfigXmuxMaxConcurrency   = &RangeConfig{From: 8, To: 16}   // browser-like stream concurrency
 	defaultRangeConfigXmuxMaxConnections   = &RangeConfig{From: 2, To: 4}    // small connection pool
 	defaultRangeConfigXmuxCMaxReuseTimes   = &RangeConfig{From: 64, To: 128} // rotate before endless reuse

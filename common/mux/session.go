@@ -258,11 +258,3 @@ func init() {
 		}
 	}()
 }
-
-func StopXUDPManager() {
-	select {
-	case <-XUDPManager.quit:
-	default:
-		close(XUDPManager.quit)
-	}
-}

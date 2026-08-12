@@ -63,15 +63,6 @@ func MaxFilter[O constraints.Ordered](a, b O) int {
 
 // Compares two values and returns true if the first is less than or equal
 // to the second.
-func MinFilter[O constraints.Ordered](a, b O) int {
-	if a < b {
-		return 1
-	} else if a > b {
-		return -1
-	}
-	return 0
-}
-
 func NewWindowedFilter[V WindowedFilterValue, T WindowedFilterTime](windowLength T, comparator func(V, V) int) *WindowedFilter[V, T] {
 	return &WindowedFilter[V, T]{
 		windowLength: windowLength,

@@ -18,12 +18,6 @@ func HubCapacity(capacity int) HubOption {
 	}
 }
 
-func HubReceiveOriginalDestination(r bool) HubOption {
-	return func(h *Hub) {
-		h.recvOrigDest = r
-	}
-}
-
 type Hub struct {
 	conn         net.PacketConn
 	udpConn      *net.UDPConn

@@ -8,8 +8,6 @@ import (
 
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/features/dns"
-	"github.com/xtls/xray-core/features/outbound"
 )
 
 var (
@@ -23,10 +21,7 @@ type SystemDialer interface {
 	DestIpAddress() net.IP
 }
 
-type DefaultSystemDialer struct {
-	dns dns.Client
-	obm outbound.Manager
-}
+type DefaultSystemDialer struct{}
 
 func resolveSrcAddr(network net.Network, src net.Address) net.Addr {
 	if src == nil || src == net.AnyIP {
@@ -158,28 +153,6 @@ func (c *PacketConnWrapper) Write(p []byte) (int, error) {
 
 func (c *PacketConnWrapper) RemoteAddr() net.Addr {
 	return c.Dest
-}
-
-type SystemDialerAdapter interface {
-	Dial(network string, address string) (net.Conn, error)
-}
-
-type SimpleSystemDialer struct {
-	adapter SystemDialerAdapter
-}
-
-func WithAdapter(dialer SystemDialerAdapter) SystemDialer {
-	return &SimpleSystemDialer{
-		adapter: dialer,
-	}
-}
-
-func (v *SimpleSystemDialer) Dial(ctx context.Context, src net.Address, dest net.Destination, sockopt *SocketConfig) (net.Conn, error) {
-	return v.adapter.Dial(dest.Network.SystemString(), dest.NetAddr())
-}
-
-func (d *SimpleSystemDialer) DestIpAddress() net.IP {
-	return nil
 }
 
 // UseAlternativeSystemDialer replaces the current system dialer with a given one.

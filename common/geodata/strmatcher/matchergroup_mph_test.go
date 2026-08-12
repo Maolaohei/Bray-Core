@@ -62,7 +62,7 @@ func TestMphMatcherGroup(t *testing.T) {
 		mph := NewMphMatcherGroup()
 		matcher, err := test.mType.New(test.pattern)
 		common.Must(err)
-		common.Must(AddMatcherToGroup(mph, matcher, 0))
+		mustAddToGroup(t, mph, matcher, 0)
 		mph.Build()
 		if m := mph.MatchAny(test.input); m != test.output {
 			t.Error("unexpected output: ", m, " for test case ", test)
@@ -90,7 +90,7 @@ func TestMphMatcherGroup(t *testing.T) {
 		for _, test := range cases2Input {
 			matcher, err := test.mType.New(test.pattern)
 			common.Must(err)
-			common.Must(AddMatcherToGroup(mph, matcher, 0))
+			mustAddToGroup(t, mph, matcher, 0)
 		}
 		mph.Build()
 		cases2Output := []struct {
@@ -154,7 +154,7 @@ func TestMphMatcherGroup(t *testing.T) {
 		for _, test := range cases3Input {
 			matcher, err := test.mType.New(test.pattern)
 			common.Must(err)
-			common.Must(AddMatcherToGroup(mph, matcher, 0))
+			mustAddToGroup(t, mph, matcher, 0)
 		}
 		mph.Build()
 		cases3Output := []struct {
@@ -258,7 +258,7 @@ func TestMphMatcherGroupAsIndexMatcher(t *testing.T) {
 	for i, rule := range rules {
 		matcher, err := rule.Type.New(rule.Domain)
 		common.Must(err)
-		common.Must(AddMatcherToGroup(matcherGroup, matcher, uint32(i+3)))
+		mustAddToGroup(t, matcherGroup, matcher, uint32(i+3))
 	}
 	matcherGroup.Build()
 	for _, test := range cases {

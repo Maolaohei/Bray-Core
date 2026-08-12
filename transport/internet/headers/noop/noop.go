@@ -7,19 +7,6 @@ import (
 	"github.com/xtls/xray-core/common"
 )
 
-type NoOpHeader struct{}
-
-func (NoOpHeader) Size() int32 {
-	return 0
-}
-
-// Serialize implements PacketHeader.
-func (NoOpHeader) Serialize([]byte) {}
-
-func NewNoOpHeader(context.Context, interface{}) (interface{}, error) {
-	return NoOpHeader{}, nil
-}
-
 type NoOpConnectionHeader struct{}
 
 func (NoOpConnectionHeader) Client(conn net.Conn) net.Conn {
@@ -35,6 +22,5 @@ func NewNoOpConnectionHeader(context.Context, interface{}) (interface{}, error) 
 }
 
 func init() {
-	common.Must(common.RegisterConfig((*Config)(nil), NewNoOpHeader))
 	common.Must(common.RegisterConfig((*ConnectionConfig)(nil), NewNoOpConnectionHeader))
 }

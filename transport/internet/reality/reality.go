@@ -471,27 +471,3 @@ func addToPoolLocked(paths map[string]pathForms, path string) {
 	}
 	paths[path] = newPathForms(path)
 }
-
-// GetRandomPath returns a random URL path from the Spider path pool for the
-// given serverName. The returned value is one of four pre-computed encodings
-// chosen at random. Returns "/" if the pool is empty. Safe for concurrent use.
-func GetRandomPath(serverName string) string {
-	maps.RLock()
-	paths := maps.maps[serverName]
-	if paths == nil || len(paths) == 0 {
-		maps.RUnlock()
-		return "/"
-	}
-	stopAt := mrand.Intn(len(paths))
-	i := 0
-	for _, forms := range paths {
-		if i == stopAt {
-			result := forms[mrand.Intn(formsLen)]
-			maps.RUnlock()
-			return result
-		}
-		i++
-	}
-	maps.RUnlock()
-	return "/"
-}

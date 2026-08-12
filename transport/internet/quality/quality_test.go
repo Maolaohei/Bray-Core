@@ -36,13 +36,6 @@ func TestMetricOr(t *testing.T) {
 	}
 }
 
-func TestQualityUnknown(t *testing.T) {
-	q := UnknownQuality()
-	if q.Overall != 0 || q.Latency != 0 || q.Loss != 0 || q.Stability != 0 {
-		t.Fatal("unknown quality should be all zeros")
-	}
-}
-
 func TestQualityWeightsXMUX(t *testing.T) {
 	w := DefaultXMUXWeights()
 	q := Quality{Latency: 90, Loss: 20, Stability: 60}
@@ -50,16 +43,6 @@ func TestQualityWeightsXMUX(t *testing.T) {
 	// 90*0.3 + 20*0.4 + 60*0.3 = 27 + 8 + 18 = 53
 	if overall != 53 {
 		t.Fatalf("got %d, want 53", overall)
-	}
-}
-
-func TestQualityWeightsHEv3(t *testing.T) {
-	w := DefaultHEv3Weights()
-	q := Quality{Latency: 90, Loss: 20, Stability: 60}
-	overall := w.ComputeOverall(q)
-	// (90*0.7 + 20*0.3) / 1.0 = 63 + 6 = 69
-	if overall != 69 {
-		t.Fatalf("got %d, want 69", overall)
 	}
 }
 

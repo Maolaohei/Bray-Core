@@ -36,17 +36,6 @@ func xor(b []byte) []byte {
 	return r
 }
 
-func readFrom(conn net.Conn, timeout time.Duration, length int) []byte {
-	b := make([]byte, length)
-	deadline := time.Now().Add(timeout)
-	conn.SetReadDeadline(deadline)
-	n, err := io.ReadFull(conn, b[:length])
-	if err != nil {
-		fmt.Println("Unexpected error from readFrom:", err)
-	}
-	return b[:n]
-}
-
 func readFrom2(conn net.Conn, timeout time.Duration, length int) ([]byte, error) {
 	b := make([]byte, length)
 	deadline := time.Now().Add(timeout)
@@ -63,30 +52,6 @@ func InitializeServerConfigs(configs ...*core.Config) ([]*exec.Cmd, error) {
 
 	for _, config := range configs {
 		server, err := InitializeServerConfig(config)
-		if err != nil {
-			CloseAllServers(servers)
-			return nil, err
-		}
-		servers = append(servers, server)
-	}
-
-	time.Sleep(time.Second * 2)
-
-	return servers, nil
-}
-
-func InitializeServerConfigsWithPprof(pprofPort int, configs ...*core.Config) ([]*exec.Cmd, error) {
-	servers := make([]*exec.Cmd, 0, 10)
-	pprofEnv := []string{fmt.Sprintf("XRAY_PPROF=:%d", pprofPort)}
-
-	for i, config := range configs {
-		var server *exec.Cmd
-		var err error
-		if i == 0 {
-			server, err = InitializeServerConfigWithEnv(config, pprofEnv)
-		} else {
-			server, err = InitializeServerConfig(config)
-		}
 		if err != nil {
 			CloseAllServers(servers)
 			return nil, err

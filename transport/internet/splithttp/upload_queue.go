@@ -23,35 +23,6 @@ type Packet struct {
 	Pooled bool
 }
 
-// PacketPool reuses Packet structs to reduce GC pressure.
-var PacketPool = sync.Pool{
-	New: func() any {
-		return &Packet{}
-	},
-}
-
-func NewPacket(reader io.ReadCloser, payload []byte, seq uint64) *Packet {
-	p := PacketPool.Get().(*Packet)
-	p.Reader = reader
-	p.Payload = payload
-	p.Seq = seq
-	return p
-}
-
-func ReleasePacket(p *Packet) {
-	if p == nil {
-		return
-	}
-	if p.Pooled {
-		freePostBody(p.Payload)
-	}
-	p.Reader = nil
-	p.Payload = nil
-	p.Seq = 0
-	p.Pooled = false
-	PacketPool.Put(p)
-}
-
 // freePacketPayload returns a consumed/aborted packet's pooled payload.
 func freePacketPayload(p *Packet) {
 	if p != nil && p.Pooled && p.Payload != nil {

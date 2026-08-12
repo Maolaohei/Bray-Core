@@ -789,40 +789,6 @@ func parseHeapProfile(text string, topN int) []profileEntry {
 }
 
 // collectCPUTop10 downloads CPU profile from subprocess and uses go tool pprof to get top 10.
-func collectCPUTop10(t *testing.T, pprofAddr string, seconds int) []profileEntry {
-	t.Helper()
-	url := fmt.Sprintf("http://%s/debug/pprof/profile?seconds=%d", pprofAddr, seconds)
-	t.Logf("采集 CPU Profile (%ds)...", seconds)
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Logf("CPU profile 采集失败: %v", err)
-		return nil
-	}
-	defer resp.Body.Close()
-
-	tmpFile, err := os.CreateTemp("", "cpu_*.prof")
-	if err != nil {
-		t.Logf("创建临时文件失败: %v", err)
-		return nil
-	}
-	defer os.Remove(tmpFile.Name())
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
-		tmpFile.Close()
-		t.Logf("写入 CPU profile 失败: %v", err)
-		return nil
-	}
-	tmpFile.Close()
-
-	cmd := exec.Command("go", "tool", "pprof", "-top", "-nodecount=10", "-cum", tmpFile.Name())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("go tool pprof 失败: %v\n%s", err, out)
-		return nil
-	}
-
-	return parsePPofTopOutput(string(out))
-}
-
 // parsePPofTopOutput parses `go tool pprof -top` text output into profileEntry slice.
 func parsePPofTopOutput(text string) []profileEntry {
 	lines := strings.Split(text, "\n")

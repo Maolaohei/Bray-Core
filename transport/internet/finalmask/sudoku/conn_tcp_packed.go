@@ -104,14 +104,6 @@ func (d *packedStreamDecoder) reset() {
 	d.bitCount = 0
 }
 
-func NewPackedTCPConn(raw net.Conn, config *Config) (net.Conn, error) {
-	reader, writer, err := newPackedReaderWriter(raw, config)
-	if err != nil {
-		return nil, err
-	}
-	return newWrappedConn(raw, reader, writer), nil
-}
-
 func newPackedReaderWriter(raw net.Conn, config *Config) (io.Reader, io.Writer, error) {
 	tables, err := getTables(config)
 	if err != nil {

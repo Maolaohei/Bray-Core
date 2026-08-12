@@ -143,14 +143,6 @@ func (c *wrappedConn) CloseWrite() error {
 	return net.ErrClosed
 }
 
-func NewTCPConn(raw net.Conn, config *Config) (net.Conn, error) {
-	reader, writer, err := newPureReaderWriter(raw, config)
-	if err != nil {
-		return nil, err
-	}
-	return newWrappedConn(raw, reader, writer), nil
-}
-
 func newPureReaderWriter(raw net.Conn, config *Config) (io.Reader, io.Writer, error) {
 	tables, err := getTables(config)
 	if err != nil {

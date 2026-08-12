@@ -59,7 +59,7 @@ func TestSimpleMatcherSet(t *testing.T) {
 	for _, entry := range patterns {
 		matcher, err := entry.mType.New(entry.pattern)
 		common.Must(err)
-		common.Must(AddMatcherToSet(matcherSet, matcher))
+		matcherSet.AddMatcher(matcher)
 	}
 	for _, test := range cases {
 		if r := matcherSet.MatchAny(test.input); !reflect.DeepEqual(r, test.output) {

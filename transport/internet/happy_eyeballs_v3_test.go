@@ -105,13 +105,13 @@ func TestHappyIPRecord_EWMA(t *testing.T) {
 }
 
 func TestHappyIPDB_Concurrent(t *testing.T) {
-	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord), stringRecords: make(map[string]*HappyIPRecord)}
+	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord)}
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := db.get("1.2.3.4")
+			r := db.getByIP(net.ParseIP("1.2.3.4"))
 			r.recordSuccess(10 * time.Millisecond)
 		}()
 	}
@@ -225,8 +225,8 @@ func TestGlobalHappyIPDB(t *testing.T) {
 	if globalHappyIPDB == nil {
 		t.Fatal("globalHappyIPDB is nil")
 	}
-	r1 := globalHappyIPDB.get("test-ip-1")
-	r2 := globalHappyIPDB.get("test-ip-1")
+	r1 := globalHappyIPDB.getByIP(net.ParseIP("1.2.3.4"))
+	r2 := globalHappyIPDB.getByIP(net.ParseIP("1.2.3.4"))
 	if r1 != r2 {
 		t.Error("same IP should return same record")
 	}

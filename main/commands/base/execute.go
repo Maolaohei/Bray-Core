@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 )
 
@@ -73,16 +72,4 @@ BigCmdLoop:
 		SetExitStatus(2)
 		Exit()
 	}
-}
-
-// Sort sorts the commands
-func Sort() {
-	sort.Slice(RootCommand.Commands, func(i, j int) bool {
-		return SortLessFunc(RootCommand.Commands[i], RootCommand.Commands[j])
-	})
-}
-
-// SortLessFunc used for sort commands list, can be override from outside
-var SortLessFunc = func(i, j *Command) bool {
-	return i.Name() < j.Name()
 }

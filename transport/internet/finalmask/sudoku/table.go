@@ -28,7 +28,6 @@ type tableCacheKey struct {
 }
 
 var (
-	tableCache    sync.Map
 	tableSetCache sync.Map
 
 	basePatternsOnce sync.Once
@@ -52,17 +51,6 @@ func (l *byteLayout) isHint(b byte) bool {
 	}
 	// ASCII layout maps 0x7f to '\n' to avoid DEL on the wire.
 	return l.hintMask == 0x40 && b == '\n'
-}
-
-func getTable(config *Config) (*table, error) {
-	tables, err := getTables(config)
-	if err != nil {
-		return nil, err
-	}
-	if len(tables) == 0 {
-		return nil, fmt.Errorf("empty sudoku table set")
-	}
-	return tables[0], nil
 }
 
 func getTables(config *Config) ([]*table, error) {

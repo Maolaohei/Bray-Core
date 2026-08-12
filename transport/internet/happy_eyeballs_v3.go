@@ -155,11 +155,6 @@ func (r *HappyIPRecord) getFailureRate() float64 {
 func (r *HappyIPRecord) getSmoothedRTT() int64 { return r.smoothedRTT.Load() }
 func (r *HappyIPRecord) getLoss() int64        { return r.lastLoss.Load() }
 
-// UpdateLoss sets the loss rate from TransportProfile (0-10000 fixed-point).
-func (r *HappyIPRecord) UpdateLoss(lossRate int64) {
-	r.lastLoss.Store(lossRate)
-}
-
 func (r *HappyIPRecord) recordSuccess(rtt time.Duration) {
 	r.lastSeen.Store(time.Now().Unix())
 	// Update EWMA failure rate: rate *= 0.95 (decays toward 0)
@@ -224,21 +219,11 @@ func ipToKey(ip net.IP) (ipKey, bool) {
 	return k, true
 }
 
-func ipKeyString(k ipKey) string {
-	if k.family == 4 {
-		return net.IP(k.addr[:4]).String()
-	}
-	return net.IP(k.addr[:]).String()
-}
-
 // HappyIPDB is the global database for per-IP historical metrics.
 type HappyIPDB struct {
 	mu      sync.RWMutex
 	records map[ipKey]*HappyIPRecord
-	// legacy string map kept only for test helpers that still use textual keys
-	// via getString; production dial paths use getByIP / lookupByIP.
-	stringRecords map[string]*HappyIPRecord
-	quit          chan struct{}
+	quit    chan struct{}
 }
 
 const (
@@ -249,64 +234,12 @@ const (
 )
 
 var globalHappyIPDB = &HappyIPDB{
-	records:       make(map[ipKey]*HappyIPRecord),
-	stringRecords: make(map[string]*HappyIPRecord),
-	quit:          make(chan struct{}),
+	records: make(map[ipKey]*HappyIPRecord),
+	quit:    make(chan struct{}),
 }
 
 func init() {
 	go globalHappyIPDB.cleanupLoop()
-}
-
-// get is the compatibility entry for string keys (tests / callers that already
-// have a textual IP). Prefer getByIP on dial hot paths.
-func (db *HappyIPDB) get(ip string) *HappyIPRecord {
-	// Fast path: textual cache hit (avoids ParseIP on repeated lookups).
-	db.mu.RLock()
-	if r, ok := db.stringRecords[ip]; ok {
-		db.mu.RUnlock()
-		return r
-	}
-	db.mu.RUnlock()
-
-	if parsed := net.ParseIP(ip); parsed != nil {
-		r := db.getByIP(parsed)
-		if r == nil {
-			return nil
-		}
-		// Write-through cache so subsequent get(string) stays O(map).
-		db.mu.Lock()
-		if existing, ok := db.stringRecords[ip]; ok {
-			db.mu.Unlock()
-			return existing
-		}
-		db.stringRecords[ip] = r
-		db.mu.Unlock()
-		return r
-	}
-
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if r, ok := db.stringRecords[ip]; ok {
-		return r
-	}
-	r := &HappyIPRecord{}
-	r.lastSeen.Store(time.Now().Unix())
-	db.stringRecords[ip] = r
-	return r
-}
-
-// lookupByIP returns an existing record without creating one.
-// Used by scoreIPs so first-time A/AAAA answers do not write the global map.
-func (db *HappyIPDB) lookupByIP(ip net.IP) *HappyIPRecord {
-	k, ok := ipToKey(ip)
-	if !ok {
-		return nil
-	}
-	db.mu.RLock()
-	r := db.records[k]
-	db.mu.RUnlock()
-	return r
 }
 
 // getByIP returns (and creates if needed) the record for ip.
@@ -358,11 +291,6 @@ func (db *HappyIPDB) cleanup() {
 	for ip, record := range db.records {
 		if record.lastSeen.Load() < cutoff {
 			delete(db.records, ip)
-		}
-	}
-	for ip, record := range db.stringRecords {
-		if record.lastSeen.Load() < cutoff {
-			delete(db.stringRecords, ip)
 		}
 	}
 }

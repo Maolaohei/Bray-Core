@@ -26,14 +26,6 @@ func ReadFile(path string) ([]byte, error) {
 	return buf.ReadAllToBytes(reader)
 }
 
-func ReadAsset(file string) ([]byte, error) {
-	path, _, err := getAssetFileLocation(file)
-	if err != nil {
-		return nil, err
-	}
-	return ReadFile(path)
-}
-
 func OpenAsset(file string) (io.ReadCloser, error) {
 	path, _, err := getAssetFileLocation(file)
 	if err != nil {
@@ -76,19 +68,4 @@ func ReadCert(file string) ([]byte, error) {
 		return ReadFile(file)
 	}
 	return ReadFile(platform.GetCertLocation(file))
-}
-
-func CopyFile(dst string, src string) error {
-	bytes, err := ReadFile(src)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_, err = f.Write(bytes)
-	return err
 }

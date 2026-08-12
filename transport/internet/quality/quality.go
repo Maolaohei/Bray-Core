@@ -11,11 +11,6 @@ type Quality struct {
 	Stability uint8
 }
 
-// UnknownQuality returns a Quality with all zeros and no valid data.
-func UnknownQuality() Quality {
-	return Quality{}
-}
-
 // QualityWeights defines how sub-scores are combined into an Overall score.
 // Different modules use different weights:
 //   - XMUX:   Latency=0.3, Loss=0.4, Stability=0.3
@@ -33,24 +28,6 @@ func DefaultXMUXWeights() QualityWeights {
 		LatencyWeight:   0.3,
 		LossWeight:      0.4,
 		StabilityWeight: 0.3,
-	}
-}
-
-// DefaultHEv3Weights returns the default quality weights for Happy Eyeballs v3.
-func DefaultHEv3Weights() QualityWeights {
-	return QualityWeights{
-		LatencyWeight:   0.7,
-		LossWeight:      0.3,
-		StabilityWeight: 0.0,
-	}
-}
-
-// DefaultWarmupWeights returns the default quality weights for Warmup.
-func DefaultWarmupWeights() QualityWeights {
-	return QualityWeights{
-		LatencyWeight:   0.5,
-		LossWeight:      0.5,
-		StabilityWeight: 0.0,
 	}
 }
 

@@ -1,33 +1,14 @@
 package singbridge
 
 import (
-	"context"
 	"time"
 
 	B "github.com/sagernet/sing/common/buf"
-	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
-	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/signal"
-	"github.com/xtls/xray-core/transport"
 )
-
-func CopyPacketConn(ctx context.Context, inboundConn net.Conn, link *transport.Link, destination net.Destination, serverConn net.PacketConn) error {
-	cancel := func() {
-		common.Interrupt(link.Reader)
-		common.Interrupt(serverConn)
-	}
-	conn := &PacketConnWrapper{
-		Reader: link.Reader,
-		Writer: link.Writer,
-		Dest:   destination,
-		Conn:   inboundConn,
-		T:      signal.CancelAfterInactivity(ctx, cancel, 300*time.Second),
-	}
-	return ReturnError(bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(serverConn)))
-}
 
 type PacketConnWrapper struct {
 	buf.Reader

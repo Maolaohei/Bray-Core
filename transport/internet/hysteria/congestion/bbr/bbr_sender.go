@@ -275,13 +275,6 @@ type bbrSender struct {
 	endRecoveryAt congestion.PacketNumber
 	// A window used to limit the number of bytes in flight during loss recovery.
 	recoveryWindow congestion.ByteCount
-	// If true, consider all samples in recovery app-limited.
-	isAppLimitedRecovery bool // not used
-
-	// When true, pace at 1.5x and disable packet conservation in STARTUP.
-	slowerStartup bool // not used
-	// When true, disables packet conservation in STARTUP.
-	rateBasedStartup bool // not used
 
 	// When true, add the most recent ack aggregation measurement during STARTUP.
 	enableAckAggregationDuringStartup bool
@@ -645,14 +638,6 @@ func (b *bbrSender) PacingRate() Bandwidth {
 	}
 
 	return b.pacingRate
-}
-
-// Sets the CWND gain used in STARTUP.  Must be greater than 1.
-func (b *bbrSender) setHighCwndGain(highCwndGain float64) {
-	b.highCwndGain = highCwndGain
-	if b.mode == bbrModeStartup {
-		b.congestionWindowGain = highCwndGain
-	}
 }
 
 // Get the current bandwidth estimate. Note that Bandwidth is in bits per second.

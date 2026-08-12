@@ -1,7 +1,6 @@
 package conf
 
 import (
-	"encoding/json"
 	"strings"
 
 	"github.com/xtls/xray-core/common/serial"
@@ -150,76 +149,4 @@ func lookupBrayHeader(headers map[string]string, key string) string {
 		}
 	}
 	return ""
-}
-
-// extractVLESSUUIDFromRawSettings is a lightweight pre-Build helper used when
-// only JSON settings are available (kept for tests).
-func extractVLESSUUIDFromRawSettings(settings []byte, isOutbound bool) []string {
-	if len(settings) == 0 {
-		return nil
-	}
-	if isOutbound {
-		var c VLessOutboundConfig
-		if err := json.Unmarshal(settings, &c); err != nil {
-			return nil
-		}
-		ids := make([]string, 0, 1)
-		if c.Id != "" {
-			if u, err := uuid.ParseString(c.Id); err == nil {
-				ids = append(ids, strings.ToLower(u.String()))
-			}
-		}
-		for _, rec := range c.Vnext {
-			for _, raw := range rec.Users {
-				var acc struct {
-					Id string `json:"id"`
-				}
-				if json.Unmarshal(raw, &acc) == nil && acc.Id != "" {
-					if u, err := uuid.ParseString(acc.Id); err == nil {
-						ids = append(ids, strings.ToLower(u.String()))
-					}
-				}
-			}
-		}
-		return uniqueStrings(ids)
-	}
-	var c VLessInboundConfig
-	if err := json.Unmarshal(settings, &c); err != nil {
-		return nil
-	}
-	users := c.Users
-	if c.Clients != nil {
-		users = c.Clients
-	}
-	ids := make([]string, 0, len(users))
-	for _, raw := range users {
-		var acc struct {
-			Id string `json:"id"`
-		}
-		if json.Unmarshal(raw, &acc) == nil && acc.Id != "" {
-			if u, err := uuid.ParseString(acc.Id); err == nil {
-				ids = append(ids, strings.ToLower(u.String()))
-			}
-		}
-	}
-	return uniqueStrings(ids)
-}
-
-func uniqueStrings(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
 }

@@ -46,7 +46,7 @@ func TestFullMatcherSet(t *testing.T) {
 	}
 	s := NewFullMatcherSet()
 	for _, pattern := range patterns {
-		AddMatcherToSet(s, FullMatcher(pattern.Pattern))
+		s.AddFullMatcher(FullMatcher(pattern.Pattern))
 	}
 	for _, testCase := range testCases {
 		r := s.MatchAny(testCase.Domain)

@@ -62,7 +62,7 @@ func TestACAutomatonMatcherGroup(t *testing.T) {
 		ac := NewACAutomatonMatcherGroup()
 		matcher, err := test.mType.New(test.pattern)
 		common.Must(err)
-		common.Must(AddMatcherToGroup(ac, matcher, 0))
+		mustAddToGroup(t, ac, matcher, 0)
 		ac.Build()
 		if m := ac.MatchAny(test.input); m != test.output {
 			t.Error("unexpected output: ", m, " for test case ", test)
@@ -98,7 +98,7 @@ func TestACAutomatonMatcherGroup(t *testing.T) {
 		for _, test := range cases2Input {
 			matcher, err := test.mType.New(test.pattern)
 			common.Must(err)
-			common.Must(AddMatcherToGroup(ac, matcher, 0))
+			mustAddToGroup(t, ac, matcher, 0)
 		}
 		ac.Build()
 		cases2Output := []struct {
@@ -163,7 +163,7 @@ func TestACAutomatonMatcherGroup(t *testing.T) {
 		for _, test := range cases3Input {
 			matcher, err := test.mType.New(test.pattern)
 			common.Must(err)
-			common.Must(AddMatcherToGroup(ac, matcher, 0))
+			mustAddToGroup(t, ac, matcher, 0)
 		}
 		ac.Build()
 		cases3Output := []struct {
@@ -200,7 +200,7 @@ func TestACAutomatonMatcherGroup(t *testing.T) {
 		for _, test := range cases4Input {
 			matcher, err := test.mType.New(test.pattern)
 			common.Must(err)
-			common.Must(AddMatcherToGroup(ac, matcher, 0))
+			mustAddToGroup(t, ac, matcher, 0)
 		}
 		ac.Build()
 		cases4Output := []struct {
@@ -267,7 +267,7 @@ func TestACAutomatonMatcherGroupSubstr(t *testing.T) {
 	for id, entry := range patterns {
 		matcher, err := entry.mType.New(entry.pattern)
 		common.Must(err)
-		common.Must(AddMatcherToGroup(matcherGroup, matcher, uint32(id)))
+		mustAddToGroup(t, matcherGroup, matcher, uint32(id))
 	}
 	matcherGroup.Build()
 	for _, test := range cases {
@@ -354,7 +354,7 @@ func TestACAutomatonMatcherGroupAsIndexMatcher(t *testing.T) {
 	for i, rule := range rules {
 		matcher, err := rule.Type.New(rule.Domain)
 		common.Must(err)
-		common.Must(AddMatcherToGroup(matcherGroup, matcher, uint32(i+2)))
+		mustAddToGroup(t, matcherGroup, matcher, uint32(i+2))
 	}
 	matcherGroup.Build()
 	for _, test := range cases {

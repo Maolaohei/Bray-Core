@@ -6,47 +6,10 @@ import (
 	"encoding/pem"
 	"io"
 	"net/http"
-	"os"
 
 	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/platform/filesystem"
 	"golang.org/x/crypto/ocsp"
 )
-
-func GetOCSPForFile(path string) ([]byte, error) {
-	return filesystem.ReadFile(path)
-}
-
-func CheckOCSPFileIsNotExist(path string) bool {
-	_, err := os.Stat(path)
-	if err != nil {
-		return os.IsNotExist(err)
-	}
-	return false
-}
-
-func GetOCSPStapling(cert [][]byte, path string) ([]byte, error) {
-	ocspData, err := GetOCSPForFile(path)
-	if err != nil {
-		ocspData, err = GetOCSPForCert(cert)
-		if err != nil {
-			return nil, err
-		}
-		if !CheckOCSPFileIsNotExist(path) {
-			err = os.Remove(path)
-			if err != nil {
-				return nil, err
-			}
-		}
-		newFile, err := os.Create(path)
-		if err != nil {
-			return nil, err
-		}
-		newFile.Write(ocspData)
-		defer newFile.Close()
-	}
-	return ocspData, nil
-}
 
 func GetOCSPForCert(cert [][]byte) ([]byte, error) {
 	bundle := new(bytes.Buffer)

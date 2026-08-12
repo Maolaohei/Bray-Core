@@ -15,7 +15,7 @@ func TestPaddingTurnReachesFinalTargetLength(t *testing.T) {
 	turn := paddingTurn{direction: paddingClientToServer, minLength: 128, maxLength: 128}
 	const prefixLength = 3
 	var encoded bytes.Buffer
-	if err := writePaddingTurn(&encoded, turn, prefixLength); err != nil {
+	if err := writePaddingTurnWithBuffer(&encoded, turn, prefixLength, time.Sleep, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := prefixLength + encoded.Len(); got != turn.minLength {
@@ -37,7 +37,7 @@ func TestPaddingTurnReachesFinalTargetLength(t *testing.T) {
 func TestPaddingTurnSupportsThreeByteTarget(t *testing.T) {
 	turn := paddingTurn{direction: paddingClientToServer, minLength: 3, maxLength: 3}
 	var encoded bytes.Buffer
-	if err := writePaddingTurn(&encoded, turn, 0); err != nil {
+	if err := writePaddingTurnWithBuffer(&encoded, turn, 0, time.Sleep, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := encoded.Len(); got != 3 {
@@ -53,7 +53,7 @@ func TestPaddingTurnVarintBoundaries(t *testing.T) {
 		t.Run(strconv.Itoa(targetLength), func(t *testing.T) {
 			turn := paddingTurn{direction: paddingClientToServer, minLength: targetLength, maxLength: targetLength}
 			var encoded bytes.Buffer
-			if err := writePaddingTurn(&encoded, turn, 0); err != nil {
+			if err := writePaddingTurnWithBuffer(&encoded, turn, 0, time.Sleep, nil); err != nil {
 				t.Fatal(err)
 			}
 			if encoded.Len() != targetLength {
@@ -71,7 +71,7 @@ func TestPaddingTurnRandomRange(t *testing.T) {
 	seen := make(map[int]bool)
 	for range 100 {
 		var encoded bytes.Buffer
-		if err := writePaddingTurn(&encoded, turn, 0); err != nil {
+		if err := writePaddingTurnWithBuffer(&encoded, turn, 0, time.Sleep, nil); err != nil {
 			t.Fatal(err)
 		}
 		if encoded.Len() < turn.minLength || encoded.Len() > turn.maxLength {
@@ -95,7 +95,7 @@ func TestPaddingTurnUsesRestrictedSendRange(t *testing.T) {
 	seen := make(map[int]bool)
 	for range 100 {
 		var encoded bytes.Buffer
-		if err := writePaddingTurn(&encoded, turn, 0); err != nil {
+		if err := writePaddingTurnWithBuffer(&encoded, turn, 0, time.Sleep, nil); err != nil {
 			t.Fatal(err)
 		}
 		if encoded.Len() < turn.sendMinLength || encoded.Len() > turn.sendMaxLength {
@@ -141,7 +141,7 @@ func TestPaddingScheduleSynchronizesDirections(t *testing.T) {
 func TestReadPaddingTurnHandlesFragmentedInput(t *testing.T) {
 	turn := paddingTurn{direction: paddingClientToServer, minLength: 1024, maxLength: 1024}
 	var encoded bytes.Buffer
-	if err := writePaddingTurn(&encoded, turn, 0); err != nil {
+	if err := writePaddingTurnWithBuffer(&encoded, turn, 0, time.Sleep, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := readPaddingTurn(&oneByteReader{reader: bytes.NewReader(encoded.Bytes())}, turn, 0); err != nil {
@@ -383,7 +383,7 @@ func TestPaddingSchedule2612MatchesCapturedTemplates(t *testing.T) {
 		turn := paddingSchedule2612[3]
 		turn.sendVariants = []int{variantIndex}
 		var encoded bytes.Buffer
-		if err = writePaddingTurnWithSleep(&encoded, turn, 0, func(time.Duration) {}); err != nil {
+		if err = writePaddingTurnWithBuffer(&encoded, turn, 0, func(time.Duration) {}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err = readPaddingTurn(bytes.NewReader(encoded.Bytes()), paddingSchedule2612[3], 0); err != nil {
@@ -407,7 +407,7 @@ func TestPaddingVariantPreservesWriteBoundaries(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var writer recordingWriter
-			if err := writePaddingTurnWithSleep(&writer, test.turn, test.prefix, func(time.Duration) {}); err != nil {
+			if err := writePaddingTurnWithBuffer(&writer, test.turn, test.prefix, func(time.Duration) {}, nil); err != nil {
 				t.Fatal(err)
 			}
 			if len(writer.writes) != len(test.want) {
@@ -440,9 +440,9 @@ func TestPaddingVariantAppliesPacing(t *testing.T) {
 	}
 	var slept []time.Duration
 	var writer recordingWriter
-	if err := writePaddingTurnWithSleep(&writer, turn, 3, func(delay time.Duration) {
+	if err := writePaddingTurnWithBuffer(&writer, turn, 3, func(delay time.Duration) {
 		slept = append(slept, delay)
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []time.Duration{3 * time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond}
@@ -466,9 +466,9 @@ func TestGeneratedPaddingChunksApplyPacing(t *testing.T) {
 	}
 	var slept []time.Duration
 	var writer recordingWriter
-	if err := writePaddingTurnWithSleep(&writer, turn, 0, func(delay time.Duration) {
+	if err := writePaddingTurnWithBuffer(&writer, turn, 0, func(delay time.Duration) {
 		slept = append(slept, delay)
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	wantWrites := []int{32, 32, 32, 4}
@@ -495,7 +495,7 @@ func TestGeneratedPaddingChunkLengthIsRandomized(t *testing.T) {
 	seen := make(map[int]bool)
 	for range 100 {
 		var writer recordingWriter
-		if err := writePaddingTurnWithSleep(&writer, turn, 0, func(time.Duration) {}); err != nil {
+		if err := writePaddingTurnWithBuffer(&writer, turn, 0, func(time.Duration) {}, nil); err != nil {
 			t.Fatal(err)
 		}
 		firstWrite := writer.writes[0]

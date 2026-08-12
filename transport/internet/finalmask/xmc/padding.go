@@ -128,14 +128,6 @@ func validatePaddingSchedule(schedule []paddingTurn, firstTurnPrefixLength int) 
 	return nil
 }
 
-func writePaddingTurn(w io.Writer, turn paddingTurn, prefixLength int) error {
-	return writePaddingTurnWithSleep(w, turn, prefixLength, time.Sleep)
-}
-
-func writePaddingTurnWithSleep(w io.Writer, turn paddingTurn, prefixLength int, sleep func(time.Duration)) error {
-	return writePaddingTurnWithBuffer(w, turn, prefixLength, sleep, nil)
-}
-
 func writePaddingTurnWithBuffer(w io.Writer, turn paddingTurn, prefixLength int, sleep func(time.Duration), reusableBuffer *[]byte) error {
 	startDelay, err := randomPaddingDelay(turn.startDelay)
 	if err != nil {

@@ -97,3 +97,12 @@ test_client.json
 test_server.json
 testing/mem_alloc_flame.png
 testing/mem_alloc_flame.svg
+
+# Local scratch / cache dirs (housekeeping)
+.gotmp/
+.gocache/
+.gomodcache/
+.codex-tmp/
+.tmp-perf/
+bench_results/run_*/
+scripts/__pycache__/

@@ -42,7 +42,6 @@ type pipe struct {
 
 var (
 	errBufferFull = errors.New("buffer full")
-	errSlowDown   = errors.New("slow down")
 )
 
 func (p *pipe) Len() int32 {

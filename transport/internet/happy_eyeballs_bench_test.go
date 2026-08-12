@@ -99,33 +99,33 @@ func BenchmarkHappyIPRecord_ConcurrentRecordSuccess(b *testing.B) {
 
 // BenchmarkHappyIPDB_Get measures IP record lookup throughput.
 func BenchmarkHappyIPDB_Get(b *testing.B) {
-	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord), stringRecords: make(map[string]*HappyIPRecord)}
+	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord)}
 	// Pre-populate
 	for i := 0; i < 100; i++ {
-		ip := net.IPv4(10, 0, byte(i/256), byte(i%256)).String()
-		db.get(ip).recordSuccess(50 * time.Millisecond)
+		ip := net.IPv4(10, 0, byte(i/256), byte(i%256))
+		db.getByIP(ip).recordSuccess(50 * time.Millisecond)
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.get("10.0.0.1")
+		db.getByIP(net.ParseIP("10.0.0.1"))
 	}
 }
 
 // BenchmarkHappyIPDB_GetParallel measures concurrent IP record lookup.
 func BenchmarkHappyIPDB_GetParallel(b *testing.B) {
-	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord), stringRecords: make(map[string]*HappyIPRecord)}
+	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord)}
 	for i := 0; i < 100; i++ {
-		ip := net.IPv4(10, 0, byte(i/256), byte(i%256)).String()
-		db.get(ip).recordSuccess(50 * time.Millisecond)
+		ip := net.IPv4(10, 0, byte(i/256), byte(i%256))
+		db.getByIP(ip).recordSuccess(50 * time.Millisecond)
 	}
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			ip := net.IPv4(10, 0, 0, byte(i%100)).String()
-			r := db.get(ip)
+			ip := net.IPv4(10, 0, 0, byte(i%100))
+			r := db.getByIP(ip)
 			r.recordSuccess(time.Duration(i%200) * time.Millisecond)
 			i++
 		}
@@ -248,12 +248,12 @@ func BenchmarkHappyIPScore_ScoreWithHighFailRate(b *testing.B) {
 
 // BenchmarkHappyIPRecord_Cleanup measures IP record cleanup throughput.
 func BenchmarkHappyIPRecord_Cleanup(b *testing.B) {
-	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord), stringRecords: make(map[string]*HappyIPRecord)}
+	db := &HappyIPDB{records: make(map[ipKey]*HappyIPRecord)}
 
 	// Pre-populate with old records
 	for i := 0; i < 1000; i++ {
-		ip := net.IPv4(byte(10), byte(i/65536), byte(i/256), byte(i%256)).String()
-		r := db.get(ip)
+		ip := net.IPv4(byte(10), byte(i/65536), byte(i/256), byte(i%256))
+		r := db.getByIP(ip)
 		r.recordSuccess(50 * time.Millisecond)
 		r.lastSeen.Store(time.Now().Unix() - 20*60) // 20 minutes ago
 	}

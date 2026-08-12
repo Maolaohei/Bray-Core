@@ -22,8 +22,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type serviceHandler func(ctx context.Context, conn *grpc.ClientConn, cmd *base.Command, args []string) string
-
 var (
 	apiServerAddrPtr string
 	apiTimeout       int

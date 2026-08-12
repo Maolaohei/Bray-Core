@@ -320,14 +320,6 @@ func (m *clientManager) clean() {
 	}
 }
 
-func (m *clientManager) stop() {
-	select {
-	case <-m.quit:
-	default:
-		close(m.quit)
-	}
-}
-
 var (
 	manager     *clientManager
 	initmanager sync.Once

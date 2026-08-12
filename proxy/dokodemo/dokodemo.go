@@ -63,12 +63,6 @@ func (d *DokodemoDoor) Network() []net.Network {
 	return d.config.AllowedNetworks
 }
 
-func (d *DokodemoDoor) policy() policy.Session {
-	config := d.config
-	p := d.policyManager.ForLevel(config.UserLevel)
-	return p
-}
-
 // Process implements proxy.Inbound.
 func (d *DokodemoDoor) Process(ctx context.Context, network net.Network, conn stat.Connection, dispatcher routing.Dispatcher) error {
 	errors.LogDebug(ctx, "processing connection from: ", conn.RemoteAddr())

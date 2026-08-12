@@ -3,7 +3,6 @@ package tun
 import (
 	"context"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -73,24 +72,6 @@ func (updater *InterfaceUpdater) Update() {
 
 	updater.iface = got
 	errors.LogInfo(context.Background(), "[tun] update interface ", got.Name, " ", got.Index)
-}
-
-func score(iface *net.Interface, addrs []net.Addr) int {
-	score := 0
-
-	name := strings.ToLower(iface.Name)
-	if strings.Contains(name, "wlan") || strings.Contains(name, "wi-fi") {
-		score += 2
-	}
-
-	for _, addr := range addrs {
-		if strings.HasPrefix(addr.String(), "192.168.") {
-			score += 1
-			break
-		}
-	}
-
-	return score
 }
 
 // pollLoop periodically refreshes the interface selection. Used as a

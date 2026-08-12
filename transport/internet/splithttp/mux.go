@@ -113,19 +113,6 @@ func (p *XmuxClientPool) Snapshot() []*XmuxClient {
 	return snap
 }
 
-// snapshotInto copies clients into dst (reusing capacity when possible).
-// Caller must hold p.mu for the duration of the copy.
-func (p *XmuxClientPool) snapshotInto(dst []*XmuxClient) []*XmuxClient {
-	n := len(p.clients)
-	if cap(dst) < n {
-		dst = make([]*XmuxClient, n)
-	} else {
-		dst = dst[:n]
-	}
-	copy(dst, p.clients)
-	return dst
-}
-
 // RemoveAt removes the client at index i. Caller must hold p.mu (write lock).
 func (p *XmuxClientPool) RemoveAt(i int) {
 	p.clients = append(p.clients[:i], p.clients[i+1:]...)
@@ -1733,13 +1720,6 @@ func underOverAdmitCap(c *XmuxClient, effectiveConc int32) bool {
 	return c.activeStreams.Load() < capN
 }
 
-// selectionScore is the full scheduling key: quality/RTT base + inflight load.
-// Lower score = better candidate. Inflight is read live so Borrow/Release stay
-// off the full scoreClient path while still preferring less-loaded conns.
-func selectionScore(c *XmuxClient) int64 {
-	return selectionScoreWithInflight(c, c.activeStreams.Load())
-}
-
 // selectionScoreWithInflight folds a already-loaded inflight into the base score
 // so multi-pool scans do not pay a second activeStreams.Load per candidate.
 func selectionScoreWithInflight(c *XmuxClient, inflight int32) int64 {
@@ -1929,12 +1909,6 @@ func (m XmuxMetrics) String() string {
 		m.AvgTTFB, m.MaxTTFB, m.TTFBSamples,
 		m.NetRecovery,
 	)
-}
-
-// LogMetrics logs current metrics at Info level.
-func (m *XmuxManager) LogMetrics() {
-	metrics := m.GetMetrics()
-	errors.LogInfo(context.Background(), metrics.String())
 }
 
 // IdleFor returns how long since this manager last served a client request.

@@ -62,7 +62,7 @@ func (w *PipeConnWrapper) Write(p []byte) (n int, err error) {
 	for pLen > 0 {
 		buffer := buf.New()
 		if pLen > buf.Size {
-			_, err = buffer.Write(p[:buf.Size])
+			buffer.Write(p[:buf.Size])
 			p = p[buf.Size:]
 		} else {
 			buffer.Write(p)

@@ -106,13 +106,6 @@ func Errorf(format string, args ...interface{}) {
 	SetExitStatus(1)
 }
 
-// ExitIfErrors exits if current status is not zero
-func ExitIfErrors() {
-	if exitStatus != 0 {
-		Exit()
-	}
-}
-
 var (
 	exitStatus = 0
 	exitMu     sync.Mutex
@@ -125,9 +118,4 @@ func SetExitStatus(n int) {
 		exitStatus = n
 	}
 	exitMu.Unlock()
-}
-
-// GetExitStatus get exit status code
-func GetExitStatus() int {
-	return exitStatus
 }

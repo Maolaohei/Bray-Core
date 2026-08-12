@@ -101,31 +101,6 @@ func TestClassifyBehavior_Unknown_NoRTT(t *testing.T) {
 	}
 }
 
-func TestConfigForBehavior(t *testing.T) {
-	tests := []struct {
-		behavior Behavior
-		wantConn int
-		wantConc int
-	}{
-		{BehaviorLowLatency, 4, 64},
-		{BehaviorAggressive, 2, 32},
-		{BehaviorLossy, 4, 16},
-		{BehaviorSaturated, 2, 16},
-		{BehaviorNormal, 4, 32},
-	}
-	for _, tt := range tests {
-		cfg := ConfigForBehavior(tt.behavior)
-		if cfg.MaxConnections != tt.wantConn {
-			t.Errorf("ConfigForBehavior(%v).MaxConnections = %d, want %d",
-				tt.behavior, cfg.MaxConnections, tt.wantConn)
-		}
-		if cfg.MaxConcurrency != tt.wantConc {
-			t.Errorf("ConfigForBehavior(%v).MaxConcurrency = %d, want %d",
-				tt.behavior, cfg.MaxConcurrency, tt.wantConc)
-		}
-	}
-}
-
 func TestBehaviorString(t *testing.T) {
 	tests := []struct {
 		b    Behavior

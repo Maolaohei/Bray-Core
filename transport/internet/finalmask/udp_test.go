@@ -80,67 +80,6 @@ func (c *countingConn) Written() int64 {
 	return c.written.Load()
 }
 
-type recordedPacketWrite struct {
-	payload []byte
-	addr    net.Addr
-}
-
-type scriptedPacketConn struct {
-	local    *net.UDPAddr
-	writes   chan recordedPacketWrite
-	reads    chan recordedPacketWrite
-	closed   atomic.Bool
-	deadline atomic.Int64
-}
-
-func newScriptedPacketConn() *scriptedPacketConn {
-	return &scriptedPacketConn{
-		local:  &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40000},
-		writes: make(chan recordedPacketWrite, 8),
-		reads:  make(chan recordedPacketWrite, 8),
-	}
-}
-
-func (c *scriptedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	item, ok := <-c.reads
-	if !ok {
-		return 0, nil, io.EOF
-	}
-	copy(p, item.payload)
-	return len(item.payload), item.addr, nil
-}
-
-func (c *scriptedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	c.writes <- recordedPacketWrite{
-		payload: append([]byte(nil), p...),
-		addr:    addr,
-	}
-	return len(p), nil
-}
-
-func (c *scriptedPacketConn) Close() error {
-	if c.closed.CompareAndSwap(false, true) {
-		close(c.reads)
-	}
-	return nil
-}
-
-func (c *scriptedPacketConn) LocalAddr() net.Addr { return c.local }
-func (c *scriptedPacketConn) SetDeadline(t time.Time) error {
-	c.deadline.Store(t.UnixNano())
-	return nil
-}
-
-func (c *scriptedPacketConn) SetReadDeadline(t time.Time) error {
-	c.deadline.Store(t.UnixNano())
-	return nil
-}
-
-func (c *scriptedPacketConn) SetWriteDeadline(t time.Time) error {
-	c.deadline.Store(t.UnixNano())
-	return nil
-}
-
 func newStandaloneEchoUDPConfig() *custom.UDPStandaloneConfig {
 	return &custom.UDPStandaloneConfig{
 		Client: []*custom.UDPItem{
@@ -748,59 +687,6 @@ func TestSudokuBDD(t *testing.T) {
 		}
 	})
 
-	t.Run("GivenSudokuTCPMask_WhenServerWritesDownlink_ThenWireBytesAreReduced", func(t *testing.T) {
-		payload := bytes.Repeat([]byte("0123456789abcdef"), 192) // 3072 bytes, divisible by 3.
-
-		countWireBytes := func(wrapServer func(net.Conn, *sudoku.Config) (net.Conn, error), cfg *sudoku.Config) int64 {
-			t.Helper()
-
-			clientRaw, serverRaw := net.Pipe()
-			watchedServerRaw := &countingConn{Conn: serverRaw}
-
-			clientConn, err := cfg.WrapConnClient(clientRaw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			serverConn, err := wrapServer(watchedServerRaw, cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			readErr := make(chan error, 1)
-			go func() {
-				_, err := io.CopyN(io.Discard, clientConn, int64(len(payload)))
-				readErr <- err
-			}()
-
-			if _, err := serverConn.Write(payload); err != nil {
-				t.Fatal(err)
-			}
-			if err := <-readErr; err != nil {
-				t.Fatal(err)
-			}
-
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-			return watchedServerRaw.Written()
-		}
-
-		pureUplinkPackedDownlink := &sudoku.Config{
-			Password:   "sudoku-bandwidth",
-			Ascii:      "prefer_entropy",
-			PaddingMin: 0,
-			PaddingMax: 0,
-		}
-		packedDownlinkBytes := countWireBytes(func(raw net.Conn, cfg *sudoku.Config) (net.Conn, error) {
-			return cfg.WrapConnServer(raw)
-		}, pureUplinkPackedDownlink)
-		legacyPureBytes := countWireBytes(func(raw net.Conn, cfg *sudoku.Config) (net.Conn, error) {
-			return sudoku.NewTCPConn(raw, cfg)
-		}, pureUplinkPackedDownlink)
-
-		if packedDownlinkBytes >= legacyPureBytes {
-			t.Fatalf("expected default packed downlink bytes < legacy pure bytes, got packed=%d pure=%d", packedDownlinkBytes, legacyPureBytes)
-		}
-	})
 
 	t.Run("GivenSudokuMultiTableTCPMask_WhenRoundTrip_ThenPayloadMatches", func(t *testing.T) {
 		cfg := &sudoku.Config{

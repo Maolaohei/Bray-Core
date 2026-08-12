@@ -807,7 +807,7 @@ func TestEncodeRDataTXT(t *testing.T) {
 	}
 
 	fmt.Println(EncodeRDataTXT(nil))
-	fmt.Println(computeMaxEncodedPayload(maxUDPPayload))
+	fmt.Println(computeMaxEncodedPayloadForType(maxUDPPayload, RRTypeTXT))
 }
 
 func TestRDataTXTRoundTrip(t *testing.T) {
