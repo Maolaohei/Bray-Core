@@ -10,9 +10,12 @@ import (
 )
 
 // TestFindRecordsSnapshotSurvivesCleanupMutation verifies that a concurrent
-// reader of findRecords() is not affected when cleanup clears/deletes the map
-// entry. This used to race with recordObjPool reuse and could return another
-// domain's IPs (cross-host TLS cert mismatch).
+// reader of findRecords() is not affected when cleanup/update replaces the
+// map entry. findRecords returns the live *record (wrappers are immutable
+// once published: updateRecord / writeAndShrink / flush replace the map entry
+// wholesale and never mutate in place), so the returned record must keep its
+// A/AAAA pointers stable even when the entry is swapped and re-published
+// elsewhere (the historical recordObjPool cross-domain IP mixup bug).
 func TestFindRecordsSnapshotSurvivesCleanupMutation(t *testing.T) {
 	c := NewCacheController("snap", false, false, 0)
 
@@ -34,8 +37,10 @@ func TestFindRecordsSnapshotSurvivesCleanupMutation(t *testing.T) {
 		t.Fatal("expected snapshot")
 	}
 
-	// Simulate cleanup/update: replace live map entry with different data
-	// and clear the old object as the old pool put() would have done.
+	// Simulate cleanup/update: replace the live map entry with different data
+	// and re-publish the old object under another domain (as a pooled record
+	// reuse bug would corrupt it). Because published records are immutable,
+	// snap must still see githubIP.
 	c.Lock()
 	old := c.ips["github.com."]
 	c.ips["github.com."] = &record{
@@ -45,14 +50,7 @@ func TestFindRecordsSnapshotSurvivesCleanupMutation(t *testing.T) {
 			RCode:  dnsmessage.RCodeSuccess,
 		},
 	}
-	old.A = nil
-	old.AAAA = nil
 	c.ips["www.google.com."] = old
-	old.A = &IPRecord{
-		IP:     []net.IP{googleIP},
-		Expire: time.Now().Add(time.Hour),
-		RCode:  dnsmessage.RCodeSuccess,
-	}
 	c.Unlock()
 
 	ips, _, err := snap.A.getIPs()

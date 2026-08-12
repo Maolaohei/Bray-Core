@@ -136,15 +136,27 @@ func (c *CacheController) writeAndShrink(expiredKeys []string) {
 		if rec == nil {
 			continue
 		}
-		if rec.A != nil && rec.A.Expire.Before(now) {
-			rec.A = nil
+		aExpired := rec.A != nil && rec.A.Expire.Before(now)
+		aaaaExpired := rec.AAAA != nil && rec.AAAA.Expire.Before(now)
+		if !aExpired && !aaaaExpired {
+			continue
 		}
-		if rec.AAAA != nil && rec.AAAA.Expire.Before(now) {
-			rec.AAAA = nil
-		}
-		if rec.A == nil && rec.AAAA == nil {
+		if aExpired && aaaaExpired {
 			delete(c.ips, domain)
+			continue
 		}
+		// Replace, never mutate in place: findRecords hands the live record
+		// to concurrent readers without holding the lock, so a published
+		// *record must stay immutable. Cleanup publishes a fresh wrapper
+		// carrying only the half that is still valid.
+		kept := &record{}
+		if !aExpired {
+			kept.A = rec.A
+		}
+		if !aaaaExpired {
+			kept.AAAA = rec.AAAA
+		}
+		c.ips[domain] = kept
 	}
 
 	lenAfter := len(c.ips)
@@ -323,9 +335,11 @@ func (c *CacheController) updateRecord(req *dnsRequest, rep *IPRecord) {
 	}
 }
 
-// findRecords returns a snapshot of the cached A/AAAA pointers for domain.
-// The returned *record is not the map entry: callers may read it without holding
-// the cache lock, and cleanup/update may replace or drop the live entry safely.
+// findRecords returns the cached A/AAAA pointers for domain.
+// The returned *record is the live map entry: record wrappers are immutable
+// once published (updateRecord / writeAndShrink / flush always replace the
+// map entry wholesale and never mutate in place), so callers may read it
+// without holding the cache lock. No per-query wrapper allocation.
 func (c *CacheController) findRecords(domain string) *record {
 	c.RLock()
 	defer c.RUnlock()
@@ -334,11 +348,7 @@ func (c *CacheController) findRecords(domain string) *record {
 	if rec == nil && c.dirtyips != nil {
 		rec = c.dirtyips[domain]
 	}
-	if rec == nil {
-		return nil
-	}
-	// Shallow copy: IPRecord values are immutable after publish; only the wrapper is replaced.
-	return &record{A: rec.A, AAAA: rec.AAAA}
+	return rec
 }
 
 func (c *CacheController) registerSubscribers(domain string, option dns_feature.IPOption) (sub4 *pubsub.Subscriber, sub6 *pubsub.Subscriber) {

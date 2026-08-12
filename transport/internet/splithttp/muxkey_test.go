@@ -1,6 +1,7 @@
 package splithttp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xtls/xray-core/common/net"
@@ -200,5 +201,90 @@ func TestMuxKeyTLSvsReality(t *testing.T) {
 	}
 	if key2.realityServerName != "www.microsoft.com" {
 		t.Errorf("key2.realityServerName should be 'www.microsoft.com', got '%s'", key2.realityServerName)
+	}
+}
+
+// muxDestIdentityBuilder is the pre-optimization reference implementation.
+// Kept in tests only to prove the stack-built version is byte-for-byte
+// identical (MuxKey is a process-lifetime map key).
+func muxDestIdentityBuilder(dest net.Destination) string {
+	var b strings.Builder
+	b.Grow(64)
+	switch dest.Network {
+	case net.Network_TCP:
+		b.WriteString("tcp|")
+	case net.Network_UDP:
+		b.WriteString("udp|")
+	case net.Network_UNIX:
+		b.WriteString("unix|")
+	default:
+		b.WriteString("unknown|")
+	}
+	if dest.Address != nil {
+		b.WriteString(dest.Address.String())
+	}
+	b.WriteByte('|')
+	b.WriteString(dest.Port.String())
+	b.WriteByte('|')
+	b.WriteString(dest.OriginalDomain)
+	return b.String()
+}
+
+func TestMuxDestIdentityMatchesBuilder(t *testing.T) {
+	dests := []net.Destination{
+		net.TCPDestination(net.IPAddress(net.ParseIP("1.2.3.4")), 443),
+		net.TCPDestination(net.IPAddress(net.ParseIP("8.8.8.8")), 53),
+		net.TCPDestination(net.IPAddress(net.ParseIP("2001:db8::1")), 8443),
+		net.TCPDestination(net.IPAddress(net.ParseIP("::1")), 443),
+		net.TCPDestination(net.IPAddress(net.ParseIP("2001:4860:4860::8888")), 443),
+		net.TCPDestination(net.DomainAddress("www.example.com"), 443),
+		net.TCPDestination(net.DomainAddress("localhost"), 0),
+		net.UDPDestination(net.IPAddress(net.ParseIP("10.0.0.1")), 53),
+		net.UDPDestination(net.DomainAddress("dns.example.com"), 5353),
+	}
+	for _, d := range dests {
+		want := muxDestIdentityBuilder(d)
+		got := muxDestIdentity(d)
+		if got != want {
+			t.Errorf("muxDestIdentity(%v) = %q, want %q", d, got, want)
+		}
+	}
+
+	// OriginalDomain participates in the key.
+	d := net.TCPDestination(net.IPAddress(net.ParseIP("1.2.3.4")), 443)
+	d.OriginalDomain = "github.com"
+	want := muxDestIdentityBuilder(d)
+	got := muxDestIdentity(d)
+	if got != want {
+		t.Errorf("with OriginalDomain: got %q, want %q", got, want)
+	}
+}
+
+func TestMuxDestIdentityStableAcrossCalls(t *testing.T) {
+	d := net.TCPDestination(net.IPAddress(net.ParseIP("2001:db8::1")), 8443)
+	first := muxDestIdentity(d)
+	for i := 0; i < 100; i++ {
+		if got := muxDestIdentity(d); got != first {
+			t.Fatalf("unstable output: %q vs %q", got, first)
+		}
+	}
+}
+
+func TestAppendPort(t *testing.T) {
+	cases := []struct {
+		p    uint16
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{53, "53"},
+		{443, "443"},
+		{65535, "65535"},
+	}
+	for _, c := range cases {
+		got := string(appendPort(nil, c.p))
+		if got != c.want {
+			t.Errorf("appendPort(%d) = %q, want %q", c.p, got, c.want)
+		}
 	}
 }

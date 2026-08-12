@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/netip"
 	"net/url"
 	reflect "reflect"
 	"runtime"
@@ -50,26 +51,62 @@ type MuxKey struct {
 }
 
 func muxDestIdentity(dest net.Destination) string {
-	var b strings.Builder
-	b.Grow(64)
+	// Stack-built identity "tcp|1.2.3.4|443|example.com" (IPv6 keeps the
+	// bracketed form of ipv6Address.String()). Avoids the per-Dial
+	// strings.Builder + net.IP.String() allocations on the global-lock hot
+	// path; output is byte-for-byte identical to the previous builder form.
+	var buf [384]byte
+	b := buf[:0]
 	switch dest.Network {
 	case net.Network_TCP:
-		b.WriteString("tcp|")
+		b = append(b, "tcp|"...)
 	case net.Network_UDP:
-		b.WriteString("udp|")
+		b = append(b, "udp|"...)
 	case net.Network_UNIX:
-		b.WriteString("unix|")
+		b = append(b, "unix|"...)
 	default:
-		b.WriteString("unknown|")
+		b = append(b, "unknown|"...)
 	}
 	if dest.Address != nil {
-		b.WriteString(dest.Address.String())
+		switch dest.Address.Family() {
+		case net.AddressFamilyIPv4:
+			if a, ok := netip.AddrFromSlice(dest.Address.IP()); ok {
+				b, _ = a.AppendText(b)
+			} else {
+				b = append(b, dest.Address.String()...)
+			}
+		case net.AddressFamilyIPv6:
+			if a, ok := netip.AddrFromSlice(dest.Address.IP()); ok {
+				b = append(b, '[')
+				b, _ = a.AppendText(b)
+				b = append(b, ']')
+			} else {
+				b = append(b, dest.Address.String()...)
+			}
+		default:
+			b = append(b, dest.Address.Domain()...)
+		}
 	}
-	b.WriteByte('|')
-	b.WriteString(dest.Port.String())
-	b.WriteByte('|')
-	b.WriteString(dest.OriginalDomain)
-	return b.String()
+	b = append(b, '|')
+	b = appendPort(b, uint16(dest.Port))
+	b = append(b, '|')
+	b = append(b, dest.OriginalDomain...)
+	return string(b)
+}
+
+// appendPort formats p in decimal without allocation (strconv-free itoa).
+func appendPort(b []byte, p uint16) []byte {
+	if p == 0 {
+		return append(b, '0')
+	}
+	var tmp [5]byte
+	i := len(tmp)
+	for p > 0 {
+		i--
+		tmp[i] = byte('0' + p%10)
+		p /= 10
+	}
+	return append(b, tmp[i:]...)
 }
 
 // newMuxKey builds a MuxKey from destination and stream settings.
@@ -159,6 +196,13 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 	}
 
 	// Phase 1: Lookup or create XmuxManager under lock (no I/O)
+	// Build the MuxKey before taking the global lock: newMuxKey is a pure
+	// function of (dest, streamSettings) but costs ~1us (sha256 + string
+	// building). Computing it inside the lock serialized every concurrent
+	// Dial on the global mutex; with it outside, the locked section is only
+	// a map lookup + nil check.
+	key := newMuxKey(dest, streamSettings)
+
 	globalDialerAccess.Lock()
 
 	if globalDialerMap == nil {
@@ -167,9 +211,6 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		globalDialerDone = make(chan struct{})
 		go globalDialerCleanup(globalDialerDone)
 	}
-
-	// Build structured MuxKey for connection pool
-	key := newMuxKey(dest, streamSettings)
 
 	xmuxManager, found := globalDialerMap[key]
 
