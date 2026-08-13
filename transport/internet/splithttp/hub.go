@@ -445,7 +445,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 							if err != nil {
 								break
 							}
-							sleepDur := time.Duration(scStreamUpServerSecs.rand()) * time.Second
+							sleepDur := time.Duration(biasedRangeRand(scStreamUpServerSecs.From, scStreamUpServerSecs.To)) * time.Second
 							select {
 							case <-time.After(sleepDur):
 							case <-request.Context().Done():

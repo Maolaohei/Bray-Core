@@ -73,6 +73,18 @@ const (
 	clientIdleTimeoutMinSecs = 90
 	clientIdleTimeoutMaxSecs = 240
 
+	// Idle-activity (beacon) pacing: a connection that has been quiet for at
+	// least idleActivityMinIdleSecs emits a short beacon-style request every
+	// skewed [45s, 90s] — simulating browser background traffic instead of a
+	// perfectly silent connection. The activity never refreshes LastUsed, so
+	// idle eviction above still applies.
+	idleActivityMinIdleSecs      = 45
+	idleActivityMinIntervalSecs  = 45
+	idleActivityMaxIntervalSecs  = 90
+	idleActivitySimDelayMs       = 30  // simulated client processing delay
+	idleActivitySimDelayMaxMs    = 80
+	idleActivityRequestTimeoutMs = 500
+
 	// probeTimeout is the maximum time to wait for a connection probe (HEAD request)
 	// to complete. If the probe doesn't finish within this time, the connection is
 	// considered broken and removed from the pool.
@@ -164,6 +176,9 @@ type XmuxClient struct {
 	unreusableAtUnix atomic.Int64 // unix nano of UnreusableAt; 0 = unlimited (hot path)
 	createdAt        time.Time
 	LastUsed         atomic.Int64 // unix nano: last time this client was borrowed
+	// lastIdleActivity is the unix nano timestamp of the last beacon-style
+	// idle activity, for per-connection rate limiting.
+	lastIdleActivity atomic.Int64
 	// idleTimeoutNs is this connection's own skewed idle-eviction timeout
 	// (drawn at creation, immutable afterwards — safe to read unlocked).
 	idleTimeoutNs int64
@@ -757,6 +772,71 @@ func burstConnectionLimit(steady int32) int {
 	return burst
 }
 
+// maybeIdleActivity schedules a beacon-style request on an idle connection,
+// rate-limited per connection. Called from healthCheckTick for clients with
+// zero active streams. Does NOT refresh LastUsed: eviction timing stays tied
+// to business traffic, so an idle connection emits a few beacons and then is
+// still evicted by clientIdleTimeout — like a browser tab that keeps sending
+// background requests until the server's Keep-Alive timeout drops it.
+func (m *XmuxManager) maybeIdleActivity(c *XmuxClient, now time.Time) {
+	lastUsed := c.LastUsed.Load()
+	if lastUsed == 0 || now.UnixNano()-lastUsed < int64(idleActivityMinIdleSecs)*int64(time.Second) {
+		return // used recently — not an "idle" connection yet
+	}
+	interval := int64(biasedRangeRand(idleActivityMinIntervalSecs, idleActivityMaxIntervalSecs)) * int64(time.Second)
+	last := c.lastIdleActivity.Load()
+	if now.UnixNano()-last < interval {
+		return
+	}
+	if !c.lastIdleActivity.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	// Fire-and-forget; failures are silently ignored (the connection may be
+	// evicted or closed in the meantime).
+	go m.sendIdleActivity(c)
+}
+
+// sendIdleActivity emits one short beacon-style POST (empty body, same
+// padding as data streams) over the given connection, after a simulated
+// client processing delay. The server treats it as a short unauthenticated
+// stream-one long-poll; the 500ms timeout closes it quickly.
+func (m *XmuxManager) sendIdleActivity(c *XmuxClient) {
+	if c.state.Load() != StateActive {
+		return
+	}
+	time.Sleep(time.Duration(biasedRangeRand(idleActivitySimDelayMs, idleActivitySimDelayMaxMs)) * time.Millisecond)
+	if c.state.Load() != StateActive || c.XmuxConn.IsClosed() {
+		return
+	}
+	dc, ok := c.XmuxConn.(DialerClient)
+	if !ok {
+		return
+	}
+	bdc, ok := dc.(*DefaultDialerClient)
+	if !ok || bdc.IsClosed() {
+		return
+	}
+	u, err := url.Parse(m.probeURL)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), idleActivityRequestTimeoutMs*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", u.String(), nil)
+	if err != nil {
+		return
+	}
+	// Same padding as data streams so observers cannot separate idle
+	// activity from real traffic by missing padding.
+	if bdc.transportConfig != nil {
+		bdc.transportConfig.FillStreamRequest(req, "", "")
+	}
+	resp, err := bdc.client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
 // healthCheckLoop periodically checks connection health and removes unhealthy ones.
 // Improvements over original:
 // - Cold start protection: new connections (<10s) are not removed
@@ -817,6 +897,12 @@ func (m *XmuxManager) healthCheckTick() {
 			i++
 			continue
 		}
+		// Idle activity: after a quiet period, emit a short beacon-style
+		// request (simulating a browser's background traffic) so an idle
+		// connection is not perfectly silent until eviction. Rate-limited
+		// per connection; deliberately does NOT refresh LastUsed, so
+		// idle eviction still follows business traffic.
+		m.maybeIdleActivity(c, now)
 		// Exhausted reuse budget / lifetime: drain when idle (moved from Get).
 		if c.leftUsage.Load() == 0 ||
 			c.LeftRequests.Load() <= 0 ||

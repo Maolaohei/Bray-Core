@@ -45,12 +45,21 @@ echo "== benchstat (old=$BASELINE new=working-tree)"
 benchstat "$TMP/old.txt" "$TMP/new.txt" | tee "$TMP/report.txt"
 
 # Fail the gate on significant regressions: benchstat prints a numeric delta
-# with (p=...) only when the change is statistically significant. Extract
-# time/op deltas >= +3%.
-REGRESSIONS=$(grep -E "\(p=" "$TMP/report.txt" \
-  | grep -oE "[+-][0-9]+\.[0-9]+% \(p=" \
-  | sed 's/ (p=//' \
-  | awk -F'%' '$1 >= 3 {print $1"%"}' || true)
+# with (p=...) only when the change is statistically significant. Direction
+# depends on the block unit: time/op and B/op shrink = good, throughput
+# (MiB/s, MB/s, GB/s) grow = good. Track the block unit from the table
+# header line and only flag the bad direction.
+REGRESSIONS=$(awk '
+  /sec\/op|B\/op|allocs\/op/ { unit="latency"; next }
+  /MiB\/s|MB\/s|GiB\/s|GB\/s/ { unit="throughput"; next }
+  /\(p=/ {
+    delta="";
+    for (i=1; i<=NF; i++) if ($i ~ /^[+-][0-9]+\.[0-9]+%$/) delta=$i;
+    if (delta=="") next;
+    d=delta+0;
+    if (unit=="throughput") { if (d <= -3) print delta }
+    else                    { if (d >= 3)  print delta }
+  }' "$TMP/report.txt" || true)
 
 if [ -n "$REGRESSIONS" ]; then
   echo ""
