@@ -25,12 +25,13 @@ import (
 
 var pool = sync.Pool{
 	New: func() any {
-		return make([]byte, finalmask.UDPSize)
+		b := make([]byte, finalmask.UDPSize)
+		return &b
 	},
 }
 
 type packet struct {
-	p    []byte
+	p    *[]byte
 	addr net.Addr
 	err  error
 }
@@ -154,7 +155,8 @@ func (c *xicmpConnClient) recv4() {
 			continue
 		}
 
-		p := pool.Get().([]byte)[:len(echo.Data)]
+		pb := pool.Get().(*[]byte)
+		p := (*pb)[:len(echo.Data)]
 		copy(p, echo.Data)
 
 		if !c.udp {
@@ -163,11 +165,11 @@ func (c *xicmpConnClient) recv4() {
 
 		select {
 		case c.readCh <- packet{
-			p:    p,
+			p:    pb,
 			addr: addr,
 		}:
 		case <-c.closedCh:
-			pool.Put(p)
+			pool.Put(pb)
 			return
 		}
 	}
@@ -224,7 +226,8 @@ func (c *xicmpConnClient) recv6() {
 			continue
 		}
 
-		p := pool.Get().([]byte)[:len(echo.Data)]
+		pb := pool.Get().(*[]byte)
+		p := (*pb)[:len(echo.Data)]
 		copy(p, echo.Data)
 
 		if !c.udp {
@@ -233,11 +236,11 @@ func (c *xicmpConnClient) recv6() {
 
 		select {
 		case c.readCh <- packet{
-			p:    p,
+			p:    pb,
 			addr: addr,
 		}:
 		case <-c.closedCh:
-			pool.Put(p)
+			pool.Put(pb)
 			return
 		}
 	}
@@ -247,7 +250,7 @@ func (c *xicmpConnClient) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	select {
 	case packet := <-c.readCh:
 		if packet.p != nil {
-			n = copy(p, packet.p)
+			n = copy(p, *packet.p)
 			pool.Put(packet.p)
 		}
 		return n, packet.addr, packet.err
@@ -279,8 +282,9 @@ func (c *xicmpConnClient) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		addr = &net.IPAddr{IP: ip}
 	}
 
-	b := pool.Get().([]byte)[:finalmask.UDPSize]
-	defer pool.Put(b)
+	pb := pool.Get().(*[]byte)
+		b := (*pb)[:finalmask.UDPSize]
+	defer pool.Put(pb)
 
 	copy(b[8:], c.clientID[:])
 	copy(b[16:], p)

@@ -40,7 +40,7 @@ type UdpHopPacketConn struct {
 }
 
 type udpPacket struct {
-	Buf  []byte
+	Buf  *[]byte
 	N    int
 	Addr net.Addr
 	Err  error
@@ -80,7 +80,8 @@ func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopInte
 		closeChan:      make(chan struct{}),
 		bufPool: sync.Pool{
 			New: func() interface{} {
-				return make([]byte, udpBufferSize)
+				b := make([]byte, udpBufferSize)
+				return &b
 			},
 		},
 	}
@@ -91,10 +92,11 @@ func NewUDPHopPacketConn(addrs []net.Addr, hopIntervalMin time.Duration, hopInte
 
 func (u *UdpHopPacketConn) recvLoop(conn net.PacketConn) {
 	for {
-		buf := u.bufPool.Get().([]byte)
+		pb := u.bufPool.Get().(*[]byte)
+		buf := *pb
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
-			u.bufPool.Put(buf)
+			u.bufPool.Put(pb)
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				u.recvQueue <- &udpPacket{nil, 0, nil, netErr}
@@ -103,9 +105,9 @@ func (u *UdpHopPacketConn) recvLoop(conn net.PacketConn) {
 			return
 		}
 		select {
-		case u.recvQueue <- &udpPacket{buf, n, addr, nil}:
+		case u.recvQueue <- &udpPacket{pb, n, addr, nil}:
 		default:
-			u.bufPool.Put(buf)
+			u.bufPool.Put(pb)
 		}
 	}
 }
@@ -167,7 +169,7 @@ func (u *UdpHopPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) 
 			if p.Err != nil {
 				return 0, nil, p.Err
 			}
-			n := copy(b, p.Buf[:p.N])
+			n := copy(b, (*p.Buf)[:p.N])
 			u.bufPool.Put(p.Buf)
 			return n, p.Addr, nil
 		case <-u.closeChan:

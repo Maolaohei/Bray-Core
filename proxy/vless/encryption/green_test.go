@@ -59,8 +59,8 @@ func TestOutBytesCapacity(t *testing.T) {
 	if MaxAEADPayload != 8192 {
 		t.Fatalf("MaxAEADPayload=%d", MaxAEADPayload)
 	}
-	b := OutBytesPool.Get().([]byte)
-	defer OutBytesPool.Put(b)
+	b := *OutBytesPool.Get().(*[]byte)
+	defer OutBytesPool.Put(&b)
 	if len(b) != OutBytesCapacity {
 		t.Fatalf("pool buf len=%d want %d", len(b), OutBytesCapacity)
 	}

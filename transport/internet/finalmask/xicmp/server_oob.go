@@ -181,16 +181,17 @@ func (c *xicmpConnServer) recv4() {
 		}
 		c.mu.Unlock()
 
-		p := pool.Get().([]byte)[:len(echo.Data[8:])]
+		pb := pool.Get().(*[]byte)
+		p := (*pb)[:len(echo.Data[8:])]
 		copy(p, echo.Data[8:])
 
 		select {
 		case c.readCh <- packet{
-			p:    p,
+			p:    pb,
 			addr: cAddr,
 		}:
 		case <-c.closedCh:
-			pool.Put(p)
+			pool.Put(pb)
 			return
 		}
 	}
@@ -260,16 +261,17 @@ func (c *xicmpConnServer) recv6() {
 		}
 		c.mu.Unlock()
 
-		p := pool.Get().([]byte)[:len(echo.Data[8:])]
+		pb := pool.Get().(*[]byte)
+		p := (*pb)[:len(echo.Data[8:])]
 		copy(p, echo.Data[8:])
 
 		select {
 		case c.readCh <- packet{
-			p:    p,
+			p:    pb,
 			addr: cAddr,
 		}:
 		case <-c.closedCh:
-			pool.Put(p)
+			pool.Put(pb)
 			return
 		}
 	}
@@ -279,7 +281,7 @@ func (c *xicmpConnServer) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	select {
 	case packet := <-c.readCh:
 		if packet.p != nil {
-			n = copy(p, packet.p)
+			n = copy(p, *packet.p)
 			pool.Put(packet.p)
 		}
 		return n, packet.addr, packet.err
@@ -307,8 +309,9 @@ func (c *xicmpConnServer) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 
 	// errors.LogDebug(context.Background(), "id ", r.id, " seq ", r.seq, " addr ", r.addr)
 
-	b := pool.Get().([]byte)[:finalmask.UDPSize]
-	defer pool.Put(b)
+	pb := pool.Get().(*[]byte)
+		b := (*pb)[:finalmask.UDPSize]
+	defer pool.Put(pb)
 
 	copy(b[8:], p)
 

@@ -42,7 +42,8 @@ func bytesToString(b []byte) string {
 
 var OutBytesPool = sync.Pool{
 	New: func() any {
-		return make([]byte, OutBytesCapacity)
+		b := make([]byte, OutBytesCapacity)
+		return &b
 	},
 }
 
@@ -84,8 +85,9 @@ func (c *CommonConn) Write(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	outBytes := OutBytesPool.Get().([]byte)
-	defer OutBytesPool.Put(outBytes)
+	pb := OutBytesPool.Get().(*[]byte)
+	defer OutBytesPool.Put(pb)
+	outBytes := *pb
 	for n := 0; n < len(b); {
 		b := b[n:]
 		if len(b) > MaxAEADPayload {

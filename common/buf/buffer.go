@@ -2,6 +2,7 @@ package buf
 
 import (
 	"io"
+	"sync"
 
 	"github.com/xtls/xray-core/common/bytespool"
 	"github.com/xtls/xray-core/common/errors"
@@ -15,7 +16,15 @@ const (
 
 var ErrBufferFull = errors.New("buffer is full")
 
-var pool = bytespool.GetPool(Size)
+// pool stores *[]byte instead of []byte: boxing a slice header into an
+// interface allocates 24B per Get/Put, while a pointer round-trips with zero
+// allocations (verified by micro-benchmark).
+var pool = sync.Pool{
+	New: func() any {
+		b := make([]byte, Size)
+		return &b
+	},
+}
 
 // ownership represents the data owner of the buffer.
 type ownership uint8
@@ -35,19 +44,18 @@ type Buffer struct {
 	end       int32
 	ownership ownership
 	UDP       *net.Destination
+	// poolRef is the pool-owned pointer backing v (managed buffers only).
+	// Keeping it lets Release return the exact pointer the pool handed out,
+	// which is what makes the *[]byte pool allocation-free.
+	poolRef *[]byte
 }
 
 // New creates a Buffer with 0 length and 8K capacity, managed.
 func New() *Buffer {
-	buf := pool.Get().([]byte)
-	if cap(buf) >= Size {
-		buf = buf[:Size]
-	} else {
-		buf = make([]byte, Size)
-	}
-
+	pb := pool.Get().(*[]byte)
 	return &Buffer{
-		v: buf,
+		v:       *pb,
+		poolRef: pb,
 	}
 }
 
@@ -83,15 +91,10 @@ func FromBytes(b []byte) *Buffer {
 // StackNew creates a new Buffer object on stack, managed.
 // This method is for buffers that is released in the same function.
 func StackNew() Buffer {
-	buf := pool.Get().([]byte)
-	if cap(buf) >= Size {
-		buf = buf[:Size]
-	} else {
-		buf = make([]byte, Size)
-	}
-
+	pb := pool.Get().(*[]byte)
 	return Buffer{
-		v: buf,
+		v:       *pb,
+		poolRef: pb,
 	}
 }
 
@@ -117,8 +120,12 @@ func (b *Buffer) Release() {
 
 	switch own {
 	case managed:
-		if cap(p) == Size {
-			pool.Put(p)
+		// Return the exact pool-owned pointer. poolRef is nil for buffers
+		// whose slice came from outside the pool (NewExisted), so those are
+		// never recycled into the pool.
+		if b.poolRef != nil {
+			pool.Put(b.poolRef)
+			b.poolRef = nil
 		}
 	case bytespools:
 		bytespool.Free(p)
