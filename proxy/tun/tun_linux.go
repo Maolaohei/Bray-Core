@@ -348,8 +348,15 @@ func findOutboundInterface(tunIndex int, fixedName string) (*net.Interface, erro
 		return iface, nil
 	}
 
+<<<<<<< HEAD
 	// Try IPv4 first, then IPv6
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+=======
+	for _, family := range []int{
+		netlink.FAMILY_V4,
+		netlink.FAMILY_V6,
+	} {
+>>>>>>> 3263ae92 (TUN inbound: Fix `autoOutboundsInterface` on Linux (#6413))
 		iface, err := findDefaultInterface(family, tunIndex)
 		if err == nil {
 			return iface, nil
@@ -359,9 +366,12 @@ func findOutboundInterface(tunIndex int, fixedName string) (*net.Interface, erro
 	return nil, errors.New("no usable outbound interface found")
 }
 
+<<<<<<< HEAD
 // findDefaultInterface enumerates all routes for the given address family,
 // filters for default routes (Dst == nil or /0), and returns the interface
 // with the lowest metric that is not the TUN interface.
+=======
+>>>>>>> 3263ae92 (TUN inbound: Fix `autoOutboundsInterface` on Linux (#6413))
 func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
 	routes, err := netlink.RouteList(nil, family)
 	if err != nil {
@@ -372,7 +382,10 @@ func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
 	selectedMetric := -1
 
 	for _, route := range routes {
+<<<<<<< HEAD
 		// Only consider default routes
+=======
+>>>>>>> 3263ae92 (TUN inbound: Fix `autoOutboundsInterface` on Linux (#6413))
 		if route.Dst != nil {
 			ones, _ := route.Dst.Mask.Size()
 			if ones != 0 {
@@ -380,7 +393,10 @@ func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
 			}
 		}
 
+<<<<<<< HEAD
 		// Skip TUN and invalid routes
+=======
+>>>>>>> 3263ae92 (TUN inbound: Fix `autoOutboundsInterface` on Linux (#6413))
 		if route.LinkIndex == 0 || route.LinkIndex == tunIndex {
 			continue
 		}
@@ -390,12 +406,20 @@ func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
 			continue
 		}
 
+<<<<<<< HEAD
 		// Skip down or loopback interfaces
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
 
 		// Pick the route with the lowest metric
+=======
+		if iface.Flags&net.FlagUp == 0 ||
+			iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+>>>>>>> 3263ae92 (TUN inbound: Fix `autoOutboundsInterface` on Linux (#6413))
 		if selected == nil || route.Priority < selectedMetric {
 			selected = iface
 			selectedMetric = route.Priority
@@ -403,7 +427,11 @@ func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
 	}
 
 	if selected == nil {
+<<<<<<< HEAD
 		return nil, errors.New("no usable default interface found")
+=======
+		return nil, errors.New("physical default route not found")
+>>>>>>> 3263ae92 (TUN inbound: Fix `autoOutboundsInterface` on Linux (#6413))
 	}
 
 	return selected, nil
