@@ -285,7 +285,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	// Bray-only: default response X-Padding is a known Xray/XHTTP fingerprint.
 	// Only stamp response padding when operator enabled obfs with custom placement.
 	if h.config.XPaddingObfsMode {
-		length := int(h.config.GetNormalizedXPaddingBytes().rand())
+		length := int(biasedRangeRand(h.config.GetNormalizedXPaddingBytes().From, h.config.GetNormalizedXPaddingBytes().To))
 		config := XPaddingConfig{
 			Length: length,
 			Method: PaddingMethod(h.config.XPaddingMethod),
@@ -427,15 +427,17 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				writer.Header().Set("Cache-Control", "no-store")
 				writer.WriteHeader(http.StatusOK)
 				scStreamUpServerSecs := h.config.GetNormalizedScStreamUpServerSecs()
-				// Bray-only: keep-alive padding on stream-up when client sent padding header
-				// (or legacy Referer still present from mixed configs).
-				hasPaddingMarker := request.Header.Get("X-Padding") != "" || request.Header.Get("Referer") != ""
+				// Bray-only: keep-alive padding on stream-up when client sent a
+				// padding header from the pool (or legacy Referer still present
+				// from mixed configs).
+				hasPaddingMarker := hasBrayPaddingHeader(request) || request.Header.Get("Referer") != ""
 				if (hasPaddingMarker || obfsPaddingAccepted) && scStreamUpServerSecs.To > 0 {
 					go func() {
 						bp := paddingBytePool.Get().(*[]byte)
 						defer paddingBytePool.Put(bp)
 						for {
-							n := int(h.config.GetNormalizedXPaddingBytes().rand())
+							rb := h.config.GetNormalizedXPaddingBytes()
+							n := int(biasedRangeRand(rb.From, rb.To))
 							if n > len(*bp) {
 								n = len(*bp)
 							}

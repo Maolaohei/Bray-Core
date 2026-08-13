@@ -16,6 +16,7 @@ import (
 	"github.com/xtls/xray-core/common/bytespool"
 	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/randpool"
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/common/uuid"
 	"github.com/xtls/xray-core/transport/internet"
@@ -640,7 +641,12 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr 
 	// Default wire (session+seq both path): one path rewrite, no Query/Cookie work.
 	if sessionPlacement == PlacementPath && (seqStr == "" || seqPlacement == PlacementPath) {
 		if sessionId != "" || seqStr != "" {
-			req.URL.Path = appendToPath2(req.URL.Path, sessionId, seqStr)
+			// Bray-only obfuscated wire: merge into a single opaque token
+			// segment. The legacy layout exposed "raw.mac" dotted sessionId
+			// and a bare incrementing seq as two fixed path segments — a
+			// regex-level fingerprint. The token has no structure until
+			// decoded; the server accepts both formats.
+			req.URL.Path = appendToPath2(req.URL.Path, encodeMetaToken(sessionId, seqStr), "")
 		}
 		return
 	}
@@ -682,8 +688,8 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr 
 func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqStr string) {
 	request.Header = c.GetRequestHeader()
 	basePad := c.GetNormalizedXPaddingBytes()
-	// Stream open has no payload size yet; keep configured range.
-	length := int(basePad.rand())
+	// Stream open has no payload size yet; keep configured range (skewed).
+	length := int(biasedRangeRand(basePad.From, basePad.To))
 	config := XPaddingConfig{Length: length}
 
 	if c.XPaddingObfsMode {
@@ -803,7 +809,8 @@ func (c *Config) finishPacketRequest(request *http.Request, sessionId string, se
 		from, to = AdaptivePaddingRange(basePad.From, basePad.To, payloadLen)
 	}
 	// Avoid heap-escaping &RangeConfig{...} per packet-up POST.
-	length := int(crypto.RandBetween(int64(from), int64(to)))
+	// Skewed draw: short paddings dominate, occasional long tails.
+	length := int(biasedRangeRand(from, to))
 	config := XPaddingConfig{Length: length, Strict: strict}
 
 	if c.XPaddingObfsMode {
@@ -820,12 +827,15 @@ func (c *Config) finishPacketRequest(request *http.Request, sessionId string, se
 		config.Method = PaddingMethod(c.XPaddingMethod)
 		config.methodIdx = methodIndex(config.Method)
 	} else {
-		// Bray-only default wire: header X-Padding (both ends).
+		// Bray-only default wire: session-derived header name from the
+		// padding-name pool (server accepts any member). Avoids the stock
+		// Xray Referer?x_padding fingerprint AND a fixed "X-Padding" rule.
 		// Header placement needs no RawURL string build.
+		name := c.paddingHeaderNameForSession(sessionId)
 		config.Placement = XPaddingPlacement{
 			Placement: PlacementHeader,
-			Key:       "X-Padding",
-			Header:    "X-Padding",
+			Key:       name,
+			Header:    name,
 		}
 	}
 
@@ -843,6 +853,7 @@ func (c *Config) ExtractMetaFromRequest(req *http.Request, path string) (session
 
 	var subpath []string
 	pathPart := 0
+	tokenConsumed := false // obfuscated single-token format carried both fields
 	if sessionPlacement == PlacementPath || seqPlacement == PlacementPath {
 		subpath = strings.Split(req.URL.Path[len(path):], "/")
 	}
@@ -850,7 +861,15 @@ func (c *Config) ExtractMetaFromRequest(req *http.Request, path string) (session
 	switch sessionPlacement {
 	case PlacementPath:
 		if len(subpath) > pathPart {
-			sessionId = subpath[pathPart]
+			// Bray-only: try the obfuscated single-token format first, then
+			// fall back to the legacy two-segment layout.
+			if sid, seq, ok := decodeMetaToken(subpath[pathPart]); ok {
+				sessionId = sid
+				seqStr = seq
+				tokenConsumed = true
+			} else {
+				sessionId = subpath[pathPart]
+			}
 			pathPart += 1
 		}
 	case PlacementQuery:
@@ -865,7 +884,7 @@ func (c *Config) ExtractMetaFromRequest(req *http.Request, path string) (session
 
 	switch seqPlacement {
 	case PlacementPath:
-		if len(subpath) > pathPart {
+		if !tokenConsumed && len(subpath) > pathPart {
 			seqStr = subpath[pathPart]
 			pathPart += 1
 		}
@@ -880,6 +899,34 @@ func (c *Config) ExtractMetaFromRequest(req *http.Request, path string) (session
 	}
 
 	return sessionId, seqStr
+}
+
+// encodeMetaToken merges sessionId and seq into a single opaque path segment
+// (base64url of "sessionId:seq"). See ApplyMetaToRequest for the rationale.
+func encodeMetaToken(sessionId, seqStr string) string {
+	if sessionId == "" && seqStr == "" {
+		return ""
+	}
+	raw := make([]byte, 0, len(sessionId)+1+len(seqStr))
+	raw = append(raw, sessionId...)
+	raw = append(raw, ':')
+	raw = append(raw, seqStr...)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// decodeMetaToken reverses encodeMetaToken. The ":" separator cannot collide
+// with legacy values: the old sessionId is "uuid.mac" (dotted, no colon) and
+// the old seq is a bare decimal string.
+func decodeMetaToken(token string) (sessionId, seqStr string, ok bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return "", "", false
+	}
+	idx := strings.IndexByte(string(raw), ':')
+	if idx < 0 {
+		return "", "", false
+	}
+	return string(raw[:idx]), string(raw[idx+1:]), true
 }
 
 func (m *XmuxConfig) GetNormalizedMaxConcurrency() *RangeConfig {
@@ -938,6 +985,19 @@ func (c *RangeConfig) rand() int32 {
 		return 0
 	}
 	return int32(crypto.RandBetween(int64(c.From), int64(c.To)))
+}
+
+// biasedRangeRand returns a right-skewed value in [from, to]: most draws land
+// near the low end with occasional long tails. Uniform draws on wire-visible
+// parameters (padding lengths, connection lifetimes) are a machine signature;
+// the skewed shape is closer to real client behavior. Purely a client-side
+// generation choice — validation ranges are unchanged.
+func biasedRangeRand(from, to int32) int32 {
+	if to <= from {
+		return from
+	}
+	r := int64(randpool.Global.IntN(1024))
+	return from + int32((int64(to)-int64(from))*r*r/(1024*1024))
 }
 
 // predefined

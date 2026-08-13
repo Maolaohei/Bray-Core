@@ -64,14 +64,14 @@ const (
 	StateDraining int32 = 1 // refusing new streams, waiting for active streams to finish
 	StateClosed   int32 = 2 // TCP connection closed
 
-	// clientIdleTimeout is the maximum time a client can remain unused (no active streams)
-	// before being evicted. This is a safety net, not the primary failure recovery mechanism.
-	// Primary mechanism: Fast Eviction (immediate eviction on fatal errors).
-	// 15min keeps pooled connections warm across video/viewing gaps so new
-	// sessions reuse the established TCP/TLS path instead of restarting the
-	// slow-start ramp; ISP NAT timeouts still apply server-side (10min idle
-	// reaper covers the unauthenticated long-poll surface).
-	clientIdleTimeout = 15 * time.Minute
+	// clientIdleTimeout bounds the time a client can remain unused (no active
+	// streams) before being evicted. A fixed long value is a machine
+	// signature (real browsers get Keep-Alive timeouts in seconds/minutes),
+	// so each connection draws its own skewed timeout in [90s, 240s] at
+	// creation; the constant below only bounds the range.
+	// Primary failure mechanism is still Fast Eviction on fatal errors.
+	clientIdleTimeoutMinSecs = 90
+	clientIdleTimeoutMaxSecs = 240
 
 	// probeTimeout is the maximum time to wait for a connection probe (HEAD request)
 	// to complete. If the probe doesn't finish within this time, the connection is
@@ -164,6 +164,9 @@ type XmuxClient struct {
 	unreusableAtUnix atomic.Int64 // unix nano of UnreusableAt; 0 = unlimited (hot path)
 	createdAt        time.Time
 	LastUsed         atomic.Int64 // unix nano: last time this client was borrowed
+	// idleTimeoutNs is this connection's own skewed idle-eviction timeout
+	// (drawn at creation, immutable afterwards — safe to read unlocked).
+	idleTimeoutNs int64
 	lastRTT          atomic.Int64 // nanoseconds, for RTT-aware scheduling
 	// cachedScore is the quality/RTT base only (no inflight term).
 	// Selection uses cachedScore + activeStreams*10000 so Borrow/Release
@@ -443,10 +446,7 @@ type XmuxManager struct {
 	newConnFunc func() XmuxConn
 	probeURL    string // URL for HEAD probe to trigger real TCP/TLS dial
 	pool        XmuxClientPool
-	// idleTimeoutNs caches clientIdleTimeout as int64 so Get hot path does not
-	// convert time.Duration on every candidate under RLock.
-	idleTimeoutNs int64
-	stopCh        chan struct{}
+	stopCh      chan struct{}
 	doneCh        chan struct{} // closed when all goroutines exit
 	lastActivity  atomic.Int64  // nanosecond timestamp of last client obtain; lock-free
 	closeOnce     sync.Once     // ensures Close() is idempotent
@@ -514,7 +514,6 @@ func NewXmuxManager(xmuxConfig *XmuxConfig, newConnFunc func() XmuxConn, probeUR
 		connections:   xmuxConfig.GetNormalizedMaxConnections().rand(),
 		newConnFunc:   newConnFunc,
 		probeURL:      probe,
-		idleTimeoutNs: int64(clientIdleTimeout),
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
 		lastActivity:  atomic.Int64{},
@@ -828,7 +827,7 @@ func (m *XmuxManager) healthCheckTick() {
 			continue
 		}
 		// Idle eviction: only evict if NO active streams AND idle for too long
-		if lastUsed := c.LastUsed.Load(); lastUsed > 0 && now.Sub(time.Unix(0, lastUsed)) > clientIdleTimeout {
+		if lastUsed := c.LastUsed.Load(); lastUsed > 0 && now.UnixNano()-lastUsed > c.idleTimeoutNs {
 			errors.LogDebug(context.Background(), "XMUX: health-check removing idle xmuxClient, lastUsed=", time.Unix(0, lastUsed).Format(time.RFC3339))
 			c.maybeDrain()
 			m.pool.RemoveAt(i)
@@ -1368,6 +1367,10 @@ func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
 		ready:     make(chan struct{}), // probe not yet completed
 	}
 	c.behaviorScale.Store(100) // BehaviorUnknown -> 1.0x
+	// Per-connection skewed idle timeout (90-240s): short enough that idle
+	// connections do not live forever (a machine signature), long enough to
+	// survive video/viewing gaps.
+	c.idleTimeoutNs = int64(biasedRangeRand(clientIdleTimeoutMinSecs, clientIdleTimeoutMaxSecs)) * int64(time.Second)
 	c.leftUsage.Store(-1)
 	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
 		c.leftUsage.Store(x - 1)
@@ -1376,8 +1379,10 @@ func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
 	if x := m.xmuxConfig.GetNormalizedHMaxRequestTimes().rand(); x > 0 {
 		c.LeftRequests.Store(x)
 	}
-	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs().rand(); x > 0 {
-		deadline := time.Now().Add(time.Duration(x) * time.Second)
+	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs(); x != nil && x.To > 0 {
+		// Skewed lifetime draw: most connections rotate in 10-12min, a few
+		// live 20min — a uniform 600-1200s spread is a machine signature.
+		deadline := time.Now().Add(time.Duration(biasedRangeRand(x.From, x.To)) * time.Second)
 		c.UnreusableAt = deadline
 		c.unreusableAtUnix.Store(deadline.UnixNano())
 	}
@@ -1396,7 +1401,7 @@ const maxInlineXmuxScan = 32
 //
 // Callers that unlocked the pool must re-validate the winner before use
 // (leftUsage CAS + state) because the set can change after the snapshot.
-func pickBestXmuxClient(candidates []*XmuxClient, n int, nowNs, idleNs int64, effectiveConc int32, overAdmit bool) *XmuxClient {
+func pickBestXmuxClient(candidates []*XmuxClient, n int, nowNs int64, effectiveConc int32, overAdmit bool) *XmuxClient {
 	if n <= 0 {
 		return nil
 	}
@@ -1412,7 +1417,7 @@ func pickBestXmuxClient(candidates []*XmuxClient, n int, nowNs, idleNs int64, ef
 		if !overAdmit {
 			// Idle eviction: only skip if NO active streams AND idle for too long.
 			if inf == 0 {
-				if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > idleNs {
+				if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > c.idleTimeoutNs {
 					continue
 				}
 			}
@@ -1479,7 +1484,6 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 	nowNs := time.Now().UnixNano()
 	effectiveConns := m.effectiveConnections()
 	effectiveConc := m.effectiveConcurrency()
-	idleNs := m.idleTimeoutNs
 
 	// overAdmit: when saturated past burst, reuse least-loaded Active client
 	// instead of creating unbounded REALITY/TLS connections.
@@ -1511,7 +1515,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				inf := c.activeStreams.Load()
 				idleSkip := false
 				if inf == 0 {
-					if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > idleNs {
+					if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > c.idleTimeoutNs {
 						idleSkip = true
 					}
 				}
@@ -1532,7 +1536,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				// fall through to over-admit snapshot path with lock still held
 				scan, sn := copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
 				m.pool.mu.RUnlock()
-				best = pickBestXmuxClient(scan, len(scan), nowNs, idleNs, effectiveConc, true)
+				best = pickBestXmuxClient(scan, len(scan), nowNs, effectiveConc, true)
 				releaseSnap(sn)
 				if best == nil {
 					break
@@ -1542,7 +1546,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 			// Multi-conn (or over-admit retry): copy pointers under RLock, score unlocked.
 			scan, sn := copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
 			m.pool.mu.RUnlock()
-			best = pickBestXmuxClient(scan, len(scan), nowNs, idleNs, effectiveConc, overAdmit)
+			best = pickBestXmuxClient(scan, len(scan), nowNs, effectiveConc, overAdmit)
 			releaseSnap(sn)
 			if best == nil {
 				if overAdmit {
@@ -1561,7 +1565,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				poolLen = len(m.pool.clients)
 				scan, sn = copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
 				m.pool.mu.RUnlock()
-				best = pickBestXmuxClient(scan, len(scan), nowNs, idleNs, effectiveConc, true)
+				best = pickBestXmuxClient(scan, len(scan), nowNs, effectiveConc, true)
 				releaseSnap(sn)
 				if best == nil {
 					break
@@ -1638,7 +1642,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 			var inline2 [maxInlineXmuxScan]*XmuxClient
 			scan, sn := copyXmuxClientsLocked(m.pool.clients, cur, inline2[:])
 			m.pool.mu.RUnlock()
-			least := pickBestXmuxClient(scan, len(scan), time.Now().UnixNano(), m.idleTimeoutNs, effConc, true)
+			least := pickBestXmuxClient(scan, len(scan), time.Now().UnixNano(), effConc, true)
 			releaseSnap(sn)
 			if cur >= burst && least != nil {
 				m.lastActivity.Store(time.Now().UnixNano())

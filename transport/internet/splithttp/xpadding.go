@@ -1,6 +1,7 @@
 package splithttp
 
 import (
+	"hash/fnv"
 	"math"
 	"net/http"
 	"net/url"
@@ -666,11 +667,63 @@ func (c *Config) ApplyXPaddingToResponse(writer http.ResponseWriter, config XPad
 	}
 }
 
+// brayPaddingHeaderNames is the pool of wire header names for the Bray-only
+// default padding placement. The client derives one name per session (stable
+// within a connection), the server accepts any pool member. A single fixed
+// "X-Padding" would be a one-rule DPI fingerprint; the pool spreads traffic
+// across names without adding any wire state.
+var brayPaddingHeaderNames = [...]string{
+	"X-Padding",
+	"X-Request-Id",
+	"X-Correlation-Id",
+	"X-Client-Trace",
+	"X-Request-Trace",
+	"X-Session-Id",
+	"X-Request-Key",
+	"X-Client-Id",
+}
+
+// paddingHeaderNameForSession picks the padding header name for a session.
+// The choice is deterministic per sessionId (so a connection keeps one stable
+// name, like a real client) and stateless on the server side (it accepts any
+// pool member). Operator-configured business headers are excluded so the
+// padding Set never clobbers a user header.
+func (c *Config) paddingHeaderNameForSession(sessionId string) string {
+	h := fnv.New32a()
+	h.Write([]byte(sessionId))
+	idx := int(h.Sum32() % uint32(len(brayPaddingHeaderNames)))
+	for i := range brayPaddingHeaderNames {
+		name := brayPaddingHeaderNames[(idx+i)%len(brayPaddingHeaderNames)]
+		if _, used := c.Headers[name]; !used {
+			return name
+		}
+	}
+	return brayPaddingHeaderNames[idx]
+}
+
+// hasBrayPaddingHeader reports whether the request carries a padding header
+// from the Bray default pool (any member — the server does not need to know
+// which name the client derived).
+func hasBrayPaddingHeader(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	for _, name := range brayPaddingHeaderNames {
+		if req.Header.Get(name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // extractBrayDefaultXPadding reads padding from Bray-only default locations.
-// Primary: request header "X-Padding". No stock Xray Referer?x_padding path.
+// Primary: any header from the brayPaddingHeaderNames pool. No stock Xray
+// Referer?x_padding path.
 func extractBrayDefaultXPadding(req *http.Request) (string, string) {
-	if v := req.Header.Get("X-Padding"); v != "" {
-		return v, PlacementHeader + "=X-Padding"
+	for _, name := range brayPaddingHeaderNames {
+		if v := req.Header.Get(name); v != "" {
+			return v, PlacementHeader + "=" + name
+		}
 	}
 	// Rare alternate: query ?xb= for middleboxes that strip custom headers.
 	if v := req.URL.Query().Get("xb"); v != "" {
