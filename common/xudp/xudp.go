@@ -184,12 +184,14 @@ const (
 	batchFrameMaxCount = 64
 )
 
-// batchWriteEnabled gates L2a batch frames. Default OFF: a batch-capable
-// client must never talk to a pre-batch server (the meta length would
-// misparse and kill the stream). Enable only after both ends are on a
-// build with server-side batch expansion.
+// batchWriteEnabled gates L2a batch frames. Default ON: the server-side
+// batch expansion ships in the same release and always accepts legacy
+// single frames, so batch frames are safe with any current server. The
+// only risk window is a NEW client talking to a PRE-batch server (the
+// meta length would misparse and kill the stream) — disable with
+// XUDPBatch=false during staggered upgrades.
 func batchWriteEnabled() bool {
-	return strings.EqualFold(platform.NewEnvFlag("XUDPBatch").GetValue(func() string { return "false" }), "true")
+	return !strings.EqualFold(platform.NewEnvFlag("XUDPBatch").GetValue(func() string { return "true" }), "false")
 }
 
 // sameDestination reports whether two datagram destinations (address +
