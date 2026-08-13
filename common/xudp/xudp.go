@@ -92,6 +92,19 @@ type PacketWriter struct {
 
 func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	defer buf.ReleaseMulti(mb)
+
+	// L2a batching: same-target datagrams arriving in one write are
+	// serialized as a single frame (one header + 1B count + N×[2B len +
+	// payload]), amortizing the frame header and cutting wire bytes.
+	// Off by default (XUDPBatch=true): new clients must not talk batch
+	// to old servers. N=1 / mixed targets / oversized fall back to the
+	// single-frame path below.
+	if batchWriteEnabled() && len(mb) > 1 {
+		if ok, err := w.tryWriteBatch(mb); ok {
+			return err
+		}
+	}
+
 	mb2Write := make(buf.MultiBuffer, 0, len(mb))
 	for _, b := range mb {
 		length := b.Len()
@@ -156,6 +169,113 @@ func addrWireLen(a net.Address) int {
 	default:
 		return 1 + len(a.Domain())
 	}
+}
+
+// batchFrameMaxCount caps sub-frames per batch frame: with buf.Size 8KB
+// and a minimum 4B sub-frame the hard bound is ~180; 64 keeps the count
+// byte distribution tighter and limits a single frame's blast radius.
+const (
+	// batchOpt mirrors mux.OptionBatch (0x04) without importing mux
+	// (import cycle: mux/client.go imports xudp).
+	batchOpt = 0x04
+	// batchFrameMaxCount caps sub-frames per batch frame: with buf.Size 8KB
+	// and a minimum 4B sub-frame the hard bound is ~180; 64 keeps the count
+	// byte distribution tighter and limits a single frame blast radius.
+	batchFrameMaxCount = 64
+)
+
+// batchWriteEnabled gates L2a batch frames. Default OFF: a batch-capable
+// client must never talk to a pre-batch server (the meta length would
+// misparse and kill the stream). Enable only after both ends are on a
+// build with server-side batch expansion.
+func batchWriteEnabled() bool {
+	return strings.EqualFold(platform.NewEnvFlag("XUDPBatch").GetValue(func() string { return "false" }), "true")
+}
+
+// sameDestination reports whether two datagram destinations (address +
+// port) are identical — required for sharing one batch frame header.
+func sameDestination(a, b *net.Destination) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Port != b.Port || a.Address.Family() != b.Address.Family() {
+		return false
+	}
+	if a.Address.Family().IsIP() {
+		return a.Address.IP().Equal(b.Address.IP())
+	}
+	return a.Address.Domain() == b.Address.Domain()
+}
+
+// tryWriteBatch writes all non-empty datagrams of mb as one batch frame
+// when possible. Returns (true, err) when the batch was written (err may
+// be non-nil from the underlying writer), (false, nil) when the batch
+// does not apply (mixed targets, too large, single packet) and the caller
+// must fall back to the single-frame path.
+func (w *PacketWriter) tryWriteBatch(mb buf.MultiBuffer) (bool, error) {
+	firstFrame := w.Dest.Network == net.Network_UDP
+	// Collect non-empty packets; verify target consistency for keep frames.
+	var firstDest *net.Destination
+	var sum int32
+	n := 0
+	for _, b := range mb {
+		if b.Len() == 0 {
+			continue
+		}
+		if !firstFrame {
+			if b.UDP == nil {
+				return false, nil
+			}
+			if firstDest == nil {
+				firstDest = b.UDP
+			} else if !sameDestination(firstDest, b.UDP) {
+				return false, nil
+			}
+		}
+		sum += b.Len()
+		n++
+	}
+	if n < 2 || n > batchFrameMaxCount {
+		return false, nil
+	}
+
+	head := 0
+	if firstFrame {
+		head = 7 + 2 + addrWireLen(w.Dest.Address) + 8 // prefix + port + addr + GlobalID
+	} else {
+		head = 6 + 1 + 2 + addrWireLen(firstDest.Address) // keep prefix + UDP flag + port + addr
+	}
+	head += 1 + 2*n // count + sub-frame length fields
+	if head+int(sum) > buf.Size {
+		return false, nil
+	}
+
+	eb := buf.New()
+	if firstFrame {
+		eb.Write(newPacketPrefix[:])
+		AddrParser.WriteAddressPort(eb, w.Dest.Address, w.Dest.Port)
+		eb.Write(w.GlobalID[:])
+		w.Dest.Network = net.Network_Unknown
+	} else {
+		eb.Write(keepPacketPrefix[:])
+		eb.WriteByte(2) // UDP
+		AddrParser.WriteAddressPort(eb, firstDest.Address, firstDest.Port)
+	}
+	eb.WriteByte(byte(n))
+	for _, b := range mb {
+		if b.Len() == 0 {
+			continue
+		}
+		eb.WriteByte(byte(b.Len() >> 8))
+		eb.WriteByte(byte(b.Len()))
+		eb.Write(b.Bytes())
+	}
+	// meta length prefix (2B at offset 0) + Batch option bit (offset 5).
+	l := eb.Len() - 2
+	eb.SetByte(0, byte(l>>8))
+	eb.SetByte(1, byte(l))
+	eb.SetByte(5, eb.Byte(5)|batchOpt)
+	return true, w.Writer.WriteMultiBuffer(buf.MultiBuffer{eb})
 }
 
 func NewPacketReader(reader io.Reader) *PacketReader {

@@ -193,72 +193,10 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 	}
 
 	if meta.GlobalID != [8]byte{} { // MUST ignore empty Global ID
-		mb, err := NewPacketReader(reader, &meta.Target).ReadMultiBuffer()
-		if err != nil {
-			return err
+		if meta.Option.Has(OptionBatch) {
+			return w.handleXUDPBatch(ctx, meta, reader)
 		}
-		XUDPManager.Lock()
-		x := XUDPManager.Map[meta.GlobalID]
-		if x == nil {
-			x = &XUDP{GlobalID: meta.GlobalID}
-			XUDPManager.Map[meta.GlobalID] = x
-			XUDPManager.Unlock()
-		} else {
-			if x.Status == Initializing { // nearly impossible
-				XUDPManager.Unlock()
-				errors.LogWarningInner(ctx, errors.New("conflict"), "XUDP hit ", meta.GlobalID)
-				// It's not a good idea to return an err here, so just let client wait.
-				// Client will receive an End frame after sending a Keep frame.
-				return nil
-			}
-			x.Status = Initializing
-			XUDPManager.Unlock()
-			x.Mux.Close(false) // detach from previous Mux
-			b := buf.New()
-			b.Write(mb[0].Bytes())
-			b.UDP = mb[0].UDP
-			if err = x.Mux.output.WriteMultiBuffer(mb); err != nil {
-				x.Interrupt()
-				mb = buf.MultiBuffer{b}
-			} else {
-				b.Release()
-				mb = nil
-			}
-			errors.LogInfoInner(ctx, err, "XUDP hit ", meta.GlobalID)
-		}
-		if mb != nil {
-			ctx = session.ContextWithTimeoutOnly(ctx, true)
-			// Actually, it won't return an error in Xray-core's implementations.
-			link, err := w.dispatcher.Dispatch(ctx, meta.Target)
-			if err != nil {
-				XUDPManager.Lock()
-				delete(XUDPManager.Map, x.GlobalID)
-				XUDPManager.Unlock()
-				err = errors.New("XUDP new ", meta.GlobalID).Base(errors.New("failed to dispatch request to ", meta.Target).Base(err))
-				return err // it will break the whole Mux connection
-			}
-			link.Writer.WriteMultiBuffer(mb) // it's meaningless to test a new pipe
-			x.Mux = &Session{
-				input:  link.Reader,
-				output: link.Writer,
-			}
-			errors.LogInfoInner(ctx, err, "XUDP new ", meta.GlobalID)
-		}
-		x.Mux = &Session{
-			input:        x.Mux.input,
-			output:       x.Mux.output,
-			parent:       w.sessionManager,
-			ID:           meta.SessionID,
-			transferType: protocol.TransferTypePacket,
-			XUDP:         x,
-		}
-		x.Status = Active
-		if !w.sessionManager.Add(x.Mux) {
-			x.Mux.Close(false)
-			return errors.New("failed to add new session")
-		}
-		go handle(ctx, x.Mux, w.link.Writer)
-		return nil
+		return w.handleXUDPSingle(ctx, meta, reader)
 	}
 
 	link, err := w.dispatcher.Dispatch(ctx, meta.Target)
@@ -286,7 +224,6 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 	if !meta.Option.Has(OptionData) {
 		return nil
 	}
-
 	rr := s.NewReader(reader, &meta.Target)
 	err = buf.Copy(rr, s.output)
 
@@ -295,6 +232,128 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 		return buf.Copy(rr, buf.Discard)
 	}
 	return err
+}
+
+// handleXUDPSingle processes one XUDP datagram (legacy single-frame path
+// and first sub-frame of a batch): reads the payload region and routes it
+// through XUDPManager (session establish/reuse + dispatch).
+func (w *ServerWorker) handleXUDPSingle(ctx context.Context, meta *FrameMetadata, reader *buf.BufferedReader) error {
+	mb, err := NewPacketReader(reader, &meta.Target).ReadMultiBuffer()
+	if err != nil {
+		return err
+	}
+	return w.xudpEstablish(ctx, meta, mb)
+}
+
+// xudpEstablish routes one XUDP datagram into the XUDPManager session:
+// creates the session on first sight, reuses/rotates it on hit, and
+// dispatches to the target when no live Mux exists yet.
+func (w *ServerWorker) xudpEstablish(ctx context.Context, meta *FrameMetadata, mb buf.MultiBuffer) error {
+	XUDPManager.Lock()
+	x := XUDPManager.Map[meta.GlobalID]
+	if x == nil {
+		x = &XUDP{GlobalID: meta.GlobalID}
+		XUDPManager.Map[meta.GlobalID] = x
+		XUDPManager.Unlock()
+	} else {
+		if x.Status == Initializing { // nearly impossible
+			XUDPManager.Unlock()
+			errors.LogWarningInner(ctx, errors.New("conflict"), "XUDP hit ", meta.GlobalID)
+			// It's not a good idea to return an err here, so just let client wait.
+			// Client will receive an End frame after sending a Keep frame.
+			return nil
+		}
+		x.Status = Initializing
+		XUDPManager.Unlock()
+		x.Mux.Close(false) // detach from previous Mux
+		b := buf.New()
+		b.Write(mb[0].Bytes())
+		b.UDP = mb[0].UDP
+		if werr := x.Mux.output.WriteMultiBuffer(mb); werr != nil {
+			x.Interrupt()
+			mb = buf.MultiBuffer{b}
+		} else {
+			b.Release()
+			mb = nil
+		}
+		errors.LogInfoInner(ctx, nil, "XUDP hit ", meta.GlobalID)
+	}
+	if mb != nil {
+		ctx = session.ContextWithTimeoutOnly(ctx, true)
+		// Actually, it won't return an error in Xray-core's implementations.
+		link, err := w.dispatcher.Dispatch(ctx, meta.Target)
+		if err != nil {
+			XUDPManager.Lock()
+			delete(XUDPManager.Map, x.GlobalID)
+			XUDPManager.Unlock()
+			err = errors.New("XUDP new ", meta.GlobalID).Base(errors.New("failed to dispatch request to ", meta.Target).Base(err))
+			return err // it will break the whole Mux connection
+		}
+		link.Writer.WriteMultiBuffer(mb) // it's meaningless to test a new pipe
+		x.Mux = &Session{
+			input:  link.Reader,
+			output: link.Writer,
+		}
+		errors.LogInfoInner(ctx, err, "XUDP new ", meta.GlobalID)
+	}
+	x.Mux = &Session{
+		input:        x.Mux.input,
+		output:       x.Mux.output,
+		parent:       w.sessionManager,
+		ID:           meta.SessionID,
+		transferType: protocol.TransferTypePacket,
+		XUDP:         x,
+	}
+	x.Status = Active
+	if !w.sessionManager.Add(x.Mux) {
+		x.Mux.Close(false)
+		return errors.New("failed to add new session")
+	}
+	go handle(ctx, x.Mux, w.link.Writer)
+	return nil
+}
+
+// handleXUDPBatch expands an L2a batch frame:
+//
+//	[1B count][2B len1][p1][2B len2][p2]...[2B lenN][pN]
+//
+// The first sub-frame goes through xudpEstablish (session establish or
+// reuse); every subsequent sub-frame writes straight into the active
+// session's output — the session is guaranteed Active after the first.
+func (w *ServerWorker) handleXUDPBatch(ctx context.Context, meta *FrameMetadata, reader *buf.BufferedReader) error {
+	var countBuf [1]byte
+	if _, err := io.ReadFull(reader, countBuf[:]); err != nil {
+		return errors.New("failed to read batch count").Base(err)
+	}
+	count := int(countBuf[0])
+	if count < 2 {
+		return errors.New("invalid batch count: ", count)
+	}
+	for i := 0; i < count; i++ {
+		mb, err := NewPacketReader(reader, &meta.Target).ReadMultiBuffer()
+		if err != nil {
+			return errors.New("failed to read batch sub-frame ", i).Base(err)
+		}
+		if i == 0 {
+			if err := w.xudpEstablish(ctx, meta, mb); err != nil {
+				return err
+			}
+			continue
+		}
+		// Sub-frame N>0: the session from the first sub-frame is Active.
+		XUDPManager.Lock()
+		x := XUDPManager.Map[meta.GlobalID]
+		XUDPManager.Unlock()
+		if x == nil || x.Mux == nil {
+			buf.ReleaseMulti(mb)
+			return errors.New("XUDP batch sub-frame before session established")
+		}
+		if err := x.Mux.output.WriteMultiBuffer(mb); err != nil {
+			x.Interrupt()
+			return err
+		}
+	}
+	return nil
 }
 
 func (w *ServerWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.BufferedReader) error {
@@ -309,6 +368,28 @@ func (w *ServerWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 		closingWriter.Close()
 
 		return buf.Copy(NewStreamReader(reader), buf.Discard)
+	}
+
+	// L2a: a batch keep-frame carries [1B count][sub-frames...]; expand
+	// each sub-frame into the same session output.
+	if meta.Option.Has(OptionBatch) {
+		var countBuf [1]byte
+		if _, err := io.ReadFull(reader, countBuf[:]); err != nil {
+			return errors.New("failed to read batch count").Base(err)
+		}
+		count := int(countBuf[0])
+		if count < 2 {
+			return errors.New("invalid batch count: ", count)
+		}
+		for i := 0; i < count; i++ {
+			rr := s.NewReader(reader, &meta.Target)
+			if err := buf.Copy(rr, s.output); err != nil && buf.IsWriteError(err) {
+				errors.LogInfoInner(context.Background(), err, "failed to write to downstream writer. closing session ", s.ID)
+				s.Close(false)
+				return buf.Copy(rr, buf.Discard)
+			}
+		}
+		return nil
 	}
 
 	rr := s.NewReader(reader, &meta.Target)

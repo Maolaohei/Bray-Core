@@ -26,6 +26,12 @@ const (
 const (
 	OptionData  bitmask.Byte = 0x01
 	OptionError bitmask.Byte = 0x02
+	// OptionBatch marks an XUDP frame whose payload region is
+	// [1B count][2B len1][p1]...[2B lenN][pN] — N datagrams sharing one
+	// frame header (L2a batching). Sub-frames use the same 2B-length
+	// layout as single frames, so legacy readers still parse each
+	// sub-frame correctly after the batch flag is stripped.
+	OptionBatch bitmask.Byte = 0x04
 )
 
 type TargetNetwork byte
