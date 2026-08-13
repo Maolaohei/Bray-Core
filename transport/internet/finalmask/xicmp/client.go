@@ -283,7 +283,7 @@ func (c *xicmpConnClient) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	}
 
 	pb := pool.Get().(*[]byte)
-		b := (*pb)[:finalmask.UDPSize]
+	b := (*pb)[:finalmask.UDPSize]
 	defer pool.Put(pb)
 
 	copy(b[8:], c.clientID[:])

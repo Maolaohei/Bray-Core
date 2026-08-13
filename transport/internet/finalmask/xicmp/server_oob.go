@@ -310,7 +310,7 @@ func (c *xicmpConnServer) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	// errors.LogDebug(context.Background(), "id ", r.id, " seq ", r.seq, " addr ", r.addr)
 
 	pb := pool.Get().(*[]byte)
-		b := (*pb)[:finalmask.UDPSize]
+	b := (*pb)[:finalmask.UDPSize]
 	defer pool.Put(pb)
 
 	copy(b[8:], p)
