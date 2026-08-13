@@ -31,7 +31,7 @@ func TestAuthenticationReaderWriter(t *testing.T) {
 
 	writer := NewAuthenticationWriter(&AEADAuthenticator{
 		AEAD:                    aead,
-		NonceGenerator:          GenerateStaticBytes(iv),
+		NonceGenerator:          func() []byte { return iv },
 		AdditionalDataGenerator: GenerateEmptyBytes(),
 	}, PlainChunkSizeParser{}, cache, protocol.TransferTypeStream, nil)
 
@@ -43,7 +43,7 @@ func TestAuthenticationReaderWriter(t *testing.T) {
 
 	reader := NewAuthenticationReader(&AEADAuthenticator{
 		AEAD:                    aead,
-		NonceGenerator:          GenerateStaticBytes(iv),
+		NonceGenerator:          func() []byte { return iv },
 		AdditionalDataGenerator: GenerateEmptyBytes(),
 	}, PlainChunkSizeParser{}, cache, protocol.TransferTypeStream, nil)
 
@@ -84,7 +84,7 @@ func TestAuthenticationReaderWriterPacket(t *testing.T) {
 
 	writer := NewAuthenticationWriter(&AEADAuthenticator{
 		AEAD:                    aead,
-		NonceGenerator:          GenerateStaticBytes(iv),
+		NonceGenerator:          func() []byte { return iv },
 		AdditionalDataGenerator: GenerateEmptyBytes(),
 	}, PlainChunkSizeParser{}, cache, protocol.TransferTypePacket, nil)
 
@@ -106,7 +106,7 @@ func TestAuthenticationReaderWriterPacket(t *testing.T) {
 
 	reader := NewAuthenticationReader(&AEADAuthenticator{
 		AEAD:                    aead,
-		NonceGenerator:          GenerateStaticBytes(iv),
+		NonceGenerator:          func() []byte { return iv },
 		AdditionalDataGenerator: GenerateEmptyBytes(),
 	}, PlainChunkSizeParser{}, cache, protocol.TransferTypePacket, nil)
 

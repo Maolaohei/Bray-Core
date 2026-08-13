@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/apernet/quic-go/congestion"
@@ -114,19 +113,6 @@ type profileConfig struct {
 	expireAckAggregationStartup         bool
 	enableOverestimateAvoidance         bool
 	reduceExtraAckedOnBandwidthIncrease bool
-}
-
-func ParseProfile(profile string) (Profile, error) {
-	switch normalized := strings.ToLower(profile); normalized {
-	case "", string(ProfileStandard):
-		return ProfileStandard, nil
-	case string(ProfileConservative):
-		return ProfileConservative, nil
-	case string(ProfileAggressive):
-		return ProfileAggressive, nil
-	default:
-		return "", fmt.Errorf("unsupported BBR profile %q", profile)
-	}
 }
 
 func configForProfile(profile Profile) profileConfig {

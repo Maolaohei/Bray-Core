@@ -229,32 +229,25 @@ func (x *XUDP) Interrupt() {
 
 var XUDPManager struct {
 	sync.Mutex
-	Map  map[[8]byte]*XUDP
-	quit chan struct{}
+	Map map[[8]byte]*XUDP
 }
 
 func init() {
 	XUDPManager.Map = make(map[[8]byte]*XUDP)
-	XUDPManager.quit = make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				now := time.Now()
-				XUDPManager.Lock()
-				for id, x := range XUDPManager.Map {
-					if x.Status == Expiring && now.After(x.Expire) {
-						x.Interrupt()
-						delete(XUDPManager.Map, id)
-						errors.LogDebug(context.Background(), "XUDP del ", id)
-					}
+		for range ticker.C {
+			now := time.Now()
+			XUDPManager.Lock()
+			for id, x := range XUDPManager.Map {
+				if x.Status == Expiring && now.After(x.Expire) {
+					x.Interrupt()
+					delete(XUDPManager.Map, id)
+					errors.LogDebug(context.Background(), "XUDP del ", id)
 				}
-				XUDPManager.Unlock()
-			case <-XUDPManager.quit:
-				return
 			}
+			XUDPManager.Unlock()
 		}
 	}()
 }

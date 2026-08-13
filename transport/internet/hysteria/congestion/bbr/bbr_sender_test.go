@@ -116,15 +116,3 @@ func TestNewBbrSenderAppliesProfiles(t *testing.T) {
 	}
 }
 
-func TestParseProfile(t *testing.T) {
-	profile, err := ParseProfile("")
-	require.NoError(t, err)
-	require.Equal(t, ProfileStandard, profile)
-
-	profile, err = ParseProfile("Aggressive")
-	require.NoError(t, err)
-	require.Equal(t, ProfileAggressive, profile)
-
-	_, err = ParseProfile("turbo")
-	require.EqualError(t, err, `unsupported BBR profile "turbo"`)
-}

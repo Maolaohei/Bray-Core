@@ -24,20 +24,6 @@ func TestUint16Serial(t *testing.T) {
 	}
 }
 
-func TestUint64Serial(t *testing.T) {
-	b := buf.New()
-	defer b.Release()
-
-	n, err := serial.WriteUint64(b, 10)
-	common.Must(err)
-	if n != 8 {
-		t.Error("expect 8 bytes writtng, but actually ", n)
-	}
-	if diff := cmp.Diff(b.Bytes(), []byte{0, 0, 0, 0, 0, 0, 0, 10}); diff != "" {
-		t.Error(diff)
-	}
-}
-
 func TestReadUint16(t *testing.T) {
 	testCases := []struct {
 		Input  []byte
@@ -73,15 +59,3 @@ func BenchmarkReadUint16(b *testing.B) {
 	}
 }
 
-func BenchmarkWriteUint64(b *testing.B) {
-	writer := buf.New()
-	defer writer.Release()
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_, err := serial.WriteUint64(writer, 8)
-		common.Must(err)
-		writer.Clear()
-	}
-}

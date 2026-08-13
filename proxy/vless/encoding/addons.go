@@ -111,10 +111,6 @@ func marshalAddons(addons *Addons) []byte {
 }
 
 // MarshalAddons is an exported wrapper for benchmark testing.
-func MarshalAddons(addons *Addons) []byte {
-	return marshalAddons(addons)
-}
-
 func lenVarint(x uint32) int {
 	n := 0
 	for x >= 0x80 {

@@ -32,48 +32,6 @@ type Matcher interface {
 	Match(input string) bool
 }
 
-// MatcherGroup is an advanced type of matcher to accept a bunch of basic Matchers (of certain type, not all matcher types).
-// For example:
-//   - FullMatcherGroup accepts FullMatcher and uses a hash table to facilitate lookup.
-//   - DomainMatcherGroup accepts DomainMatcher and uses a trie to optimize both memory consumption and lookup speed.
-type MatcherGroup interface {
-	// Match returns all matched matchers with their corresponding values.
-	Match(input string) []uint32
-
-	// MatchAny returns true as soon as one matching matcher is found.
-	MatchAny(input string) bool
-}
-
-// IndexMatcher is a general type of matcher thats accepts all kinds of basic matchers.
-// It should:
-//   - Accept all Matcher types with no exception.
-//   - Optimize string matching with a combination of MatcherGroups.
-//   - Obey certain priority order specification when returning matched Matchers.
-type IndexMatcher interface {
-	// Size returns number of matchers added to IndexMatcher.
-	Size() uint32
-
-	// Add adds a new Matcher to IndexMatcher, and returns its index. The index will never be 0.
-	Add(matcher Matcher) uint32
-
-	// Build builds the IndexMatcher to be ready for matching.
-	Build() error
-
-	// Match returns the indices of all matchers that matches the input.
-	//   * Empty array is returned if no such matcher exists.
-	//   * The order of returned matchers should follow priority specification.
-	//   * The returned slice is owned by the caller and may be safely modified.
-	// Priority specification:
-	//   1. Priority between matcher types: full > domain > substr > regex.
-	//   2. Priority of same-priority matchers matching at same position: the early added takes precedence.
-	//   3. Priority of domain matchers matching at different levels: the further matched domain takes precedence.
-	//   4. Priority of substr matchers matching at different positions: the further matched substr takes precedence.
-	Match(input string) []uint32
-
-	// MatchAny returns true as soon as one matching matcher is found.
-	MatchAny(input string) bool
-}
-
 // ValueMatcher is a general type of matcher that accepts all kinds of basic matchers.
 // It should:
 //   - Accept all Matcher types with no exception.

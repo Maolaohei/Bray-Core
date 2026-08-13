@@ -22,8 +22,3 @@ func WriteUint16(writer io.Writer, value uint16) (int, error) {
 }
 
 // WriteUint64 writes an uint64 value into writer.
-func WriteUint64(writer io.Writer, value uint64) (int, error) {
-	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], value)
-	return writer.Write(b[:])
-}

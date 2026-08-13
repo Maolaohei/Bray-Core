@@ -7,33 +7,6 @@ import (
 	. "github.com/xtls/xray-core/proxy/vless/encoding"
 )
 
-func BenchmarkMarshalAddons_Vision(b *testing.B) {
-	addons := &Addons{Flow: "xtls-rprx-vision"}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = MarshalAddons(addons)
-	}
-}
-
-func BenchmarkMarshalAddons_Empty(b *testing.B) {
-	addons := &Addons{}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = MarshalAddons(addons)
-	}
-}
-
-func BenchmarkMarshalAddons_WithSeed(b *testing.B) {
-	addons := &Addons{Flow: "xtls-rprx-vision", Seed: make([]byte, 32)}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = MarshalAddons(addons)
-	}
-}
-
 func BenchmarkDecodeHeaderAddons(b *testing.B) {
 	buffer := buf.StackNew()
 	defer buffer.Release()

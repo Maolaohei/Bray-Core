@@ -23,10 +23,6 @@ func TestReadError(t *testing.T) {
 		t.Fatal("expected error, but nil")
 	}
 
-	if !buf.IsReadError(err) {
-		t.Error("expected to be ReadError, but not")
-	}
-
 	if err.Error() != "common/buf_test: error" {
 		t.Fatal("unexpected error message: ", err.Error())
 	}

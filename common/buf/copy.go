@@ -65,11 +65,6 @@ func (e readError) Unwrap() error {
 }
 
 // IsReadError returns true if the error in Copy() comes from reading.
-func IsReadError(err error) bool {
-	_, ok := err.(readError)
-	return ok
-}
-
 type writeError struct {
 	error
 }
