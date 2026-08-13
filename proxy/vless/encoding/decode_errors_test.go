@@ -135,4 +135,3 @@ func TestDecodeRequestHeader_TCPRoundTrip(t *testing.T) {
 		t.Fatal("nil addons")
 	}
 }
-

@@ -21,7 +21,6 @@ func GenerateEmptyBytes() BytesGenerator {
 	}
 }
 
-
 func GenerateIncreasingNonce(nonce []byte) BytesGenerator {
 	c := append([]byte(nil), nonce...)
 	return func() []byte {

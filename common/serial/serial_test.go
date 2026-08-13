@@ -58,4 +58,3 @@ func BenchmarkReadUint16(b *testing.B) {
 		reader.Extend(2)
 	}
 }
-
