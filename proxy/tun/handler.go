@@ -17,7 +17,6 @@ import (
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
-	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/stat"
@@ -33,8 +32,6 @@ type Handler struct {
 	dispatcher      routing.Dispatcher
 	tag             string
 	sniffingRequest session.SniffingRequest
-	uplinkCounter   stats.Counter
-	downlinkCounter stats.Counter
 }
 
 // ConnectionHandler interface with the only method that stack is going to push new connections to
@@ -62,31 +59,6 @@ func (t *Handler) Init(ctx context.Context, pm policy.Manager, dispatcher routin
 	t.policyManager = pm
 	t.dispatcher = dispatcher
 
-	if len(t.tag) > 0 && pm.ForSystem().Stats.InboundUplink {
-		statsManager := core.MustFromContext(ctx).GetFeature(stats.ManagerType()).(stats.Manager)
-		name := "inbound>>>" + t.tag + ">>>traffic>>>uplink"
-<<<<<<< HEAD
-		c, _ := statsManager.GetOrRegisterCounter(name)
-=======
-		c, _ := stats.GetOrRegisterCounter(statsManager, name)
->>>>>>> dda2b10c (TUN inbound: Add traffic counters; Metrics: Rely on instance (#6349))
-		if c != nil {
-			t.uplinkCounter = c
-		}
-	}
-	if len(t.tag) > 0 && pm.ForSystem().Stats.InboundDownlink {
-		statsManager := core.MustFromContext(ctx).GetFeature(stats.ManagerType()).(stats.Manager)
-		name := "inbound>>>" + t.tag + ">>>traffic>>>downlink"
-<<<<<<< HEAD
-		c, _ := statsManager.GetOrRegisterCounter(name)
-=======
-		c, _ := stats.GetOrRegisterCounter(statsManager, name)
->>>>>>> dda2b10c (TUN inbound: Add traffic counters; Metrics: Rely on instance (#6349))
-		if c != nil {
-			t.downlinkCounter = c
-		}
-	}
-
 	return nil
 }
 
@@ -97,34 +69,36 @@ func (t *Handler) Start() error {
 		return err
 	}
 
-	tunIndex, err := tunInterface.Index()
-	if err != nil {
-		_ = tunInterface.Close()
-		return err
-	}
-	if t.config.AutoOutboundsInterface == "auto" {
-		t.config.AutoOutboundsInterface = ""
-	}
-	updater = &InterfaceUpdater{tunIndex: tunIndex, fixedName: t.config.AutoOutboundsInterface, quit: make(chan struct{})}
-	updater.Start()
-	internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
-		iface := updater.Get()
-		if iface == nil {
-			errors.LogInfo(context.Background(), "[tun] falied to set interface > iface == nil")
-			return nil
+	if t.config.AutoOutboundsInterface != "" {
+		tunIndex, err := tunInterface.Index()
+		if err != nil {
+			_ = tunInterface.Close()
+			return err
 		}
-		return c.Control(func(fd uintptr) {
-			addrPort, _ := netip.ParseAddrPort(address)
-			// skip loopback
-			if addrPort.Addr().IsLoopback() || strings.HasPrefix(strings.ToLower(address), "localhost:") {
-				return
+		if t.config.AutoOutboundsInterface == "auto" {
+			t.config.AutoOutboundsInterface = ""
+		}
+		updater = &InterfaceUpdater{tunIndex: tunIndex, fixedName: t.config.AutoOutboundsInterface}
+		updater.Update()
+		internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
+			iface := updater.Get()
+			if iface == nil {
+				errors.LogInfo(context.Background(), "[tun] falied to set interface > iface == nil")
+				return nil
 			}
-			err := setinterface(network, address, fd, iface)
-			if err != nil {
-				errors.LogInfoInner(context.Background(), err, "[tun] falied to set interface")
-			}
+			return c.Control(func(fd uintptr) {
+				addrPort, _ := netip.ParseAddrPort(address)
+				// skip loopback
+				if addrPort.Addr().IsLoopback() || strings.HasPrefix(strings.ToLower(address), "localhost:") {
+					return
+				}
+				err := setinterface(network, address, fd, iface)
+				if err != nil {
+					errors.LogInfoInner(context.Background(), err, "[tun] falied to set interface")
+				}
+			})
 		})
-	})
+	}
 
 	errors.LogInfo(t.ctx, tunName, " created")
 
@@ -177,14 +151,6 @@ func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
 		return
 	}
 	source := net.DestinationFromAddr(remote)
-	if t.uplinkCounter != nil || t.downlinkCounter != nil {
-		conn = &stat.CounterConnection{
-			Connection:   conn,
-			ReadCounter:  t.uplinkCounter,
-			WriteCounter: t.downlinkCounter,
-		}
-	}
-
 	inbound := session.Inbound{
 		Name:          "tun",
 		Tag:           t.tag,
