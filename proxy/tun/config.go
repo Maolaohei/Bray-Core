@@ -99,4 +99,3 @@ func (updater *InterfaceUpdater) debounceUpdate() {
 	}
 	updater.debounceTimer = time.AfterFunc(debounceInterval, updater.Update)
 }
-

@@ -173,9 +173,9 @@ func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
 	source := net.DestinationFromAddr(remote)
 	if t.uplinkCounter != nil || t.downlinkCounter != nil {
 		conn = &stat.CounterConnection{
-			Connection:    conn,
-			ReadCounter:   t.uplinkCounter,
-			WriteCounter:  t.downlinkCounter,
+			Connection:   conn,
+			ReadCounter:  t.uplinkCounter,
+			WriteCounter: t.downlinkCounter,
 		}
 	}
 	inbound := session.Inbound{
