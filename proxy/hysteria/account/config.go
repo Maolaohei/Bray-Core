@@ -3,7 +3,6 @@ package account
 import (
 	"sync"
 
-	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 
@@ -27,9 +26,9 @@ type MemoryAccount struct {
 	VR   net.Port
 }
 
-func (a *MemoryAccount) Equals(another protocol.Account) bool {
-	if account, ok := another.(*MemoryAccount); ok {
-		return a.Auth == account.Auth
+func (a *MemoryAccount) Equals(other protocol.Account) bool {
+	if b, ok := other.(*MemoryAccount); ok {
+		return a.Auth == b.Auth
 	}
 	return false
 }
@@ -41,78 +40,48 @@ func (a *MemoryAccount) ToProto() proto.Message {
 }
 
 type Validator struct {
-	emails map[string]struct{}
-	users  map[string]*protocol.MemoryUser
-	ids    map[uuid.UUID]*protocol.MemoryUser
-
-	mutex sync.Mutex
+	users sync.Map
+	ids   sync.Map
+	mu    sync.Mutex
 }
 
 func NewValidator() *Validator {
-	return &Validator{
-		emails: make(map[string]struct{}),
-		users:  make(map[string]*protocol.MemoryUser),
-		ids:    make(map[uuid.UUID]*protocol.MemoryUser),
-	}
+	return &Validator{}
 }
 
-func (v *Validator) Add(u *protocol.MemoryUser) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	if u.Email != "" {
-		if _, ok := v.emails[u.Email]; ok {
-			return errors.New("User ", u.Email, " already exists.")
-		}
-		v.emails[u.Email] = struct{}{}
-	}
-	auth := u.Account.(*MemoryAccount).Auth
-	v.users[auth] = u
-	if id, err := uuid.Parse(auth); err == nil {
+func (v *Validator) Add(user *protocol.MemoryUser) (err error) {
+	v.mu.Lock()
+	v.users.Store(user.Account.(*MemoryAccount).Auth, user)
+	if id, err := uuid.Parse(user.Account.(*MemoryAccount).Auth); err == nil {
 		id[6] = 0
 		id[7] = 0
-		v.ids[id] = u
+		v.ids.Store(id, user)
 	}
-
-	return nil
+	v.mu.Unlock()
+	return
 }
 
-func (v *Validator) DelByEmail(email string) error {
-	if email == "" {
-		return errors.New("Email must not be empty.")
-	}
-
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	if _, ok := v.emails[email]; !ok {
-		return errors.New("User ", email, " not found.")
-	}
-	delete(v.emails, email)
-	for key, user := range v.users {
-		if user.Email == email {
-			delete(v.users, key)
-			if id, err := uuid.Parse(key); err == nil {
-				id[6] = 0
-				id[7] = 0
-				delete(v.ids, id)
-			}
-			break
+func (v *Validator) DelByEmail(email string) (err error) {
+	v.mu.Lock()
+	if user := v.GetByEmail(email); user != nil {
+		auth := user.Account.(*MemoryAccount).Auth
+		v.users.Delete(auth)
+		if id, err := uuid.Parse(auth); err == nil {
+			id[6] = 0
+			id[7] = 0
+			v.ids.Delete(id)
 		}
 	}
-
-	return nil
+	v.mu.Unlock()
+	return
 }
 
-func (v *Validator) Get(auth string) *protocol.MemoryUser {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
+func (v *Validator) Get(auth string) (user *protocol.MemoryUser) {
 	if id, err := uuid.Parse(auth); err == nil {
-		if user := v.getID(id); user != nil {
+		if user = v.GetByID(id); user != nil {
 			VR := net.PortFromBytes(id[6:8])
 			if user.Account.(*MemoryAccount).VR != VR {
-				return &protocol.MemoryUser{
+				user = &protocol.MemoryUser{
 					Email: user.Email,
 					Level: user.Level,
 					Account: &MemoryAccount{
@@ -121,59 +90,55 @@ func (v *Validator) Get(auth string) *protocol.MemoryUser {
 					},
 				}
 			}
-			return user
 		}
+		return
 	}
-	return v.users[auth]
+	if value, ok := v.users.Load(auth); ok {
+		user = value.(*protocol.MemoryUser)
+	}
+	return
 }
 
-func (v *Validator) getID(id uuid.UUID) *protocol.MemoryUser {
+func (v *Validator) GetByID(id uuid.UUID) (user *protocol.MemoryUser) {
 	id[6] = 0
 	id[7] = 0
-	return v.ids[id]
+	if value, ok := v.ids.Load(id); ok {
+		user = value.(*protocol.MemoryUser)
+	}
+	return
 }
 
-func (v *Validator) GetByEmail(email string) *protocol.MemoryUser {
-	if email == "" {
-		return nil
-	}
-
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	if _, ok := v.emails[email]; ok {
-		for _, user := range v.users {
-			if user.Email == email {
-				return user
-			}
+func (v *Validator) GetByEmail(email string) (user *protocol.MemoryUser) {
+	v.users.Range(func(key, value any) bool {
+		if value.(*protocol.MemoryUser).Email == email {
+			user = value.(*protocol.MemoryUser)
+			return false
 		}
-	}
-
-	return nil
+		return true
+	})
+	return
 }
 
-func (v *Validator) GetAll() []*protocol.MemoryUser {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	users := make([]*protocol.MemoryUser, 0, len(v.users))
-	for _, user := range v.users {
-		users = append(users, user)
-	}
-
-	return users
+func (v *Validator) GetAll() (users []*protocol.MemoryUser) {
+	v.users.Range(func(key, value any) bool {
+		users = append(users, value.(*protocol.MemoryUser))
+		return true
+	})
+	return
 }
 
-func (v *Validator) GetCount() int64 {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	return int64(len(v.users))
+func (v *Validator) GetCount() (count int64) {
+	v.users.Range(func(key, value any) bool {
+		count++
+		return true
+	})
+	return
 }
 
-func (v *Validator) NotEmpty() bool {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	return len(v.users) > 0
+func (v *Validator) NotEmpty() (not_empty bool) {
+	v.users.Range(func(key, value any) bool {
+		not_empty = true
+		return false
+	})
+	return
 }
