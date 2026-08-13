@@ -720,8 +720,11 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 	c.ApplyMetaToRequest(request, sessionId, "")
 
 	if request.Body != nil && !c.NoGRPCHeader { // stream-up/one
-		// Bray-only: application/grpc is a common XHTTP stream fingerprint.
-		request.Header.Set("Content-Type", "application/octet-stream")
+		// Bray-only: application/grpc is a common XHTTP stream fingerprint,
+		// and application/octet-stream is not something browsers upload via
+		// fetch. sendBeacon-style text/plain is the browser-natural choice;
+		// the server never inspects Content-Type.
+		request.Header.Set("Content-Type", "text/plain;charset=UTF-8")
 	}
 }
 

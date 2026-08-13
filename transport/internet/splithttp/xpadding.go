@@ -245,9 +245,11 @@ func init() {
 	// a pre-computed Tokenish padding string. The old implementation only
 	// covered 1..31 and multiples-of-32 up to 1024 (sparse map); filling
 	// every slot makes the table uniform, eliminates the map hash lookup,
-	// and lets the compiler prove index safety (BCE).
+	// and lets the compiler prove index safety (BCE). Shapes are mixed
+	// (base62 / dashed-hex / lowercase-hex) so values look like real
+	// request-id headers rather than generator output.
 	for length := 1; length <= tokenishCacheMaxLen; length++ {
-		tokenishCacheArray[length] = generateTokenishPaddingBase62Raw(length)
+		tokenishCacheArray[length] = generateTokenishPadding(length)
 	}
 
 	// Fill strictCache: every (method, length) in [1, strictCacheMaxLen] gets
@@ -279,14 +281,104 @@ func methodIndex(method PaddingMethod) int {
 func generatePaddingForMethod(method PaddingMethod, length int) string {
 	switch method {
 	case PaddingMethodTokenish:
-		s := generateTokenishPaddingBase62Raw(length)
-		if s == "" {
-			return generateRepeatX(length)
-		}
-		return s
+		return generateTokenishPadding(length)
 	default:
 		return generateRepeatX(length)
 	}
+}
+
+// hexChars is the lowercase hex alphabet used by the realistic token shapes.
+const hexChars = "0123456789abcdef"
+
+// generateTokenishPadding produces a tokenish padding string that mixes
+// realistic header-value shapes with the legacy base62 look. Real-world
+// X-Request-Id / X-Correlation-Id / trace values are UUIDs, lowercase hex
+// tokens, or mixed alnum — a pure uniform base62 string is a generator
+// signature. Roughly a third each: base62, dashed-hex (UUID-like),
+// lowercase-hex (API-token-like). Init-time only (cache prefill), so this
+// costs nothing on the hot path; the server's tokenish validation only
+// checks huffman-encoded length, so all three shapes pass unchanged.
+// targetHuffmanBytes is the huffman-encoded length the value must match
+// (the wire-visible length), like the base62 raw generator.
+func generateTokenishPadding(targetHuffmanBytes int) string {
+	switch randpool.Global.IntN(3) {
+	case 1:
+		return generateTokenishShape(targetHuffmanBytes, generateDashedHex)
+	case 2:
+		return generateTokenishShape(targetHuffmanBytes, generateLowerHex)
+	default:
+		return generateTokenishPaddingBase62Raw(targetHuffmanBytes)
+	}
+}
+
+// generateTokenishShape produces a shape string whose huffman-encoded
+// length matches targetHuffmanBytes, iterating the character count until it
+// converges (hex chars average ~0.75 bytes/char under hpack huffman).
+func generateTokenishShape(targetHuffmanBytes int, gen func(n int) string) string {
+	if targetHuffmanBytes <= 0 {
+		return ""
+	}
+	n := (targetHuffmanBytes*4 + 2) / 3
+	for i := 0; i < 8; i++ {
+		s := gen(n)
+		if d := cachedHuffmanLen(len(s)) - targetHuffmanBytes; d == 0 {
+			return s
+		} else if d < 0 {
+			n++
+		} else {
+			n--
+		}
+	}
+	return gen(n) // best effort after bounded iterations
+}
+
+// generateDashedHex builds a UUID-like dashed-hex string of the requested
+// length: the classic 8-4-4-4-12 grouping for length 36, a scalable
+// dashed-hex shape otherwise. '-' is a 6-bit huffman symbol (same order as
+// base62 letters), so validation tolerance is unaffected.
+func generateDashedHex(length int) string {
+	if length <= 0 {
+		return ""
+	}
+	buf := make([]byte, 0, length+8)
+	group := 0
+	for len(buf) < length {
+		var g int
+		switch group {
+		case 0:
+			g = 8
+		case 1, 2, 3:
+			g = 4
+		case 4:
+			g = 12
+		default:
+			g = 4
+		}
+		group++
+		if g > length-len(buf) {
+			g = length - len(buf)
+		}
+		for i := 0; i < g; i++ {
+			buf = append(buf, hexChars[randpool.Global.IntN(16)])
+		}
+		if len(buf) < length {
+			buf = append(buf, '-')
+		}
+	}
+	return string(buf)
+}
+
+// generateLowerHex builds a lowercase-hex string of the requested length
+// (common API-token / request-id shape).
+func generateLowerHex(length int) string {
+	if length <= 0 {
+		return ""
+	}
+	buf := make([]byte, length)
+	for i := range buf {
+		buf[i] = hexChars[randpool.Global.IntN(16)]
+	}
+	return string(buf)
 }
 
 func generateTokenishPaddingBase62Raw(targetHuffmanBytes int) string {

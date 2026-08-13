@@ -699,6 +699,10 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			DisableCompression: true,
 			// 16KiB frame matches browser HTTP/2 SETTINGS (anti-fingerprint);
 			// the 256KiB value is a recognizable non-browser machine marker.
+			// (x/net's client SETTINGS are otherwise fixed: EnablePush=0 +
+			// 4MiB initial window + MaxFrameSize; the window is not
+			// configurable on the client side and is not a high-value
+			// fingerprint.)
 			MaxReadFrameSize: 16384,
 		}
 
@@ -723,6 +727,10 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			DisableCompression: true,
 			// 16KiB frame matches browser HTTP/2 SETTINGS (anti-fingerprint);
 			// the 256KiB value is a recognizable non-browser machine marker.
+			// (x/net's client SETTINGS are otherwise fixed: EnablePush=0 +
+			// 4MiB initial window + MaxFrameSize; the window is not
+			// configurable on the client side and is not a high-value
+			// fingerprint.)
 			MaxReadFrameSize: 16384,
 		}
 	} else {
