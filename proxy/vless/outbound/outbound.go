@@ -367,7 +367,16 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		}
 		timeoutReader, ok := clientReader.(buf.TimeoutReader)
 		if ok {
-			multiBuffer, err1 := timeoutReader.ReadMultiBufferTimeout(time.Millisecond * 500)
+			// First-packet merge window: XRV keeps 500ms so the header
+			// ships merged with padding (TLS-in-TLS cover); non-XRV flows
+			// have no such need — a long wait only inflates TTFB, so a
+			// short window still coalesces a pipe that already holds
+			// data but never stalls a request.
+			mergeWindow := time.Millisecond * 500
+			if requestAddons.Flow != vless.XRV {
+				mergeWindow = time.Millisecond * 50
+			}
+			multiBuffer, err1 := timeoutReader.ReadMultiBufferTimeout(mergeWindow)
 			if err1 == nil {
 				if err := serverWriter.WriteMultiBuffer(multiBuffer); err != nil {
 					return err // ...

@@ -772,6 +772,27 @@ func burstConnectionLimit(steady int32) int {
 	return burst
 }
 
+// rttAdjustedIdleNs stretches or shrinks a connection's idle-eviction
+// timeout by the current smoothed RTT: rebuild cost scales with RTT, so
+// slow links keep connections longer. Stays within ±25% of the skewed
+// base and never leaves the 90-240s band (fingerprint surface unchanged).
+func rttAdjustedIdleNs(baseNs int64, rtt time.Duration) int64 {
+	base := baseNs / int64(time.Second)
+	switch {
+	case rtt >= 200*time.Millisecond:
+		base = base * 4 / 3
+	case rtt <= 20*time.Millisecond:
+		base = base * 3 / 4
+	}
+	if base < clientIdleTimeoutMinSecs {
+		base = clientIdleTimeoutMinSecs
+	}
+	if base > clientIdleTimeoutMaxSecs {
+		base = clientIdleTimeoutMaxSecs
+	}
+	return base * int64(time.Second)
+}
+
 // maybeIdleActivity schedules a beacon-style request on an idle connection,
 // rate-limited per connection. Called from healthCheckTick for clients with
 // zero active streams. Does NOT refresh LastUsed: eviction timing stays tied
@@ -912,12 +933,22 @@ func (m *XmuxManager) healthCheckTick() {
 			m.pool.RemoveAt(i)
 			continue
 		}
-		// Idle eviction: only evict if NO active streams AND idle for too long
-		if lastUsed := c.LastUsed.Load(); lastUsed > 0 && now.UnixNano()-lastUsed > c.idleTimeoutNs {
-			errors.LogDebug(context.Background(), "XMUX: health-check removing idle xmuxClient, lastUsed=", time.Unix(0, lastUsed).Format(time.RFC3339))
-			c.maybeDrain()
-			m.pool.RemoveAt(i)
-			continue
+		// Idle eviction: only evict if NO active streams AND idle for too long.
+		// B7: RTT-aware timeout — a rebuild costs ~1-2 RTT, so high-latency
+		// links keep connections longer; low-latency links evict sooner.
+		// Recomputed each tick so a link that degrades mid-session gets a
+		// longer window without a fresh connection setup.
+		if lastUsed := c.LastUsed.Load(); lastUsed > 0 {
+			idleNs := c.idleTimeoutNs
+			if rtt := c.GetRTT(); rtt > 0 {
+				idleNs = rttAdjustedIdleNs(idleNs, rtt)
+			}
+			if now.UnixNano()-lastUsed > idleNs {
+				errors.LogDebug(context.Background(), "XMUX: health-check removing idle xmuxClient, lastUsed=", time.Unix(0, lastUsed).Format(time.RFC3339))
+				c.maybeDrain()
+				m.pool.RemoveAt(i)
+				continue
+			}
 		}
 		if c.createdAt.After(now.Add(-coldStartProtectionMs * time.Millisecond)) {
 			i++

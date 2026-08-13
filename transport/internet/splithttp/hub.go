@@ -5,6 +5,7 @@ import (
 	gotls "crypto/tls"
 	"encoding/base64"
 	"io"
+	"math"
 	stdnet "net"
 	"net/http"
 	"runtime"
@@ -260,10 +261,39 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 	}
 
 	if h.sessionCount() >= maxSessionsPerHandler {
-		errors.LogDebug(context.Background(),
-			"XHTTP session limit reached, max=", maxSessionsPerHandler,
-		)
-		return nil
+		// H3: before rejecting, reap the half-open session expiring
+		// soonest — a probe/establishment flood recycles stale entries
+		// instead of 503-ing real clients. Fully-connected sessions are
+		// never reaped here (they have no expiry anyway). Full-table scan
+		// only happens on this rare at-capacity path.
+		var oldest *httpSession
+		var oldestKey string
+		oldestExp := int64(math.MaxInt64)
+		h.sessions.Range(func(key, value any) bool {
+			s := value.(*httpSession)
+			if d := s.peekFullyConnected(); d != nil {
+				select {
+				case <-d.Wait():
+					return true // fully connected: skip
+				default:
+				}
+			}
+			if e := s.expiresAt.Load(); e < oldestExp {
+				oldestExp = e
+				oldest = s
+				oldestKey = key.(string)
+			}
+			return true
+		})
+		if oldest != nil {
+			h.deleteSession(oldestKey, oldest)
+			oldest.close()
+		} else {
+			errors.LogDebug(context.Background(),
+				"XHTTP session limit reached and nothing to reap, max=", maxSessionsPerHandler,
+			)
+			return nil
+		}
 	}
 
 	s := &httpSession{

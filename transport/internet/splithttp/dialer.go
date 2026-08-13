@@ -13,6 +13,7 @@ import (
 	"net/url"
 	reflect "reflect"
 	"runtime"
+
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -455,7 +456,14 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 	multiStickyKey := stickyEndpointKey(dest.NetAddr(), stickyEPHost)
 
 	dialRawTCP := func(ctxInner context.Context, target net.Destination) (net.Conn, error) {
-		return internet.DialSystem(ctxInner, target, streamSettings.SocketSettings)
+		conn, err := internet.DialSystem(ctxInner, target, streamSettings.SocketSettings)
+		if err != nil {
+			return nil, err
+		}
+		// ToT M3: outer-path socket tuning (Linux: BBR + larger buffers;
+		// other platforms no-op). See tune_socket_linux.go.
+		tuneOuterSocket(conn)
+		return conn, nil
 	}
 
 	dialContext := func(ctxInner context.Context) (net.Conn, error) {
@@ -1253,8 +1261,20 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 						remainder = nil
 						break
 					}
+					// L3a: small-packet flows (game heartbeats, DNS — avg
+					// payload < 256B) cap the chunk at the minimum so each
+					// POST flushes promptly and the server reorder buffer
+					// sees tighter seq spacing; large-packet flows keep
+					// the RTT-adaptive size. Pacing interval is untouched
+					// (camouflage surface preserved).
+					effMax := maxUploadSize
+					if n := chunkAvgPacketSize(remainder); n > 0 && n < 256 {
+						if effMax > packetUploadChunkMin {
+							effMax = packetUploadChunkMin
+						}
+					}
 					var chunk buf.MultiBuffer
-					remainder, chunk = buf.SplitSize(remainder, maxUploadSize)
+					remainder, chunk = buf.SplitSize(remainder, effMax)
 					if chunk.IsEmpty() {
 						break
 					}

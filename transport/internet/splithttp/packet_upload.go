@@ -16,8 +16,9 @@ import (
 )
 
 // packetUploadMaxAttempts is the max tries for a single packet-up POST
-// (1 initial + retries). Keep small to bound head-of-line delay.
-const packetUploadMaxAttempts = 3
+// (1 initial + retries). 4 covers one outer-path blip (25/50/100ms backoff
+// stays inside the server 2s gap timeout) while bounding HoL delay.
+const packetUploadMaxAttempts = 4
 
 // packetUploadRetryBase is the first backoff step after a failed POST.
 const packetUploadRetryBase = 25 * time.Millisecond
@@ -144,7 +145,9 @@ func packetUploadWindow(scMaxBufferedPosts int, rtt time.Duration) int {
 		// Was 24 (packetUploadMaxWindow): on high-RTT/jittery links a lost
 		// seq's retry backoff can exceed the server 2s gap timeout and abort
 		// the whole session. Cap lower to keep retries inside the gap window.
-		w = 12
+		// 8 (ToT L2): fewer in-flight POSTs also shrink amplification when
+		// the outer path reorders heavily.
+		w = 8
 	case rtt >= 80*time.Millisecond:
 		w = 18
 	case rtt >= 20*time.Millisecond:
@@ -177,6 +180,19 @@ const (
 // at ~30ms/post when scMaxEachPostBytes is much larger than the write size.
 const packetUploadBulkPaceBytes int32 = 8 * 1024
 
+// chunkAvgPacketSize returns the average per-buffer payload size of a
+// MultiBuffer (0 when empty), used by the L3a small-packet flow detector.
+func chunkAvgPacketSize(mb buf.MultiBuffer) int32 {
+	if len(mb) == 0 {
+		return 0
+	}
+	var total int32
+	for _, b := range mb {
+		total += b.Len()
+	}
+	return total / int32(len(mb))
+}
+
 // packetUploadChunkSize chooses an effective max POST body size.
 // configuredMax is the operator/config ceiling (must never be exceeded).
 // rtt==0 keeps configuredMax so cold starts stay compatible.
@@ -190,7 +206,11 @@ func packetUploadChunkSize(configuredMax int32, rtt time.Duration) int32 {
 		// Unknown RTT: honor config ceiling (stable default).
 		return configuredMax
 	case rtt >= 200*time.Millisecond:
-		target = configuredMax
+		// ToT L2: cap chunk size on high-RTT paths — a single lost POST
+		// at 1MB amplifies badly through the retry + reorder window.
+		if configuredMax > packetUploadChunkMid {
+			target = packetUploadChunkMid
+		}
 	case rtt >= 80*time.Millisecond:
 		if configuredMax > packetUploadChunkMid {
 			target = packetUploadChunkMid

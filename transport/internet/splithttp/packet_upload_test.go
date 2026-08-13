@@ -149,7 +149,7 @@ func TestPacketUploadWindow(t *testing.T) {
 	if got := packetUploadWindow(64, 100*time.Millisecond); got != 18 {
 		t.Fatalf("mid rtt=%d", got)
 	}
-	if got := packetUploadWindow(64, 250*time.Millisecond); got != 12 {
+	if got := packetUploadWindow(64, 250*time.Millisecond); got != 8 {
 		t.Fatalf("high rtt=%d", got)
 	}
 	// server buffer still caps high-RTT growth (half of 8 = 4)
@@ -181,8 +181,8 @@ func TestPacketUploadChunkSize(t *testing.T) {
 	if got := packetUploadChunkSize(cfg, 100*time.Millisecond); got != packetUploadChunkMid {
 		t.Fatalf("mid rtt=%d", got)
 	}
-	if got := packetUploadChunkSize(cfg, 250*time.Millisecond); got != cfg {
-		t.Fatalf("high rtt must use full ceiling: %d", got)
+	if got := packetUploadChunkSize(cfg, 250*time.Millisecond); got != packetUploadChunkMid {
+		t.Fatalf("high rtt must cap at mid chunk (ToT L2): %d", got)
 	}
 	// Never exceed configured, even when floors are higher.
 	if got := packetUploadChunkSize(16*1024, 10*time.Millisecond); got != 16*1024 {
