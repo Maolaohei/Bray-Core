@@ -52,12 +52,29 @@ type uploadQueue struct {
 
 func NewUploadQueue(maxPackets int) *uploadQueue {
 	return &uploadQueue{
-		pushedPackets: make(chan Packet, maxPackets),
-		heap:          make(packetHeap, 0, min(maxPackets, 64)),
-		nextSeq:       0,
-		maxPackets:    maxPackets,
+		// L1: channel and heap backing are allocated lazily on first
+		// Push — pure download / stream-only sessions never pay the
+		// ~7.2KB eager chan+heap (64×56B chan + 64×56B heap).
+		maxPackets: maxPackets,
 	}
 }
+
+// ensureQueue lazily allocates the channel and heap backing. Caller must
+// hold writeCloseMutex (Push does; Read only touches the fields after the
+// channel is non-nil, which implies a Push happened).
+func (h *uploadQueue) ensureQueue() {
+	if h.pushedPackets == nil {
+		// L2: heap backing capped at 16 (deep enough for reordering:
+		// packet-up window maxes at 24 in-flight, heap rarely exceeds a
+		// handful of misordered packets); channel keeps maxPackets.
+		h.pushedPackets = make(chan Packet, h.maxPackets)
+		h.heap = make(packetHeap, 0, min(h.maxPackets, 16))
+	}
+}
+
+// queuePollInterval is how often Read re-checks for a lazily-created queue
+// while waiting for the first Push. Bounded by the 2s gap timeout.
+const queuePollInterval = 200 * time.Microsecond
 
 func (h *uploadQueue) Push(p Packet) error {
 	// Serialize all channel sends with Close(). An unlocked try-send races
@@ -81,6 +98,7 @@ func (h *uploadQueue) Push(p Packet) error {
 	if p.Reader != nil {
 		h.nomore = true
 	}
+	h.ensureQueue()
 	// Bray-only: never block the HTTP handler on a full queue (DoS pin).
 	// Caller maps this error to a uniform 404; client retries on a new session.
 	select {
@@ -96,7 +114,7 @@ func (h *uploadQueue) Close() error {
 	h.writeCloseMutex.Lock()
 	defer h.writeCloseMutex.Unlock()
 
-	if !h.closed.Swap(true) {
+	if !h.closed.Swap(true) && h.pushedPackets != nil {
 		close(h.pushedPackets)
 	}
 	if h.reader != nil {
@@ -115,8 +133,22 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 			return 0, io.EOF
 		}
 
+		// Read the lazily-created queue pointer under the same mutex Push
+		// uses for ensureQueue, so the nil check cannot race with the
+		// first Push. Once non-nil the channel field never changes again.
+		h.writeCloseMutex.Lock()
+		q := h.pushedPackets
+		h.writeCloseMutex.Unlock()
+		if q == nil {
+			// Queue not created yet (L1 lazy): wait for the first Push
+			// or a close. Poll at a bounded interval — the 2s gap
+			// timeout is the outer bound on any stall here.
+			time.Sleep(queuePollInterval)
+			continue
+		}
+
 		if h.heap.Len() == 0 {
-			packet, more := <-h.pushedPackets
+			packet, more := <-q
 			if !more {
 				return 0, io.EOF
 			}

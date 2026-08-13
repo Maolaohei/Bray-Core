@@ -18,6 +18,7 @@ import (
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/bytespool"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	http_proto "github.com/xtls/xray-core/common/protocol/http"
@@ -28,15 +29,18 @@ import (
 	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
+	"hash/fnv"
 )
 
 type requestHandler struct {
-	config          *Config
-	host            string
-	path            string
-	ln              *Listener
-	sessionMu       *sync.Mutex
-	sessions        sync.Map
+	config   *Config
+	host     string
+	path     string
+	ln       *Listener
+	sessions sync.Map
+	// sessionLocks shard the upsert slow path by sessionId hash (M3):
+	// different sessions no longer serialize on one mutex.
+	sessionLocks    [16]sync.Mutex
 	sessionN        atomic.Int64 // O(1) live session count (Bray-only)
 	streamOneActive atomic.Int64 // live unauthenticated stream-one long-polls
 	localAddr       net.Addr
@@ -47,12 +51,93 @@ type requestHandler struct {
 	macVerifier     *sessionMacVerifier // per-listener session MAC verifier with pooled HMAC instances
 }
 
+// sessionLock returns the shard mutex for a sessionId (M3).
+func (h *requestHandler) sessionLock(sessionId string) *sync.Mutex {
+	hsh := fnv.New32a()
+	hsh.Write([]byte(sessionId))
+	return &h.sessionLocks[hsh.Sum32()%uint32(len(h.sessionLocks))]
+}
+
 type httpSession struct {
-	uploadQueue      *uploadQueue
-	isFullyConnected *done.Instance
-	timer            *time.Timer
-	remoteIP         string // remote IP that created this session (port ignored)
-	closeOnce        sync.Once
+	uploadQueue *uploadQueue
+	// isFullyConnected is created lazily (H1): half-open sessions never
+	// pay the ~96B hchan until a GET actually connects the session.
+	isFullyConnected atomic.Pointer[done.Instance]
+	// expiresAt is the unix-nano deadline for half-open sessions. Updated
+	// on every upsert (atomic, lock-free); the single session sweeper
+	// reaps expired entries. Fully-connected sessions are never reaped
+	// (checked via isFullyConnected). Replaces the per-session timer +
+	// goroutine (M1) and removes the post-connect timer Reset no-op (L3).
+	expiresAt atomic.Int64
+	remoteIP  string // remote IP that created this session (port ignored)
+	closeOnce sync.Once
+}
+
+// fullyConnected returns the done.Instance, creating it on first use
+// (H1 lazy upgrade). The sweeper must use the non-creating
+// peekFullyConnected instead, so sweeping a half-open session does not
+// allocate.
+func (s *httpSession) fullyConnected() *done.Instance {
+	if p := s.isFullyConnected.Load(); p != nil {
+		return p
+	}
+	d := done.New()
+	if s.isFullyConnected.CompareAndSwap(nil, d) {
+		return d
+	}
+	return s.isFullyConnected.Load()
+}
+
+// peekFullyConnected returns the done.Instance without creating it.
+func (s *httpSession) peekFullyConnected() *done.Instance {
+	return s.isFullyConnected.Load()
+}
+
+// chunkSlicePool reuses the per-POST header/cookie chunk slices (L4).
+// Pointer-pooled so the recycle path never boxes.
+var chunkSlicePool = sync.Pool{
+	New: func() any {
+		s := make([]string, 0, 4)
+		return &s
+	},
+}
+
+// sessionSweepInterval bounds TTL precision; a half-open session may live
+// up to one interval past its deadline (well under the 45-180s TTL scale).
+const sessionSweepInterval = time.Second
+
+// sessionSweeper is the single per-listener goroutine that reaps expired
+// half-open sessions (M1: replaces one goroutine per session, removing the
+// connection-establishment goroutine storm at scale).
+func (h *requestHandler) sessionSweeper() {
+	ticker := time.NewTicker(sessionSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now().UnixNano()
+			h.sessions.Range(func(key, value any) bool {
+				s := value.(*httpSession)
+				// Non-creating peek: sweeping must not allocate the
+				// done.Instance (H1) — only fully-connected sessions
+				// escape expiry.
+				if d := s.peekFullyConnected(); d != nil {
+					select {
+					case <-d.Wait():
+						return true // fully connected: no expiry
+					default:
+					}
+				}
+				if s.expiresAt.Load() <= now {
+					h.deleteSession(key.(string), s)
+					s.close()
+				}
+				return true
+			})
+		case <-h.stopCh:
+			return
+		}
+	}
 }
 
 func (s *httpSession) close() {
@@ -147,16 +232,15 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 			)
 			// Fall through to slow path to create a new session.
 		} else {
-			if s.timer != nil {
-				s.timer.Reset(time.Duration(ttl) * time.Second)
-			}
+			s.expiresAt.Store(time.Now().Add(time.Duration(ttl) * time.Second).UnixNano())
 			return s
 		}
 	}
 
 	// slow path
-	h.sessionMu.Lock()
-	defer h.sessionMu.Unlock()
+	lock := h.sessionLock(sessionId)
+	lock.Lock()
+	defer lock.Unlock()
 
 	currentSessionAny, ok = h.sessions.Load(sessionId)
 	if ok {
@@ -170,9 +254,7 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 			h.deleteSession(sessionId, s)
 			s.close()
 		} else {
-			if s.timer != nil {
-				s.timer.Reset(time.Duration(ttl) * time.Second)
-			}
+			s.expiresAt.Store(time.Now().Add(time.Duration(ttl) * time.Second).UnixNano())
 			return s
 		}
 	}
@@ -185,27 +267,13 @@ func (h *requestHandler) upsertSession(sessionId string, remoteAddr string) *htt
 	}
 
 	s := &httpSession{
-		uploadQueue:      NewUploadQueue(h.ln.config.GetNormalizedScMaxBufferedPosts()),
-		isFullyConnected: done.New(),
-		timer:            time.NewTimer(time.Duration(ttl) * time.Second),
-		remoteIP:         remoteIP,
+		uploadQueue: NewUploadQueue(h.ln.config.GetNormalizedScMaxBufferedPosts()),
+		remoteIP:    remoteIP,
 	}
+	s.expiresAt.Store(time.Now().Add(time.Duration(ttl) * time.Second).UnixNano())
 
 	h.sessions.Store(sessionId, s)
 	h.sessionN.Add(1)
-
-	go func() {
-		defer s.timer.Stop()
-		select {
-		case <-s.timer.C:
-			h.deleteSession(sessionId, s)
-			s.close()
-		case <-s.isFullyConnected.Wait():
-		case <-h.stopCh:
-			h.deleteSession(sessionId, s)
-			s.close()
-		}
-	}()
 
 	return s
 }
@@ -471,8 +539,12 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		dataPlacement := h.config.GetNormalizedUplinkDataPlacement()
 		var headerPayload []byte
+		// L4: reuse the per-POST chunk slices across requests (two
+		// []string allocations per POST on the auto/header/cookie paths).
+		sp := chunkSlicePool.Get().(*[]string)
+		defer chunkSlicePool.Put(sp)
 		if dataPlacement == PlacementAuto || dataPlacement == PlacementHeader {
-			var headerPayloadChunks []string
+			headerPayloadChunks := (*sp)[:0]
 			for i := 0; true; i++ {
 				chunk := request.Header.Get(uplinkDataKey + "-" + strconv.Itoa(i))
 				if chunk == "" {
@@ -480,6 +552,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				}
 				headerPayloadChunks = append(headerPayloadChunks, chunk)
 			}
+			*sp = headerPayloadChunks
 			headerPayloadEncoded := strings.Join(headerPayloadChunks, "")
 			headerPayload, err = base64.RawURLEncoding.DecodeString(headerPayloadEncoded)
 			if err != nil {
@@ -491,7 +564,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		var cookiePayload []byte
 		if dataPlacement == PlacementAuto || dataPlacement == PlacementCookie {
-			var cookiePayloadChunks []string
+			cookiePayloadChunks := (*sp)[:0]
 			for i := 0; true; i++ {
 				cookieName := uplinkDataKey + "_" + strconv.Itoa(i)
 				if c, _ := request.Cookie(cookieName); c != nil {
@@ -500,6 +573,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 					break
 				}
 			}
+			*sp = cookiePayloadChunks
 			cookiePayloadEncoded := strings.Join(cookiePayloadChunks, "")
 			cookiePayload, err = base64.RawURLEncoding.DecodeString(cookiePayloadEncoded)
 			if err != nil {
@@ -650,7 +724,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		if sessionId != "" {
 			// after GET is done, the connection is finished. disable automatic
 			// session reaping, and handle it in defer
-			currentSession.isFullyConnected.Close()
+			currentSession.fullyConnected().Close()
 			defer func() {
 				currentSession.close()
 				h.deleteSession(sessionId, currentSession)
@@ -884,6 +958,12 @@ func (c *httpServerConn) Close() error {
 		// Deliver any buffered downlink bytes before the stream is torn down.
 		_ = c.flushLocked()
 	}
+	// M2: return the downlink aggregation buffer to the pool instead of
+	// pinning up to streamFlushThreshold per connection for its lifetime.
+	if cap(c.writeBuf) >= 2048 {
+		bytespool.Free(c.writeBuf)
+	}
+	c.writeBuf = nil
 	return c.Instance.Close()
 }
 
@@ -910,17 +990,20 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		}
 	}
 	handler := &requestHandler{
-		config:         l.config,
-		host:           l.config.Host,
-		path:           l.config.GetNormalizedPath(),
-		ln:             l,
-		sessionMu:      &sync.Mutex{},
+		config: l.config,
+		host:   l.config.Host,
+		path:   l.config.GetNormalizedPath(),
+		ln:     l,
+
 		sessions:       sync.Map{},
 		socketSettings: streamSettings.SocketSettings,
 		stopCh:         make(chan struct{}),
 		macVerifier:    newSessionMacVerifier(l.config.sessionSecrets()),
 	}
 	l.handler = handler
+	// M1: single sweeper goroutine for all sessions (replaces one
+	// goroutine per session). Terminates when the listener closes stopCh.
+	go handler.sessionSweeper()
 	tlsConfig := getTLSConfig(streamSettings)
 	l.isH3 = len(tlsConfig.NextProtos) == 1 && tlsConfig.NextProtos[0] == "h3"
 
