@@ -167,7 +167,7 @@ type XmuxClient struct {
 	// idleTimeoutNs is this connection's own skewed idle-eviction timeout
 	// (drawn at creation, immutable afterwards — safe to read unlocked).
 	idleTimeoutNs int64
-	lastRTT          atomic.Int64 // nanoseconds, for RTT-aware scheduling
+	lastRTT       atomic.Int64 // nanoseconds, for RTT-aware scheduling
 	// cachedScore is the quality/RTT base only (no inflight term).
 	// Selection uses cachedScore + activeStreams*10000 so Borrow/Release
 	// never need a full scoreClient recompute under the stream hot path.
@@ -440,16 +440,16 @@ func (c *XmuxClient) StopProfilingLocked() {
 }
 
 type XmuxManager struct {
-	xmuxConfig  *XmuxConfig
-	concurrency int32 // base concurrency (from config)
-	connections int32 // base connections (from config)
-	newConnFunc func() XmuxConn
-	probeURL    string // URL for HEAD probe to trigger real TCP/TLS dial
-	pool        XmuxClientPool
-	stopCh      chan struct{}
-	doneCh        chan struct{} // closed when all goroutines exit
-	lastActivity  atomic.Int64  // nanosecond timestamp of last client obtain; lock-free
-	closeOnce     sync.Once     // ensures Close() is idempotent
+	xmuxConfig   *XmuxConfig
+	concurrency  int32 // base concurrency (from config)
+	connections  int32 // base connections (from config)
+	newConnFunc  func() XmuxConn
+	probeURL     string // URL for HEAD probe to trigger real TCP/TLS dial
+	pool         XmuxClientPool
+	stopCh       chan struct{}
+	doneCh       chan struct{} // closed when all goroutines exit
+	lastActivity atomic.Int64  // nanosecond timestamp of last client obtain; lock-free
+	closeOnce    sync.Once     // ensures Close() is idempotent
 
 	// V2.1: Dynamic Connection Scaling
 	poolBehavior   quality.Behavior // dominant behavior across all clients
@@ -509,14 +509,14 @@ func NewXmuxManager(xmuxConfig *XmuxConfig, newConnFunc func() XmuxConn, probeUR
 		probe = probeURL[0]
 	}
 	m := &XmuxManager{
-		xmuxConfig:    xmuxConfig,
-		concurrency:   xmuxConfig.GetNormalizedMaxConcurrency().rand(),
-		connections:   xmuxConfig.GetNormalizedMaxConnections().rand(),
-		newConnFunc:   newConnFunc,
-		probeURL:      probe,
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
-		lastActivity:  atomic.Int64{},
+		xmuxConfig:   xmuxConfig,
+		concurrency:  xmuxConfig.GetNormalizedMaxConcurrency().rand(),
+		connections:  xmuxConfig.GetNormalizedMaxConnections().rand(),
+		newConnFunc:  newConnFunc,
+		probeURL:     probe,
+		stopCh:       make(chan struct{}),
+		doneCh:       make(chan struct{}),
+		lastActivity: atomic.Int64{},
 	}
 
 	// Start background goroutines for connection management.
