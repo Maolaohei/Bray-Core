@@ -161,7 +161,11 @@ func (p *MetricsHandler) handleDebugVars(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+<<<<<<< HEAD
 	_, _ = w.Write(payload)
+=======
+	w.Write(payload)
+>>>>>>> dda2b10c (TUN inbound: Add traffic counters; Metrics: Rely on instance (#6349))
 }
 
 func marshalJSON(value interface{}) json.RawMessage {
