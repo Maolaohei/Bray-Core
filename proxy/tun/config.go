@@ -73,6 +73,7 @@ func (updater *InterfaceUpdater) Update() {
 	updater.iface = got
 	errors.LogInfo(context.Background(), "[tun] update interface ", got.Name, " ", got.Index)
 }
+<<<<<<< HEAD
 
 // pollLoop periodically refreshes the interface selection. Used as a
 // fallback on platforms without netlink event support.
@@ -102,3 +103,5 @@ func (updater *InterfaceUpdater) debounceUpdate() {
 	}
 	updater.debounceTimer = time.AfterFunc(debounceInterval, updater.Update)
 }
+=======
+>>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))

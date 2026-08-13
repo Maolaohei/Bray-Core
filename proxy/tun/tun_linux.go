@@ -26,10 +26,16 @@ type LinuxTun struct {
 	options *Config
 	ownsTun bool
 
+<<<<<<< HEAD
 	interfaceAddresses []netlink.Addr
 	systemRoutes       []netlink.Route
 	routeMonitorStop   chan struct{}
 	routeMonitorOnce   sync.Once
+=======
+	systemRoutes     []netlink.Route
+	routeMonitorStop chan struct{}
+	routeMonitorOnce sync.Once
+>>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 }
 
 // LinuxTun implements Tun
@@ -173,6 +179,7 @@ func (t *LinuxTun) Start() error {
 		return err
 	}
 
+<<<<<<< HEAD
 	if err := t.setInterfaceAddresses(); err != nil {
 		_ = netlink.LinkSetDown(t.tunLink)
 		return err
@@ -181,6 +188,9 @@ func (t *LinuxTun) Start() error {
 	if err := t.setSystemRoutes(); err != nil {
 		_ = t.unsetInterfaceAddresses()
 		_ = netlink.LinkSetDown(t.tunLink)
+=======
+	if err := t.setSystemRoutes(); err != nil {
+>>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 		return err
 	}
 
@@ -201,7 +211,10 @@ func (t *LinuxTun) Close() error {
 	})
 
 	_ = t.unsetSystemRoutes()
+<<<<<<< HEAD
 	_ = t.unsetInterfaceAddresses()
+=======
+>>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 
 	if t.ownsTun {
 		_ = netlink.LinkSetDown(t.tunLink)
@@ -232,6 +245,7 @@ func setinterface(network, address string, fd uintptr, iface *net.Interface) err
 	return unix.BindToDevice(int(fd), iface.Name)
 }
 
+<<<<<<< HEAD
 func (t *LinuxTun) setInterfaceAddresses() error {
 	if len(t.options.Gateway) == 0 {
 		return nil
@@ -263,6 +277,8 @@ func (t *LinuxTun) unsetInterfaceAddresses() error {
 	return errors.Combine(errs...)
 }
 
+=======
+>>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 func (t *LinuxTun) setSystemRoutes() error {
 	if len(t.options.AutoSystemRoutingTable) == 0 {
 		return nil
@@ -349,6 +365,7 @@ func findOutboundInterface(tunIndex int, fixedName string) (*net.Interface, erro
 	}
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 	// Try IPv4 first, then IPv6
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
 =======
@@ -398,6 +415,38 @@ func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
 =======
 >>>>>>> 3263ae92 (TUN inbound: Fix `autoOutboundsInterface` on Linux (#6413))
 		if route.LinkIndex == 0 || route.LinkIndex == tunIndex {
+=======
+	probeIPs := []net.IP{
+		net.ParseIP("8.8.8.8"),
+		net.ParseIP("2001:4860:4860::8888"),
+	}
+
+	for _, ip := range probeIPs {
+		routes, err := netlink.RouteGet(ip)
+		if err != nil || len(routes) == 0 {
+			continue
+		}
+		route := routes[0]
+		if route.LinkIndex == tunIndex {
+			continue
+		}
+
+		link, err := netlink.LinkByIndex(route.LinkIndex)
+		if err != nil {
+			continue
+		}
+		attrs := link.Attrs()
+
+		if attrs.Flags&net.FlagUp == 0 {
+			continue
+		}
+		operState := attrs.OperState
+		if operState != netlink.OperUp && operState != netlink.OperUnknown {
+			continue
+		}
+
+		if route.Src == nil || route.Src.IsLoopback() || route.Src.IsLinkLocalUnicast() {
+>>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 			continue
 		}
 
@@ -405,6 +454,7 @@ func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
 		if err != nil {
 			continue
 		}
+<<<<<<< HEAD
 
 <<<<<<< HEAD
 		// Skip down or loopback interfaces
@@ -435,4 +485,10 @@ func findDefaultInterface(family int, tunIndex int) (*net.Interface, error) {
 	}
 
 	return selected, nil
+=======
+		return iface, nil
+	}
+
+	return nil, errors.New("no usable outbound interface found")
+>>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 }
