@@ -880,7 +880,11 @@ func (c *Config) IsPaddingValid(paddingValue string, from, to int32, method Padd
 	case PaddingMethodRepeatX:
 		n := int32(len(paddingValue))
 		return n >= from && n <= to
-	case PaddingMethodTokenish:
+	case PaddingMethodTokenish, PaddingMethod(""):
+		// Default (operator did not pin a method) validates by huffman
+		// length, matching the tokenish shapes the default client wire
+		// sends. Legacy repeat-x values ("XXX...") still pass: 'X' is an
+		// 8-bit hpack huffman symbol, so huffman length == raw length.
 		const tolerance = int32(validationTolerance)
 
 		n := int32(cachedHuffmanLen(len(paddingValue)))
