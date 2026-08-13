@@ -15,4 +15,8 @@ message Config {
   repeated string auto_system_routing_table = 6;
   string auto_outbounds_interface = 7;
   string desc = 8;
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> 1d8eb81d (TUN inbound: Add `desc` config for Windows ("Wintun" by default) (#6486))
