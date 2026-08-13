@@ -579,7 +579,6 @@ func (c *HysteriaConfig) Build() (proto.Message, error) {
 	}
 
 	config := &hysteria.Config{}
-	config.Version = c.Version
 	config.Auth = c.Auth
 	config.UdpIdleTimeout = c.UdpIdleTimeout
 	config.MasqType = c.Masquerade.Type
