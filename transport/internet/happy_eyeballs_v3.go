@@ -201,6 +201,7 @@ func (r *HappyIPRecord) recordFail() {
 // conversion or struct-hash overhead.
 //   - IPv4: the address occupies the low 32 bits of k[0], k[1] stays 0.
 //   - IPv6: the full 128 bits are packed into k[0..1].
+//
 // A collision would require an IPv6 address with all-zero last 8 bytes whose
 // first 8 bytes embed the IPv4 value — i.e. a deprecated IPv4-compatible
 // ::/96 address, which no resolver returns; k[1]=0 is therefore an
