@@ -30,7 +30,11 @@ type stubDialerClient struct {
 func (s *stubDialerClient) IsClosed() bool { return false }
 
 func (s *stubDialerClient) OpenStream(context.Context, *url.URL, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error) {
-	return nil, nil, nil, errors.New("not implemented")
+	return nil, nil, nil, errors.New("stub OpenStream")
+}
+
+func (s *stubDialerClient) OpenStreamAsync(context.Context, *url.URL, string, io.Reader, bool, func(remote, local net.Addr)) (io.ReadCloser, error) {
+	return nil, errors.New("stub OpenStreamAsync")
 }
 
 func (s *stubDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, payload buf.MultiBuffer) error {

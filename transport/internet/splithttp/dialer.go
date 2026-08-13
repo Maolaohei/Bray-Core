@@ -1069,7 +1069,18 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			// Non-stream-one: download leg first (httpClient2 may equal httpClient).
 			{
 				var oerr error
-				conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient2.OpenStream(ctx, &requestURL2, sessionId, nil, false)
+				if mode == "packet-up" {
+					// B6: open the download leg asynchronously — packet-up's
+					// upload loop can start immediately, saving one RTT on
+					// TTFB. The future reader resolves (and fills the conn
+					// addresses) on first Read; a failed GET surfaces as a
+					// read error there, cascading into the normal teardown.
+					conn.reader, oerr = httpClient2.OpenStreamAsync(ctx, &requestURL2, sessionId, nil, false, func(r, l net.Addr) {
+						conn.remoteAddr, conn.localAddr = r, l
+					})
+				} else {
+					conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient2.OpenStream(ctx, &requestURL2, sessionId, nil, false)
+				}
 				if oerr != nil {
 					return false, false, oerr
 				}

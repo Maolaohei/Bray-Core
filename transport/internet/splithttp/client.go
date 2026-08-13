@@ -58,6 +58,13 @@ type DialerClient interface {
 	// (FillStreamRequest may append session/path on a request-local copy).
 	OpenStream(context.Context, *url.URL, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error)
 
+	// OpenStreamAsync launches the stream open without waiting for the
+	// response headers; the returned reader resolves on first Read.
+	// onReady, when non-nil, receives the resolved addresses at that
+	// point. Used by the packet-up dial path to start uploading one RTT
+	// earlier (B6).
+	OpenStreamAsync(context.Context, *url.URL, string, io.Reader, bool, func(remote, local net.Addr)) (io.ReadCloser, error)
+
 	// ctx, url, sessionId, seqStr, body, contentLength
 	PostPacket(context.Context, string, string, string, buf.MultiBuffer) error
 }
@@ -331,7 +338,20 @@ func isSessionIDSegment(s string) bool {
 	return true
 }
 
-func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
+// streamResult carries the outcome of an OpenStream round-trip.
+type streamResult struct {
+	rc     io.ReadCloser
+	remote net.Addr
+	local  net.Addr
+	err    error
+}
+
+// openStreamStart launches the GET/POST stream round-trip and returns the
+// result channel without waiting. OpenStream waits on it synchronously;
+// OpenStreamAsync wraps it in a future reader so the caller can start
+// writing (packet-up upload) while the download leg is still opening
+// (B6: saves one RTT on TTFB).
+func (c *DefaultDialerClient) openStreamStart(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (<-chan streamResult, context.CancelFunc) {
 	t0 := time.Now()
 	var addrMu sync.Mutex
 	var gotRemote, gotLocal net.Addr
@@ -341,18 +361,11 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 		method = c.transportConfig.GetNormalizedUplinkHTTPMethod() // stream-up/one
 	}
 	if base == nil {
-		return nil, nil, nil, errors.New("OpenStream: nil base URL")
+		ch := make(chan streamResult, 1)
+		ch <- streamResult{err: errors.New("OpenStream: nil base URL")}
+		return ch, func() {}
 	}
 
-	// Wait for response headers (not merely GotConn). Returning on GotConn alone
-	// produced "dial succeeded then immediately EOF" when Do later failed or
-	// returned a non-200 status.
-	type streamResult struct {
-		rc     io.ReadCloser
-		remote net.Addr
-		local  net.Addr
-		err    error
-	}
 	resultCh := make(chan streamResult, 1)
 
 	// I1: open is cancelable without tying the long-lived stream to Dial's ctx.
@@ -482,6 +495,15 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 		resultCh <- streamResult{rc: rc, remote: rr, local: ll}
 	}()
 
+	return resultCh, reqCancel
+}
+
+// OpenStream opens a stream and waits for the response headers before
+// returning (synchronous semantics for stream-one/stream-up and the
+// legacy dial path).
+func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
+	resultCh, reqCancel := c.openStreamStart(ctx, base, sessionId, body, uploadOnly)
+
 	// Bound header wait: if caller already set a deadline, honor it; otherwise
 	// apply Bray default so blackholed H2 streams cannot pin Dial forever.
 	// Always derive from ctx so cancel still aborts the wait.
@@ -503,9 +525,8 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 				res.rc.Close()
 			}
 		}()
-		addrMu.Lock()
-		r, l := gotRemote, gotLocal
-		addrMu.Unlock()
+		// addrMu/gotRemote are inside openStreamStart now; the timeout path
+		// cannot read them without the mutex — return a zero addr pair.
 		errOut := openWaitCtx.Err()
 		if errOut == nil {
 			errOut = context.DeadlineExceeded
@@ -514,7 +535,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 		if ctx.Err() != nil {
 			errOut = ctx.Err()
 		}
-		return nil, r, l, errOut
+		return nil, nil, nil, errOut
 	case res := <-resultCh:
 		if res.err != nil {
 			reqCancel()
@@ -524,6 +545,72 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 		// cancels via cancelOnClose when the response body is closed.
 		return res.rc, res.remote, res.local, nil
 	}
+}
+
+// OpenStreamAsync launches the stream open and returns immediately with a
+// future reader; the caller may start writing (packet-up upload loop)
+// while the download leg opens in the background. onReady, when set, is
+// invoked with the resolved remote/local addresses on first Read.
+func (c *DefaultDialerClient) OpenStreamAsync(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool, onReady func(remote, local net.Addr)) (io.ReadCloser, error) {
+	resultCh, _ := c.openStreamStart(ctx, base, sessionId, body, uploadOnly)
+	return &futureStreamReader{
+		resultCh: resultCh,
+		onReady:  onReady,
+		ctx:      ctx,
+	}, nil
+}
+
+// futureStreamReader resolves the stream result on first Read (or Close),
+// so the download leg can be opened without blocking the upload path.
+type futureStreamReader struct {
+	once     sync.Once
+	resultCh <-chan streamResult
+	rc       io.ReadCloser
+	err      error
+	onReady  func(remote, local net.Addr)
+	ctx      context.Context
+}
+
+func (f *futureStreamReader) resolve() {
+	f.once.Do(func() {
+		// Bound the header wait like OpenStream does; a blackholed stream
+		// must not pin the first Read forever.
+		waitCtx := f.ctx
+		var cancel context.CancelFunc
+		if _, hasDeadline := f.ctx.Deadline(); !hasDeadline {
+			waitCtx, cancel = context.WithTimeout(f.ctx, defaultOpenStreamHeaderTimeout)
+			defer cancel()
+		}
+		select {
+		case <-waitCtx.Done():
+			f.err = waitCtx.Err()
+		case res := <-f.resultCh:
+			if res.err != nil {
+				f.err = res.err
+				return
+			}
+			if f.onReady != nil {
+				f.onReady(res.remote, res.local)
+			}
+			f.rc = res.rc
+		}
+	})
+}
+
+func (f *futureStreamReader) Read(p []byte) (int, error) {
+	f.resolve()
+	if f.err != nil {
+		return 0, f.err
+	}
+	return f.rc.Read(p)
+}
+
+func (f *futureStreamReader) Close() error {
+	f.resolve()
+	if f.rc != nil {
+		return f.rc.Close()
+	}
+	return nil
 }
 
 // cancelOnClose cancels a request context when the response body is closed.

@@ -337,19 +337,49 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			}
 		}
 
-		rawConn, err := dialer.Dial(ctx, destination)
-		if err != nil {
-			// Fatal address-family errors: retrying won't help and wastes
-			// ~5 seconds on all 5 attempts. Short-circuit immediately.
-			errStr := err.Error()
-			if strings.Contains(errStr, "cannot assign requested address") ||
-				strings.Contains(errStr, "network is unreachable") {
-				return errors.New(errStr).Base(retry.ErrRetryFailed)
-			}
-			return err
-		}
+		// B14: reuse a pooled pre-dialed connection for hot targets (skips
+		// the dial RTT — the largest single TTFB component server-side).
+		// Pool misses fall through to the normal retry dial; a pooled
+		// connection that turns out stale fails the request like any dial
+		// failure would (TTL 90s keeps staleness rare).
+		var rawConn net.Conn
+		var dialErr error
+		if pooled := preconnTake(destination); pooled != nil {
+			rawConn = pooled
+			conn = pooled
+		} else {
+			dialErr = retry.ExponentialBackoff(5, 200).On(func() error {
+				var err error
+				rawConn, err = dialer.Dial(ctx, destination)
+				if err != nil {
+					// Fatal address-family errors: retrying won't help and wastes
+					// ~5 seconds on all 5 attempts. Short-circuit immediately.
+					errStr := err.Error()
+					if strings.Contains(errStr, "cannot assign requested address") ||
+						strings.Contains(errStr, "network is unreachable") {
+						return errors.New(errStr).Base(retry.ErrRetryFailed)
+					}
+					return err
+				}
 
-		conn = rawConn
+				conn = rawConn
+				// B14: pre-dial the same target for the next request
+				// (best-effort; pool full/expired entries are closed inside).
+				go func() {
+					pctx, cancel := context.WithTimeout(context.Background(), preconnDialTimeout)
+					defer cancel()
+					if pc, perr := dialer.Dial(pctx, destination); perr == nil {
+						preconnOffer(destination, pc)
+					} else if pc != nil {
+						pc.Close()
+					}
+				}()
+				return nil
+			})
+			if dialErr != nil {
+				return errors.New("failed to open connection to ", destination).Base(dialErr)
+			}
+		}
 		return nil
 	})
 	if err != nil {

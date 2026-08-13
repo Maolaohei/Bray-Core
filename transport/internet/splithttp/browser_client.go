@@ -22,6 +22,19 @@ func (c *BrowserDialerClient) IsClosed() bool {
 	return false
 }
 
+// OpenStreamAsync: browser dialer streams open synchronously; wrap the
+// result in an immediately-resolved future reader for interface parity.
+func (c *BrowserDialerClient) OpenStreamAsync(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool, onReady func(remote, local net.Addr)) (io.ReadCloser, error) {
+	rc, remote, local, err := c.OpenStream(ctx, base, sessionId, body, uploadOnly)
+	if err != nil {
+		return nil, err
+	}
+	if onReady != nil {
+		onReady(remote, local)
+	}
+	return rc, nil
+}
+
 func (c *BrowserDialerClient) OpenStream(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (io.ReadCloser, net.Addr, net.Addr, error) {
 	if body != nil {
 		return nil, nil, nil, errors.New("bidirectional streaming for browser dialer not implemented yet")
