@@ -714,10 +714,11 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 		// observer. Server validates tokenish via huffman length.
 		config.Method = PaddingMethodTokenish
 		config.methodIdx = methodIndex(config.Method)
+		name := c.paddingHeaderNameForSession(sessionId)
 		config.Placement = XPaddingPlacement{
 			Placement: PlacementHeader,
-			Key:       "X-Padding",
-			Header:    "X-Padding",
+			Key:       name,
+			Header:    name,
 		}
 	}
 

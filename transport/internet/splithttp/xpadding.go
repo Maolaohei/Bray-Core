@@ -881,10 +881,16 @@ func (c *Config) IsPaddingValid(paddingValue string, from, to int32, method Padd
 		n := int32(len(paddingValue))
 		return n >= from && n <= to
 	case PaddingMethodTokenish, PaddingMethod(""):
-		// Default (operator did not pin a method) validates by huffman
-		// length, matching the tokenish shapes the default client wire
-		// sends. Legacy repeat-x values ("XXX...") still pass: 'X' is an
-		// 8-bit hpack huffman symbol, so huffman length == raw length.
+		// Default (operator did not pin a method) accepts both semantics so
+		// old and new clients keep working:
+		//   - legacy repeat-x values ("XXX...") validate by raw length;
+		//   - tokenish shapes (base62/UUID/hex mix) validate by huffman
+		//     length, which is what the default client wire sends.
+		// ('X' is a 6-bit hpack huffman symbol, so huffman length ≠ raw
+		// length — the raw-length check must stay for old clients.)
+		if n := int32(len(paddingValue)); n >= from && n <= to {
+			return true
+		}
 		const tolerance = int32(validationTolerance)
 
 		n := int32(cachedHuffmanLen(len(paddingValue)))
