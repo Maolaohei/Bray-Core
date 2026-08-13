@@ -231,41 +231,52 @@ func TestV21_DynamicConnectionScaling_AIMD_Decrease(t *testing.T) {
 	lowConns := m.effectiveConnections()
 	t.Logf("LowLatency connections: %d", lowConns)
 
-	// Switch to Lossy (worsening) — should halve
+	// Switch to Lossy (worsening) — MD halves immediately, then the pool
+	// converges back up toward the Lossy target (reverse AIMD: more outer
+	// connections for HoL isolation under loss).
 	for i := 0; i < 3; i++ {
 		m.UpdatePoolBehavior(quality.BehaviorLossy)
 	}
 	lossyConns := m.effectiveConnections()
 	t.Logf("Lossy connections: %d (after AIMD decrease)", lossyConns)
 
+	// The instantaneous multiplicative decrease must still happen, so a
+	// freshly-worsened pool is smaller than the LowLatency steady state.
 	if lossyConns >= lowConns {
-		t.Errorf("Lossy connections (%d) should be < LowLatency connections (%d)", lossyConns, lowConns)
+		t.Errorf("Lossy connections (%d) should be < LowLatency connections (%d) right after MD", lossyConns, lowConns)
 	}
 }
 
-// TestV21_DynamicConnectionScaling_AIMD_Increase verifies additive increase on improvement.
+// TestV21_DynamicConnectionScaling_AIMD_Increase verifies additive
+// adjustment toward target on improvement.
 func TestV21_DynamicConnectionScaling_AIMD_Increase(t *testing.T) {
 	m := NewXmuxManager(&XmuxConfig{
 		MaxConnections: &RangeConfig{From: 8, To: 8},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
 
-	// Start at Lossy (low)
+	// Start at Lossy: reverse AIMD targets base*2 = 16 (clamped), so the
+	// pool grows — the opposite of the old behavior.
 	for i := 0; i < 3; i++ {
 		m.UpdatePoolBehavior(quality.BehaviorLossy)
 	}
-	lowConns := m.effectiveConnections()
+	lossyConns := m.effectiveConnections()
+	if lossyConns <= 8 {
+		t.Fatalf("Lossy should scale connections UP (reverse AIMD), got %d", lossyConns)
+	}
+	t.Logf("Lossy connections: %d (reverse AIMD, > base 8)", lossyConns)
 
-	// Switch to Normal (improvement) — should increase by 1 (additive)
+	// Switch to Normal (improvement) — additive adjustment steps DOWN
+	// toward the Normal target (base = 8).
 	for i := 0; i < 3; i++ {
 		m.UpdatePoolBehavior(quality.BehaviorNormal)
 	}
 	normalConns := m.effectiveConnections()
 
-	t.Logf("Lossy→Normal: %d → %d (additive increase)", lowConns, normalConns)
+	t.Logf("Lossy→Normal: %d → %d (additive adjustment toward target)", lossyConns, normalConns)
 
-	if normalConns <= lowConns {
-		t.Errorf("Normal connections (%d) should be > Lossy connections (%d)", normalConns, lowConns)
+	if normalConns >= lossyConns {
+		t.Errorf("Normal connections (%d) should be < Lossy connections (%d)", normalConns, lossyConns)
 	}
 }
 

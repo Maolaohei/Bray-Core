@@ -1078,14 +1078,21 @@ func (m *XmuxManager) applyAIMD(b, prevBehavior quality.Behavior) {
 	}
 
 	if isBehaviorImprovement(b, prevBehavior) {
-		// Additive Increase: move toward target by 1 step
+		// Additive Adjustment toward target: step up when below, step
+		// down when above (the old code only increased, so a pool that
+		// had grown under Lossy never shrank back after the link
+		// recovered).
 		targetConns := m.computeTargetConns(b, baseConns)
 		if cur := m._dynamicConns.Load(); cur < targetConns {
 			m._dynamicConns.Store(cur + aimdStep)
+		} else if cur > targetConns {
+			m._dynamicConns.Store(cur - aimdStep)
 		}
 		targetConc := m.computeTargetConc(b, baseConc)
 		if cur := m._dynamicConc.Load(); cur < targetConc {
 			m._dynamicConc.Store(cur + aimdStep)
+		} else if cur > targetConc {
+			m._dynamicConc.Store(cur - aimdStep)
 		}
 	} else if isBehaviorWorsening(b, prevBehavior) {
 		// Multiplicative Decrease: halve immediately
@@ -1125,7 +1132,15 @@ func (m *XmuxManager) computeTargetConns(b quality.Behavior, base int32) int32 {
 		}
 		return base + delta
 	case quality.BehaviorLossy, quality.BehaviorSaturated:
-		return base / 2
+		// Reverse AIMD: on lossy/saturated paths MORE outer connections
+		// isolate connection-level head-of-line blocking and add total
+		// cwnd, while per-connection concurrency is cut (see
+		// computeTargetConc) to shrink the blast radius of any single
+		// packet loss. The old base/2 halved the pool exactly on the
+		// paths that need isolation, hurting throughput under loss.
+		// Steady-state stays bounded by the baseConns*2 clamp, so the
+		// fingerprint surface is unchanged at rest.
+		return base * 2
 	case quality.BehaviorAggressive:
 		return base * 2 / 3
 	default:
