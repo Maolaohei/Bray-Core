@@ -36,6 +36,8 @@ vprotogen
 errorgen
 !common/errors/errorgen/
 *.dat
+# Runtime geo data (geoip.dat / geosite.dat) must survive `git clean -X`.
+!resources/*.dat
 bin/xray_*
 bin/xray-*
 
