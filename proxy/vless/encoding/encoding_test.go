@@ -62,6 +62,43 @@ func TestRequestSerialization(t *testing.T) {
 	}
 }
 
+// TestAddressSerializationRoundTrip pins the hand-rolled
+// writeAddressPortFast encoder against the parser-based decoder for all
+// three address families, so a wire-format drift cannot slip in silently.
+func TestAddressSerializationRoundTrip(t *testing.T) {
+	id := uuid.New()
+	user := &protocol.MemoryUser{Account: toAccount(&vless.Account{Id: id.String()})}
+	validator := new(vless.MemoryValidator)
+	validator.Add(user)
+
+	cases := []struct {
+		name string
+		addr net.Address
+	}{
+		{"domain", net.DomainAddress("www.example.com")},
+		{"ipv4", net.ParseAddress("192.168.1.1")},
+		{"ipv6", net.ParseAddress("2001:4860:4860::8888")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expected := &protocol.RequestHeader{
+				Version: Version,
+				User:    user,
+				Command: protocol.RequestCommandTCP,
+				Address: tc.addr,
+				Port:    net.Port(8443),
+			}
+			buffer := buf.StackNew()
+			common.Must(EncodeRequestHeader(&buffer, expected, &Addons{}))
+			_, actual, _, _, err := DecodeRequestHeader(context.Background(), false, nil, &buffer, validator)
+			common.Must(err)
+			if r := cmp.Diff(actual, expected, cmp.AllowUnexported(protocol.ID{})); r != "" {
+				t.Error(r)
+			}
+		})
+	}
+}
+
 func TestInvalidRequest(t *testing.T) {
 	user := &protocol.MemoryUser{
 		Level: 0,

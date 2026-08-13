@@ -244,6 +244,27 @@ var visionFlowWire = []byte{0x0a, 0x10,
 func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
 	switch addons.Flow {
 	case vless.XRV:
+		if len(addons.Seed) == seedLength {
+			// Fast path: XRV flow + 8-byte seed has a fixed 28-byte wire
+			// layout (0x0a 0x10 <16B flow> 0x12 0x08 <8B seed>) — write it
+			// directly instead of marshalAddons' temporary buffer.
+			if err := buffer.WriteByte(26); err != nil {
+				return errors.New("failed to write addons protobuf length").Base(err)
+			}
+			if _, err := buffer.Write(visionFlowWire); err != nil {
+				return errors.New("failed to write addons protobuf value").Base(err)
+			}
+			if err := buffer.WriteByte(0x12); err != nil {
+				return errors.New("failed to write addons protobuf value").Base(err)
+			}
+			if err := buffer.WriteByte(seedLength); err != nil {
+				return errors.New("failed to write addons protobuf value").Base(err)
+			}
+			if _, err := buffer.Write(addons.Seed); err != nil {
+				return errors.New("failed to write addons protobuf value").Base(err)
+			}
+			return nil
+		}
 		if len(addons.Seed) == 0 {
 			// Fast path: constant wire bytes, no marshal allocation. The
 			// payload is 18 bytes, always within the 255-byte length prefix.

@@ -2,6 +2,9 @@ package encoding
 
 import (
 	"context"
+	"io"
+	"sync"
+
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
@@ -10,7 +13,6 @@ import (
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/vless"
-	"io"
 )
 
 const (
@@ -24,10 +26,20 @@ var addrParser = protocol.NewAddressParser(
 	protocol.PortThenAddress(),
 )
 
+// headerBufferPool reuses the request-header scratch buffer. StackNew
+// escapes here (the buffer's address is passed to EncodeHeaderAddons /
+// writeAddressPortFast, which do not inline), turning the stack buffer
+// into a per-request heap allocation; taking it from a pool instead costs
+// nothing and keeps the header path at zero scratch allocations.
+var headerBufferPool = sync.Pool{
+	New: func() any { return buf.New() },
+}
+
 // EncodeRequestHeader writes encoded request header into the given writer.
 func EncodeRequestHeader(writer io.Writer, request *protocol.RequestHeader, requestAddons *Addons) error {
-	buffer := buf.StackNew()
-	defer buffer.Release()
+	buffer := headerBufferPool.Get().(*buf.Buffer)
+	defer headerBufferPool.Put(buffer)
+	buffer.Clear()
 
 	if err := buffer.WriteByte(request.Version); err != nil {
 		return errors.New("failed to write request version").Base(err)
@@ -39,7 +51,7 @@ func EncodeRequestHeader(writer io.Writer, request *protocol.RequestHeader, requ
 	if _, err := buffer.Write(account.ID.Bytes()); err != nil {
 		return errors.New("failed to write request user id").Base(err)
 	}
-	if err := EncodeHeaderAddons(&buffer, requestAddons); err != nil {
+	if err := EncodeHeaderAddons(buffer, requestAddons); err != nil {
 		return errors.New("failed to encode request header addons").Base(err)
 	}
 
@@ -48,7 +60,7 @@ func EncodeRequestHeader(writer io.Writer, request *protocol.RequestHeader, requ
 	}
 
 	if request.Command != protocol.RequestCommandMux && request.Command != protocol.RequestCommandRvs {
-		if err := addrParser.WriteAddressPort(&buffer, request.Address, request.Port); err != nil {
+		if err := writeAddressPortFast(buffer, request.Address, request.Port); err != nil {
 			return errors.New("failed to write request address and port").Base(err)
 		}
 	}
@@ -58,6 +70,51 @@ func EncodeRequestHeader(writer io.Writer, request *protocol.RequestHeader, requ
 	}
 
 	return nil
+}
+
+// writeAddressPortFast writes the VLESS address+port with exactly the same
+// wire layout as the address parser (port-first big-endian, then address
+// type byte + payload), but without the io.Writer interface indirection:
+// writeAddress does a string→[]byte conversion and serial.WriteUint16
+// dispatches through an interface, both of which escape and allocate on
+// the per-request hot path. Domain >255 bytes is rejected like the
+// original parser.
+func writeAddressPortFast(b *buf.Buffer, addr net.Address, port net.Port) error {
+	if err := b.WriteByte(byte(port >> 8)); err != nil {
+		return err
+	}
+	if err := b.WriteByte(byte(port)); err != nil {
+		return err
+	}
+	switch addr.Family() {
+	case net.AddressFamilyIPv4:
+		if err := b.WriteByte(byte(protocol.AddressTypeIPv4)); err != nil {
+			return err
+		}
+		_, err := b.Write(addr.IP())
+		return err
+	case net.AddressFamilyIPv6:
+		if err := b.WriteByte(byte(protocol.AddressTypeIPv6)); err != nil {
+			return err
+		}
+		_, err := b.Write(addr.IP())
+		return err
+	case net.AddressFamilyDomain:
+		domain := addr.Domain()
+		if len(domain) > 255 {
+			return errors.New("domain name is too long: ", len(domain), " bytes")
+		}
+		if err := b.WriteByte(byte(protocol.AddressTypeDomain)); err != nil {
+			return err
+		}
+		if err := b.WriteByte(byte(len(domain))); err != nil {
+			return err
+		}
+		_, err := b.WriteString(domain)
+		return err
+	default:
+		return errors.New("unknown address family: ", addr.Family())
+	}
 }
 
 // DecodeRequestHeader decodes and returns (if successful) a RequestHeader from an input stream.

@@ -275,12 +275,18 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 
 	account := request.User.Account.(*vless.MemoryAccount)
 
-	requestAddons := &encoding.Addons{
-		Flow: account.Flow,
-	}
+	// Pooled Addons + seed: the pooled struct is returned after the request
+	// header and body addons are marshalled (both are synchronous within
+	// postRequest, and the wire copy is made by EncodeHeaderAddons), so
+	// reuse never races with the socket path.
+	requestAddons := encoding.GetAddons()
+	defer encoding.PutAddons(requestAddons)
+	requestAddons.Flow = account.Flow
 	// P0 anti-replay: stamp every request with a fresh timestamp+nonce seed.
 	// Legacy servers ignore the extra addons field; nil seeds are accepted by
-	// this build for backward compatibility with old clients.
+	// this build for backward compatibility with old clients. NewSeed's
+	// 8-byte slice has cap < 32, so PutAddons' PutSeed short-circuits
+	// without pooling (no boxing on the recycle path).
 	requestAddons.Seed = encoding.NewSeed()
 
 	var input *bytes.Reader
