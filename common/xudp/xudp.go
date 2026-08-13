@@ -95,8 +95,24 @@ func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	mb2Write := make(buf.MultiBuffer, 0, len(mb))
 	for _, b := range mb {
 		length := b.Len()
-		if length == 0 || length+666 > buf.Size {
+		if length == 0 {
 			continue
+		}
+		// Exact per-frame overhead instead of the old flat +666 reserve
+		// (~650B over-reserved, which silently skipped packets on the
+		// 64870-65500B boundary). Reject loudly like the VLESS layer's
+		// MultiLengthPacketWriter does, never drop silently.
+		head := 9 // 7B mux prefix + 2B payload length
+		if w.Dest.Network == net.Network_UDP {
+			head += addrWireLen(w.Dest.Address)
+			if b.UDP != nil {
+				head += 8 // GlobalID
+			}
+		} else if b.UDP != nil {
+			head += 1 + addrWireLen(b.UDP.Address) // UDP flag + address
+		}
+		if length > buf.Size-int32(head) {
+			return errors.New("UDP datagram too large for XUDP frame: ", length, " > ", buf.Size-int32(head))
 		}
 
 		eb := buf.New()
@@ -127,6 +143,19 @@ func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 		return nil
 	}
 	return w.Writer.WriteMultiBuffer(mb2Write)
+}
+
+// addrWireLen returns the encoded wire size (type byte + payload) of an
+// address as written by AddrParser.
+func addrWireLen(a net.Address) int {
+	switch a.Family() {
+	case net.AddressFamilyIPv4:
+		return 5
+	case net.AddressFamilyIPv6:
+		return 17
+	default:
+		return 1 + len(a.Domain())
+	}
 }
 
 func NewPacketReader(reader io.Reader) *PacketReader {
