@@ -906,6 +906,9 @@ func (c *Config) ExtractMetaFromRequest(req *http.Request, path string) (session
 
 // encodeMetaToken merges sessionId and seq into a single opaque path segment
 // (base64url of "sessionId:seq"). See ApplyMetaToRequest for the rationale.
+// Deliberately no length padding: a random pad would cost ~10% more per-
+// request allocation (longer base64 output) to hide only a weak 53-58 char
+// length signature — not worth it under the perf budget.
 func encodeMetaToken(sessionId, seqStr string) string {
 	if sessionId == "" && seqStr == "" {
 		return ""
@@ -925,11 +928,12 @@ func decodeMetaToken(token string) (sessionId, seqStr string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	idx := strings.IndexByte(string(raw), ':')
+	s := string(raw)
+	idx := strings.IndexByte(s, ':')
 	if idx < 0 {
 		return "", "", false
 	}
-	return string(raw[:idx]), string(raw[idx+1:]), true
+	return s[:idx], s[idx+1:], true
 }
 
 func (m *XmuxConfig) GetNormalizedMaxConcurrency() *RangeConfig {

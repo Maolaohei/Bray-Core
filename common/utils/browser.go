@@ -166,19 +166,16 @@ func applyMasqueradedHeaders(header http.Header, browser string, variant string)
 		header["Sec-CH-UA"] = []string{ChromeUACH}
 		header["Sec-CH-UA-Mobile"] = []string{"?0"}
 		header["Sec-CH-UA-Platform"] = []string{"\"Windows\""}
-		header["DNT"] = []string{"1"}
 		header.Set("User-Agent", ChromeUA)
 		header.Set("Accept-Language", "en-US,en;q=0.9")
 	case "edge":
 		header["Sec-CH-UA"] = []string{MSEdgeUACH}
 		header["Sec-CH-UA-Mobile"] = []string{"?0"}
 		header["Sec-CH-UA-Platform"] = []string{"\"Windows\""}
-		header["DNT"] = []string{"1"}
 		header.Set("User-Agent", MSEdgeUA)
 		header.Set("Accept-Language", "en-US,en;q=0.9")
 	case "firefox":
 		header.Set("User-Agent", FirefoxUA)
-		header["DNT"] = []string{"1"}
 		header.Set("Accept-Language", "en-US,en;q=0.5")
 	case "safari":
 		header.Set("User-Agent", SafariUA)
