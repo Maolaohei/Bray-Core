@@ -541,6 +541,9 @@ func TestUDPConnection(t *testing.T) {
 }
 
 func TestDomainSniffing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network-dependent: fetches https://www.github.com through the proxy (CI)")
+	}
 	sniffingPort := tcp.PickPort()
 	httpPort := tcp.PickPort()
 	serverConfig := &core.Config{
@@ -623,6 +626,9 @@ func TestDomainSniffing(t *testing.T) {
 
 		client := &http.Client{
 			Transport: transport,
+			// Fail fast on unreachable networks instead of hanging the whole
+			// test run for the 10-minute package timeout.
+			Timeout: 15 * time.Second,
 		}
 
 		resp, err := client.Get("https://www.github.com/")
