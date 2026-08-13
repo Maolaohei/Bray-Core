@@ -50,10 +50,7 @@ type DarwinTun struct {
 	routeMonitor     *os.File
 	routeMonitorOnce sync.Once
 	systemRoutes     []netip.Prefix
-<<<<<<< HEAD
 	gateway          netip.Prefix
-=======
->>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 }
 
 var (
@@ -580,11 +577,7 @@ func (t *DarwinTun) setSystemRoutes() error {
 		return err
 	}
 	for _, destination := range routes {
-<<<<<<< HEAD
 		if err := execDarwinRoute(unix.RTM_ADD, tunIndex, destination, t.gateway); err != nil {
-=======
-		if err := execDarwinRoute(unix.RTM_ADD, tunIndex, destination); err != nil {
->>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 			_ = t.unsetSystemRoutes()
 			return xerrors.New("failed to add system route ", destination).Base(err)
 		}
@@ -601,11 +594,7 @@ func (t *DarwinTun) unsetSystemRoutes() error {
 	}
 	for i := len(t.systemRoutes) - 1; i >= 0; i-- {
 		destination := t.systemRoutes[i]
-<<<<<<< HEAD
 		if err := execDarwinRoute(unix.RTM_DELETE, tunIndex, destination, t.gateway); err != nil && !errors.Is(err, unix.ESRCH) {
-=======
-		if err := execDarwinRoute(unix.RTM_DELETE, tunIndex, destination); err != nil && !errors.Is(err, unix.ESRCH) {
->>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 			errs = append(errs, xerrors.New("failed to delete system route ", destination).Base(err))
 		}
 	}
@@ -660,11 +649,7 @@ func darwinProtectedDefaultRoutes(ipv4 bool) []netip.Prefix {
 	return routes
 }
 
-<<<<<<< HEAD
 func execDarwinRoute(messageType int, interfaceIndex int, destination netip.Prefix, gateway netip.Prefix) error {
-=======
-func execDarwinRoute(messageType int, interfaceIndex int, destination netip.Prefix) error {
->>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 	message := route.RouteMessage{
 		Type:    messageType,
 		Version: unix.RTM_VERSION,
@@ -676,18 +661,10 @@ func execDarwinRoute(messageType int, interfaceIndex int, destination netip.Pref
 	}
 
 	if destination.Addr().Is4() {
-<<<<<<< HEAD
 		message.Addrs = []route.Addr{
 			unix.RTAX_DST:     &route.Inet4Addr{IP: destination.Addr().As4()},
 			unix.RTAX_NETMASK: &route.Inet4Addr{IP: prefixMask4(destination.Bits())},
 			unix.RTAX_GATEWAY: &route.Inet4Addr{IP: gateway.Addr().As4()},
-=======
-		gatewayPrefix := netip.MustParsePrefix(gateway)
-		message.Addrs = []route.Addr{
-			unix.RTAX_DST:     &route.Inet4Addr{IP: destination.Addr().As4()},
-			unix.RTAX_NETMASK: &route.Inet4Addr{IP: prefixMask4(destination.Bits())},
-			unix.RTAX_GATEWAY: &route.Inet4Addr{IP: gatewayPrefix.Addr().As4()},
->>>>>>> 241aa38a (TUN inbound: Support `autoSystemRoutingTable` and `autoOutboundsInterface` on macOS and Linux as well (#6366))
 		}
 	} else {
 		message.Flags &^= unix.RTF_GATEWAY

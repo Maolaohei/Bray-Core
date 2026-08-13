@@ -45,12 +45,9 @@ func (v *TunConfig) Build() (proto.Message, error) {
 			return nil, err
 		}
 		config.Name = name
-<<<<<<< HEAD
 	}
 	if config.Desc == "" {
 		config.Desc = "Wintun"
-=======
->>>>>>> 6ce924ad (TUN inbound: Change default `name` to "utunN" (10~1024) (#6485))
 	}
 	if config.MTU == 0 {
 		config.MTU = 1500
@@ -64,11 +61,8 @@ const (
 	maxTunIndex   = 1024
 )
 
-<<<<<<< HEAD
 // GetAvailableTunName returns a free default TUN interface name in utun10-utun1024.
 // Explicit config "name" still wins; this only applies when name is empty.
-=======
->>>>>>> 6ce924ad (TUN inbound: Change default `name` to "utunN" (10~1024) (#6485))
 func GetAvailableTunName() (string, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
