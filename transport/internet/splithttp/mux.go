@@ -81,7 +81,7 @@ const (
 	idleActivityMinIdleSecs      = 45
 	idleActivityMinIntervalSecs  = 45
 	idleActivityMaxIntervalSecs  = 90
-	idleActivitySimDelayMs       = 30  // simulated client processing delay
+	idleActivitySimDelayMs       = 30 // simulated client processing delay
 	idleActivitySimDelayMaxMs    = 80
 	idleActivityRequestTimeoutMs = 500
 
