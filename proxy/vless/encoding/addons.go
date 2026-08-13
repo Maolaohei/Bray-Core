@@ -248,7 +248,7 @@ func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
 			// Fast path: XRV flow + 8-byte seed has a fixed 28-byte wire
 			// layout (0x0a 0x10 <16B flow> 0x12 0x08 <8B seed>) — write it
 			// directly instead of marshalAddons' temporary buffer.
-			if err := buffer.WriteByte(26); err != nil {
+			if err := buffer.WriteByte(28); err != nil {
 				return errors.New("failed to write addons protobuf length").Base(err)
 			}
 			if _, err := buffer.Write(visionFlowWire); err != nil {

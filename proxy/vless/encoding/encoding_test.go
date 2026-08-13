@@ -62,6 +62,43 @@ func TestRequestSerialization(t *testing.T) {
 	}
 }
 
+// TestAddonsSeedRoundTrip pins the XRV+8-byte-seed fixed-layout fast path
+// (28-byte wire, 0x0a 0x10 <flow16> 0x12 0x08 <seed8>) against the decoder.
+// This was the regression that slipped through the header round-trips
+// above, which only exercise empty addons: the length prefix was written
+// as 26 and the decoder truncated the seed block.
+func TestAddonsSeedRoundTrip(t *testing.T) {
+	id := uuid.New()
+	user := &protocol.MemoryUser{Account: toAccount(&vless.Account{Id: id.String()})}
+	validator := new(vless.MemoryValidator)
+	validator.Add(user)
+
+	seed := make([]byte, 8)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	expected := &protocol.RequestHeader{
+		Version: Version,
+		User:    user,
+		Command: protocol.RequestCommandTCP,
+		Address: net.DomainAddress("www.example.com"),
+		Port:    net.Port(443),
+	}
+	addons := &Addons{Flow: "xtls-rprx-vision", Seed: seed}
+
+	buffer := buf.StackNew()
+	common.Must(EncodeRequestHeader(&buffer, expected, addons))
+	_, actual, actualAddons, _, err := DecodeRequestHeader(context.Background(), false, nil, &buffer, validator)
+	common.Must(err)
+	if r := cmp.Diff(actual, expected, cmp.AllowUnexported(protocol.ID{})); r != "" {
+		t.Error(r)
+	}
+	if actualAddons.Flow != addons.Flow || !cmp.Equal(actualAddons.Seed, seed) {
+		t.Errorf("addons mismatch: flow=%q seed=%x want flow=%q seed=%x",
+			actualAddons.Flow, actualAddons.Seed, addons.Flow, seed)
+	}
+}
+
 // TestAddressSerializationRoundTrip pins the hand-rolled
 // writeAddressPortFast encoder against the parser-based decoder for all
 // three address families, so a wire-format drift cannot slip in silently.
