@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -240,26 +239,33 @@ func BenchmarkXHTTP_TTFB(b *testing.B) {
 
 	payload := make([]byte, 128)
 	rand.Read(payload)
+	readBuf := make([]byte, len(payload))
+
+	// Warm up: establish the full connection path once (outer TCP + H2
+	// negotiation + probe + GET/POST stream setup) outside the timer, and
+	// keep the connection for the loop — this measures the pure first-byte
+	// latency of a pooled connection (the common steady-state case), not
+	// connection lifecycle. The per-iteration Dial+Close lifecycle is
+	// covered by BenchmarkXHTTP_ConnectionStorm.
+	conn, err := Dial(context.Background(),
+		net.TCPDestination(net.DomainAddress("localhost"), p), settings)
+	common.Must(err)
+	defer conn.Close()
+	if _, err := conn.Write(payload); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := io.ReadFull(conn, readBuf); err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		conn, err := Dial(context.Background(),
-			net.TCPDestination(net.DomainAddress("localhost"), p), settings)
-		if err != nil {
-			b.Fatal(err)
-		}
-		start := time.Now()
 		if _, err := conn.Write(payload); err != nil {
-			conn.Close()
 			b.Fatal(err)
 		}
-		readBuf := make([]byte, len(payload))
 		if _, err := io.ReadFull(conn, readBuf); err != nil {
-			conn.Close()
 			b.Fatal(err)
 		}
-		_ = time.Since(start)
-		conn.Close()
 	}
 }
 
