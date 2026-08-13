@@ -221,6 +221,22 @@ jobs:
           print(f"report_chars={len(text)}")
           PY
 
+      - name: Regression gate
+        # CI-wide gate: fail when benchstat finds a significant regression
+        # beyond ±10% (runner pool variance is ±10-30%; the tight ±3%
+        # same-machine gate is scripts/bench_compare.sh). Throughput names
+        # (Burst/MemoryAllocations) are higher-better, the rest lower-better.
+        # No baseline yet → first main push seeds it.
+        run: |
+          if ls bench_results/base_*.clean.txt >/dev/null 2>&1; then
+            python3 scripts/bench_ci_gate.py \
+              --dir bench_results \
+              --suites xhttp_core,xmux,happy,warmup,vless,buf \
+              --threshold 10
+          else
+            echo "[gate] no baseline yet — first main push seeds it"
+          fi
+
       - name: Comment on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7

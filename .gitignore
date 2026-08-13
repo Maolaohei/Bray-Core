@@ -108,3 +108,4 @@ testing/mem_alloc_flame.svg
 .tmp-perf/
 bench_results/run_*/
 scripts/__pycache__/
+!resources/wintun/bin/amd64/wintun.dll
