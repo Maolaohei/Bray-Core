@@ -48,10 +48,27 @@ func preconnKey(d net.Destination) string {
 	return d.Network.String() + "|" + d.Address.String() + "|" + strconv.Itoa(int(d.Port))
 }
 
+// fakeIPNet is the FakeDNS synthetic range (198.18.0.0/15). Pooled
+// connections keyed by synthetic IPs collide across domains that share
+// the same fake address (pool reuse), and a fake IP is not routable —
+// pre-dialing or taking one only manufactures wrong-target connections.
+var fakeIPNet = func() *stdnet.IPNet {
+	_, n, _ := stdnet.ParseCIDR("198.18.0.0/15")
+	return n
+}()
+
+// isFakeIP reports whether the address falls in the FakeDNS range.
+func isFakeIP(addr net.Address) bool {
+	if addr.Family().IsIP() {
+		return fakeIPNet.Contains(addr.IP())
+	}
+	return false
+}
+
 // preconnTake returns a pooled connection for dest (nil when empty).
 // The caller owns the connection and must close it.
 func preconnTake(d net.Destination) stdnet.Conn {
-	if d.Network != net.Network_TCP {
+	if d.Network != net.Network_TCP || isFakeIP(d.Address) {
 		return nil
 	}
 	v, ok := preconnPool.Load(preconnKey(d))
@@ -76,7 +93,7 @@ func preconnTake(d net.Destination) stdnet.Conn {
 // preconnOffer stores conn for a future request to dest. Best-effort:
 // when the pool is full or the connection is expired it is closed.
 func preconnOffer(d net.Destination, conn stdnet.Conn) {
-	if d.Network != net.Network_TCP {
+	if d.Network != net.Network_TCP || isFakeIP(d.Address) {
 		conn.Close()
 		return
 	}
