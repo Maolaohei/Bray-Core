@@ -16,11 +16,13 @@ import (
 	"github.com/xtls/xray-core/common/net"
 )
 
-// preconnTTL bounds pooled connections: servers and firewalls may drop
-// an idle TCP connection, and a stale connection would fail the request
-// that takes it. 90s keeps the pool warm for bursty apps (API polling,
-// video chunking) without holding dead sockets long.
-const preconnTTL = 90 * time.Second
+// preconnTTL bounds pooled connections. Servers and firewalls drop idle
+// TCP connections well inside 90s (typical Keep-Alive timeouts are
+// 30-60s), and handing a dead socket to the next request fails it —
+// exactly what the pool was supposed to avoid. 10s keeps the pool fresh
+// for the bursty case (request N's pre-dial serves request N+1, which
+// typically follows within seconds) while making stale-take rare.
+const preconnTTL = 10 * time.Second
 
 // preconnMaxPerTarget caps idle pre-dials per destination (resource
 // bound; two is enough to cover a request racing its own pre-dial).
