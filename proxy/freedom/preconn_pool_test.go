@@ -20,11 +20,12 @@ func TestIsFakeIP(t *testing.T) {
 		{"172.217.116.4", false},
 		{"8.8.8.8", false},
 		{"fc00::1", true},
+		{"fc00:3fff::1", true}, // upper boundary of fc00::/18
 		{"fc00::ffff:ffff", true},
-		{"fc03::1", true},      // within fc00::/18
-		{"fbff::1", false},     // just outside the /18
-		{"fc04::1", false},     // just outside the /18
-		{"2001:db8::1", false}, // documentation range, not FakeDNS
+		{"fc00:4000::1", false}, // just outside the /18 (bit 19 set)
+		{"fc03::1", false},      // first hextet differs from fc00
+		{"fbff::1", false},      // just outside the /18
+		{"2001:db8::1", false},  // documentation range, not FakeDNS
 		{"2606:4700::1111", false},
 	}
 	for _, c := range cases {
