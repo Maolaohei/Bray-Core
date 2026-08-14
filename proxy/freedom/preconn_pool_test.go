@@ -19,6 +19,13 @@ func TestIsFakeIP(t *testing.T) {
 		{"198.20.0.1", false},
 		{"172.217.116.4", false},
 		{"8.8.8.8", false},
+		{"fc00::1", true},
+		{"fc00::ffff:ffff", true},
+		{"fc03::1", true},       // within fc00::/18
+		{"fbff::1", false},      // just outside the /18
+		{"fc04::1", false},      // just outside the /18
+		{"2001:db8::1", false},  // documentation range, not FakeDNS
+		{"2606:4700::1111", false},
 	}
 	for _, c := range cases {
 		addr := net.ParseAddress(c.ip)

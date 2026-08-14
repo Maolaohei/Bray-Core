@@ -48,19 +48,32 @@ func preconnKey(d net.Destination) string {
 	return d.Network.String() + "|" + d.Address.String() + "|" + strconv.Itoa(int(d.Port))
 }
 
-// fakeIPNet is the FakeDNS synthetic range (198.18.0.0/15). Pooled
+// fakeIPNets are the FakeDNS synthetic ranges: 198.18.0.0/15 (IPv4) and
+// fc00::/18 (IPv6, matching features/dns FakeIPv6Pool). Pooled
 // connections keyed by synthetic IPs collide across domains that share
 // the same fake address (pool reuse), and a fake IP is not routable —
 // pre-dialing or taking one only manufactures wrong-target connections.
-var fakeIPNet = func() *stdnet.IPNet {
-	_, n, _ := stdnet.ParseCIDR("198.18.0.0/15")
-	return n
+var fakeIPNets = func() []*stdnet.IPNet {
+	var out []*stdnet.IPNet
+	for _, cidr := range []string{"198.18.0.0/15", "fc00::/18"} {
+		if _, n, err := stdnet.ParseCIDR(cidr); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }()
 
-// isFakeIP reports whether the address falls in the FakeDNS range.
+// isFakeIP reports whether the address falls in a FakeDNS range
+// (IPv4 198.18.0.0/15 or IPv6 fc00::/18).
 func isFakeIP(addr net.Address) bool {
-	if addr.Family().IsIP() {
-		return fakeIPNet.Contains(addr.IP())
+	if !addr.Family().IsIP() {
+		return false
+	}
+	ip := addr.IP()
+	for _, n := range fakeIPNets {
+		if n.Contains(ip) {
+			return true
+		}
 	}
 	return false
 }
