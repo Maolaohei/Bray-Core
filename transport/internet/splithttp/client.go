@@ -552,23 +552,25 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 // while the download leg opens in the background. onReady, when set, is
 // invoked with the resolved remote/local addresses on first Read.
 func (c *DefaultDialerClient) OpenStreamAsync(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool, onReady func(remote, local net.Addr)) (io.ReadCloser, error) {
-	resultCh, _ := c.openStreamStart(ctx, base, sessionId, body, uploadOnly)
+	resultCh, reqCancel := c.openStreamStart(ctx, base, sessionId, body, uploadOnly)
 	return &futureStreamReader{
-		resultCh: resultCh,
-		onReady:  onReady,
-		ctx:      ctx,
+		resultCh:  resultCh,
+		reqCancel: reqCancel,
+		onReady:   onReady,
+		ctx:       ctx,
 	}, nil
 }
 
 // futureStreamReader resolves the stream result on first Read (or Close),
 // so the download leg can be opened without blocking the upload path.
 type futureStreamReader struct {
-	once     sync.Once
-	resultCh <-chan streamResult
-	rc       io.ReadCloser
-	err      error
-	onReady  func(remote, local net.Addr)
-	ctx      context.Context
+	once      sync.Once
+	resultCh  <-chan streamResult
+	reqCancel context.CancelFunc
+	rc        io.ReadCloser
+	err       error
+	onReady   func(remote, local net.Addr)
+	ctx       context.Context
 }
 
 func (f *futureStreamReader) resolve() {
@@ -583,9 +585,13 @@ func (f *futureStreamReader) resolve() {
 		}
 		select {
 		case <-waitCtx.Done():
+			// Abort the in-flight round-trip so the GET stream and its
+			// goroutine are released (not just the wait).
+			f.reqCancel()
 			f.err = waitCtx.Err()
 		case res := <-f.resultCh:
 			if res.err != nil {
+				f.reqCancel()
 				f.err = res.err
 				return
 			}
