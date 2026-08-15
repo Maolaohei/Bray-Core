@@ -2,7 +2,10 @@ package splithttp_test
 
 import (
 	"context"
+	"os"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,6 +114,70 @@ func BenchmarkXMUXMetrics(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		m.RecordReuseHit()
 		m.RecordTTFB(time.Duration(i%100) * time.Millisecond)
+	}
+}
+
+// benchXMUXPoolWorkload drives GetXmuxClient + Borrow + simulated work +
+// Release under a given parallelism and reports how many underlying
+// connections the pool had to create (AIMD expansion pressure).
+func benchXMUXPoolWorkload(b *testing.B, cfg *XmuxConfig) {
+	var newConns atomic.Int64
+	m := NewXmuxManager(cfg, func() XmuxConn {
+		newConns.Add(1)
+		return &benchFakeConn{}
+	})
+	defer m.Close()
+
+	// Work per borrow: touch ~1KiB so the stream does non-trivial work
+	// without going through real IO (pool behavior under load is what
+	// differs between fixed and jittered pool sizes).
+	work := make([]byte, 1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			// Realistic client behavior: if every connection in the pool
+			// is saturated, re-select (the pool may create new
+			// connections, counted in new-conns).
+			var c *XmuxClient
+			for {
+				var err error
+				c, err = m.GetXmuxClient(context.Background())
+				if err != nil {
+					b.Fatal(err)
+				}
+				if c.Borrow() {
+					break
+				}
+				runtime.Gosched()
+			}
+			work[0] = byte(c.LeftRequests.Load())
+			work[512] ^= work[0]
+			_ = work
+			c.Release()
+		}
+	})
+	b.ReportMetric(float64(newConns.Load()), "new-conns")
+}
+
+// BenchmarkXMUXPool compares fixed (6/6, upstream-style) vs jittered
+// (nil fields -> process-stable 2-4 ±10%) pool sizes under increasing
+// parallelism. Same benchmark name so benchstat can pair them:
+//   XMUX_BENCH_MODE=fixed   go test -bench BenchmarkXMUXPool ...
+//   XMUX_BENCH_MODE=jittered go test -bench BenchmarkXMUXPool ...
+func BenchmarkXMUXPool(b *testing.B) {
+	mode := os.Getenv("XMUX_BENCH_MODE")
+	for _, workers := range []int{1, 8, 32, 64} {
+		b.Run("workers_"+itoa(workers), func(b *testing.B) {
+			b.SetParallelism(workers)
+			cfg := &XmuxConfig{
+				MaxConcurrency: &RangeConfig{From: 16, To: 16},
+			}
+			if mode != "jittered" {
+				cfg.MaxConnections = &RangeConfig{From: 6, To: 6}
+			}
+			benchXMUXPoolWorkload(b, cfg)
+		})
 	}
 }
 
