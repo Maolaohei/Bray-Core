@@ -140,16 +140,19 @@ var (
 const (
 	xmuxJitterPct = 10 // percent of base From/To applied as delta bound
 
-	xmuxClampConcurrencyFromMin = 4
-	xmuxClampConcurrencyToMax   = 32
-	xmuxClampConnectionsFromMin = 1
-	xmuxClampConnectionsToMax   = 8
-	xmuxClampReuseFromMin       = 32
-	xmuxClampReuseToMax         = 256
-	xmuxClampReqTimesFromMin    = 200
-	xmuxClampReqTimesToMax      = 1600
-	xmuxClampSecsFromMin        = 300
-	xmuxClampSecsToMax          = 1800
+	// XmuxClamp* bound BOTH jittered defaults and explicit operator
+	// config: custom values outside these bands cannot create
+	// out-of-band connection-count fingerprints.
+	XmuxClampConcurrencyFromMin = 4
+	XmuxClampConcurrencyToMax   = 32
+	XmuxClampConnectionsFromMin = 1
+	XmuxClampConnectionsToMax   = 8
+	XmuxClampReuseFromMin       = 32
+	XmuxClampReuseToMax         = 256
+	XmuxClampReqTimesFromMin    = 200
+	XmuxClampReqTimesToMax      = 1600
+	XmuxClampSecsFromMin        = 300
+	XmuxClampSecsToMax          = 1800
 )
 
 func ensureDefaultXmuxJittered() {
@@ -157,19 +160,19 @@ func ensureDefaultXmuxJittered() {
 		seed := uint64(crypto.RandBetween(1, 1<<62))
 		defaultXmuxJitteredMaxConcurrency = jitterDefaultRange(
 			defaultRangeConfigXmuxMaxConcurrency, seed, 1,
-			xmuxClampConcurrencyFromMin, xmuxClampConcurrencyToMax)
+			XmuxClampConcurrencyFromMin, XmuxClampConcurrencyToMax)
 		defaultXmuxJitteredMaxConnections = jitterDefaultRange(
 			defaultRangeConfigXmuxMaxConnections, seed, 2,
-			xmuxClampConnectionsFromMin, xmuxClampConnectionsToMax)
+			XmuxClampConnectionsFromMin, XmuxClampConnectionsToMax)
 		defaultXmuxJitteredCMaxReuseTimes = jitterDefaultRange(
 			defaultRangeConfigXmuxCMaxReuseTimes, seed, 3,
-			xmuxClampReuseFromMin, xmuxClampReuseToMax)
+			XmuxClampReuseFromMin, XmuxClampReuseToMax)
 		defaultXmuxJitteredHMaxRequestTimes = jitterDefaultRange(
 			defaultRangeConfigXmuxHMaxRequestTimes, seed, 4,
-			xmuxClampReqTimesFromMin, xmuxClampReqTimesToMax)
+			XmuxClampReqTimesFromMin, XmuxClampReqTimesToMax)
 		defaultXmuxJitteredHMaxReusableSecs = jitterDefaultRange(
 			defaultRangeConfigXmuxHMaxReusableSecs, seed, 5,
-			xmuxClampSecsFromMin, xmuxClampSecsToMax)
+			XmuxClampSecsFromMin, XmuxClampSecsToMax)
 	})
 }
 
@@ -210,6 +213,32 @@ func jitterDefaultRange(base *RangeConfig, seed uint64, paramID uint64, minV, ma
 		if from > to {
 			from, to = to, from
 		}
+	}
+	return &RangeConfig{From: from, To: to}
+}
+
+// ClampRangeConfig bounds a copy of r to [minV, maxV] and returns it.
+// Applies to explicit operator config at Build time so custom values
+// stay inside the same band as the jittered defaults; nil-safe.
+func ClampRangeConfig(r *RangeConfig, minV, maxV int32) *RangeConfig {
+	if r == nil {
+		return nil
+	}
+	from, to := r.From, r.To
+	if from < minV {
+		from = minV
+	}
+	if from > maxV {
+		from = maxV
+	}
+	if to < minV {
+		to = minV
+	}
+	if to > maxV {
+		to = maxV
+	}
+	if from > to {
+		from, to = to, from
 	}
 	return &RangeConfig{From: from, To: to}
 }

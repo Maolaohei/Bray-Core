@@ -51,3 +51,33 @@ func TestXmuxExplicitRangeWins(t *testing.T) {
 		t.Fatalf("explicit range must win, got %+v", sc.Xmux.MaxConnections)
 	}
 }
+
+// TestXmuxExplicitRangeClamped: out-of-band explicit values are clamped
+// into the same band as the jittered defaults so custom config cannot
+// create an out-of-band connection-count fingerprint.
+func TestXmuxExplicitRangeClamped(t *testing.T) {
+	c := &SplitHTTPConfig{}
+	c.Xmux.MaxConnections.From = 100
+	c.Xmux.MaxConnections.To = 200
+	config, err := c.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := config.(*splithttp.Config)
+	got := sc.Xmux.MaxConnections
+	if got == nil || got.From > splithttp.XmuxClampConnectionsToMax || got.To > splithttp.XmuxClampConnectionsToMax {
+		t.Fatalf("explicit range must be clamped into band, got %+v", got)
+	}
+	// In-band explicit values stay untouched.
+	c2 := &SplitHTTPConfig{}
+	c2.Xmux.MaxConnections.From = 4
+	c2.Xmux.MaxConnections.To = 4
+	config2, err := c2.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc2 := config2.(*splithttp.Config)
+	if sc2.Xmux.MaxConnections.From != 4 || sc2.Xmux.MaxConnections.To != 4 {
+		t.Fatalf("in-band explicit range must pass through, got %+v", sc2.Xmux.MaxConnections)
+	}
+}

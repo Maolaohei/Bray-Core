@@ -266,13 +266,15 @@ func newRangeConfig(input Int32Range) *splithttp.RangeConfig {
 
 // xmuxRangeOrNil maps an unset (zero) XMUX range to nil so the runtime
 // falls back to the process-stable jittered defaults; an explicit nonzero
-// range passes through unchanged. Zero == unset matches upstream's
-// "Value of 0 is treated the same as no value" (XTLS #3835).
-func xmuxRangeOrNil(input Int32Range) *splithttp.RangeConfig {
+// range is clamped into the same band as the jittered defaults (so custom
+// values cannot create out-of-band connection-count fingerprints) and
+// passes through. Zero == unset matches upstream's "Value of 0 is treated
+// the same as no value" (XTLS #3835).
+func xmuxRangeOrNil(input Int32Range, minV, maxV int32) *splithttp.RangeConfig {
 	if input.From == 0 && input.To == 0 {
 		return nil
 	}
-	return newRangeConfig(input)
+	return splithttp.ClampRangeConfig(newRangeConfig(input), minV, maxV)
 }
 
 // Build implements Buildable.
@@ -459,11 +461,12 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		Xmux: &splithttp.XmuxConfig{
 			// Zero Int32Range = unset (upstream "0 = no value"): nil lets the
 			// runtime jittered defaults (2-4 conns, anti-fleet) take over.
-			MaxConcurrency:   xmuxRangeOrNil(c.Xmux.MaxConcurrency),
-			MaxConnections:   xmuxRangeOrNil(c.Xmux.MaxConnections),
-			CMaxReuseTimes:   xmuxRangeOrNil(c.Xmux.CMaxReuseTimes),
-			HMaxRequestTimes: xmuxRangeOrNil(c.Xmux.HMaxRequestTimes),
-			HMaxReusableSecs: xmuxRangeOrNil(c.Xmux.HMaxReusableSecs),
+			// Explicit ranges are clamped into the same band (anti-fingerprint).
+			MaxConcurrency:   xmuxRangeOrNil(c.Xmux.MaxConcurrency, splithttp.XmuxClampConcurrencyFromMin, splithttp.XmuxClampConcurrencyToMax),
+			MaxConnections:   xmuxRangeOrNil(c.Xmux.MaxConnections, splithttp.XmuxClampConnectionsFromMin, splithttp.XmuxClampConnectionsToMax),
+			CMaxReuseTimes:   xmuxRangeOrNil(c.Xmux.CMaxReuseTimes, splithttp.XmuxClampReuseFromMin, splithttp.XmuxClampReuseToMax),
+			HMaxRequestTimes: xmuxRangeOrNil(c.Xmux.HMaxRequestTimes, splithttp.XmuxClampReqTimesFromMin, splithttp.XmuxClampReqTimesToMax),
+			HMaxReusableSecs: xmuxRangeOrNil(c.Xmux.HMaxReusableSecs, splithttp.XmuxClampSecsFromMin, splithttp.XmuxClampSecsToMax),
 			HKeepAlivePeriod: c.Xmux.HKeepAlivePeriod,
 		},
 	}
