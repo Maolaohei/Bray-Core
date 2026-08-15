@@ -37,3 +37,11 @@
 | `35387572` |  | 已合并到 fork (2026.08.13 批次) | 2026-08-14 |
 | `6ab123bf` | XHTTP & gRPC servers: Get accurate localAddr (#6526) | 已合并到 fork (2026.08.13 批次) | 2026-08-14 |
 | `8b419d83` | Routing: Fix `process` for macOS IPv4-mapped sockets (#6557) | 已合并到 fork (2026.08.13 批次) | 2026-08-14 |
+| `583bb4a6` | XHTTP server: Fix `scStreamUpServerSecs` when `xPaddingObfsMode` is true (#6343) | covered: fork equivalent already present | 2026-08-15 |
+| `c320e891` | HTTPUpgrade server: Keep accepting after transient errors as RAW does; Add handshake read deadline as WS does (#6463) | covered: fork equivalent already present | 2026-08-15 |
+| `567500c4` | Fragment finalmask: Add `lengths` and `delays` (#6334) | covered: fork equivalent already present | 2026-08-15 |
+| `c18b39ed` | TLS client: Support more `cipherSuites` for "unsafe" (golang) `fingerprint` for anti-NIN (#6450) | covered: fork equivalent already present | 2026-08-15 |
+| `e4e7614c` | TLS ECH: Update ECH configuration parsing logic to be more robust (#6441) | covered: fork equivalent already present | 2026-08-15 |
+| `1aabe7ea` | XHTTP transport: Do not force trailing path `/` when both sessionID and seq are placed elsewhere (#6307) | covered: fork equivalent already present | 2026-08-15 |
+| `18e28390` | XHTTP client: Reduce default `maxConnections` from 6 to 3 for anti-TSPU | covered: fork equivalent already present | 2026-08-15 |
+| `e7e92546` | TUN inbound: Avoid panic on nil RemoteAddr due to quickly closed connection (#6365) | covered: fork equivalent already present | 2026-08-15 |
