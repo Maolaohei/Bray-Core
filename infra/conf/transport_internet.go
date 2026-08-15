@@ -264,6 +264,17 @@ func newRangeConfig(input Int32Range) *splithttp.RangeConfig {
 	}
 }
 
+// xmuxRangeOrNil maps an unset (zero) XMUX range to nil so the runtime
+// falls back to the process-stable jittered defaults; an explicit nonzero
+// range passes through unchanged. Zero == unset matches upstream's
+// "Value of 0 is treated the same as no value" (XTLS #3835).
+func xmuxRangeOrNil(input Int32Range) *splithttp.RangeConfig {
+	if input.From == 0 && input.To == 0 {
+		return nil
+	}
+	return newRangeConfig(input)
+}
+
 // Build implements Buildable.
 func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 	if c.Extra != nil {
@@ -410,14 +421,11 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 	if c.Xmux.MaxConnections.To > 0 && c.Xmux.MaxConcurrency.To > 0 {
 		return nil, errors.New("maxConnections cannot be specified together with maxConcurrency")
 	}
-	if c.Xmux == (XmuxConfig{}) {
-		c.Xmux.MaxConnections.From = 6
-		c.Xmux.MaxConnections.To = 6
-		c.Xmux.HMaxRequestTimes.From = 600
-		c.Xmux.HMaxRequestTimes.To = 900
-		c.Xmux.HMaxReusableSecs.From = 1800
-		c.Xmux.HMaxReusableSecs.To = 3000
-	}
+	// No explicit XMUX defaults here: nil/zero fields fall through to the
+	// process-stable jittered defaults (2-4 conns etc., anti-fleet), matching
+	// upstream's "0 = no value" semantics. A fixed 6/6 default was synced in
+	// 41de9a38 and removed 2026-08-14 — it overrode the fork's jittered
+	// design and widened the connection-count fingerprint.
 
 	config := &splithttp.Config{
 		Host:                     c.Host,
@@ -449,11 +457,13 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		SessionIDTable:           c.SessionIDTable,
 		SessionIDLength:          newRangeConfig(c.SessionIDLength),
 		Xmux: &splithttp.XmuxConfig{
-			MaxConcurrency:   newRangeConfig(c.Xmux.MaxConcurrency),
-			MaxConnections:   newRangeConfig(c.Xmux.MaxConnections),
-			CMaxReuseTimes:   newRangeConfig(c.Xmux.CMaxReuseTimes),
-			HMaxRequestTimes: newRangeConfig(c.Xmux.HMaxRequestTimes),
-			HMaxReusableSecs: newRangeConfig(c.Xmux.HMaxReusableSecs),
+			// Zero Int32Range = unset (upstream "0 = no value"): nil lets the
+			// runtime jittered defaults (2-4 conns, anti-fleet) take over.
+			MaxConcurrency:   xmuxRangeOrNil(c.Xmux.MaxConcurrency),
+			MaxConnections:   xmuxRangeOrNil(c.Xmux.MaxConnections),
+			CMaxReuseTimes:   xmuxRangeOrNil(c.Xmux.CMaxReuseTimes),
+			HMaxRequestTimes: xmuxRangeOrNil(c.Xmux.HMaxRequestTimes),
+			HMaxReusableSecs: xmuxRangeOrNil(c.Xmux.HMaxReusableSecs),
 			HKeepAlivePeriod: c.Xmux.HKeepAlivePeriod,
 		},
 	}
