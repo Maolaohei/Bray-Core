@@ -37,7 +37,7 @@ func freePacketPayload(p *Packet) {
 const maxSeqGapWait = 2 * time.Second
 
 type uploadQueue struct {
-	reader          io.ReadCloser
+	reader atomic.Pointer[io.ReadCloser]
 	nomore          bool
 	pushedPackets   chan Packet
 	writeCloseMutex sync.Mutex
@@ -117,15 +117,15 @@ func (h *uploadQueue) Close() error {
 	if !h.closed.Swap(true) && h.pushedPackets != nil {
 		close(h.pushedPackets)
 	}
-	if h.reader != nil {
-		return h.reader.Close()
+	if r := h.reader.Load(); r != nil {
+		return (*r).Close()
 	}
 	return nil
 }
 
 func (h *uploadQueue) Read(b []byte) (int, error) {
-	if h.reader != nil {
-		return h.reader.Read(b)
+	if r := h.reader.Load(); r != nil {
+		return (*r).Read(b)
 	}
 
 	for {
@@ -153,8 +153,9 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 				return 0, io.EOF
 			}
 			if packet.Reader != nil {
-				h.reader = packet.Reader
-				return h.reader.Read(b)
+				r := packet.Reader
+				h.reader.Store(&r)
+				return (*h.reader.Load()).Read(b)
 			}
 			h.heap.push(packet)
 		}

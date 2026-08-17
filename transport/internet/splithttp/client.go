@@ -589,6 +589,19 @@ func (f *futureStreamReader) resolve() {
 			// goroutine are released (not just the wait).
 			f.reqCancel()
 			f.err = waitCtx.Err()
+			// Drain any stream that already resolved into the buffered
+			// resultCh before the timeout: a delivered WaitReadCloser (resp
+			// body + cancelOnClose) would otherwise be orphaned — the H2
+			// stream and server-side handler stay live until transport
+			// teardown. Same drain semantics as the synchronous OpenStream
+			// timeout path (client.go:522-527).
+			select {
+			case res := <-f.resultCh:
+				if res.rc != nil {
+					res.rc.Close()
+				}
+			default:
+			}
 		case res := <-f.resultCh:
 			if res.err != nil {
 				f.reqCancel()
