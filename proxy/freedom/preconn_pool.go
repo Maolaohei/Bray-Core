@@ -44,6 +44,48 @@ type preconnQueue struct {
 
 var preconnPool sync.Map // destKey string -> *preconnQueue
 
+// preconnSweepInterval bounds how long an expired pre-dial may sit in the
+// pool before its socket is actively closed (fd bound): TTL is 10s, a 15s
+// sweep keeps worst-case staleness to ~25s, far inside typical server
+// keep-alive timeouts.
+const preconnSweepInterval = 15 * time.Second
+
+// sweepPreconnPool closes expired pre-dials and drops drained destination
+// keys, bounding both file descriptors and pool memory. Runs once per
+// interval in the background; cheap (only active keys are scanned).
+func sweepPreconnPool() {
+	preconnPool.Range(func(key, value any) bool {
+		q := value.(*preconnQueue)
+		q.mu.Lock()
+		now := time.Now()
+		keep := q.items[:0]
+		for _, it := range q.items {
+			if it.expire.After(now) {
+				keep = append(keep, it)
+			} else {
+				it.conn.Close()
+			}
+		}
+		q.items = keep
+		empty := len(q.items) == 0
+		q.mu.Unlock()
+		if empty {
+			preconnPool.Delete(key)
+		}
+		return true
+	})
+}
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(preconnSweepInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			sweepPreconnPool()
+		}
+	}()
+}
+
 func preconnKey(d net.Destination) string {
 	return d.Network.String() + "|" + d.Address.String() + "|" + strconv.Itoa(int(d.Port))
 }
@@ -96,10 +138,19 @@ func preconnTake(d net.Destination) stdnet.Conn {
 		it := q.items[len(q.items)-1]
 		q.items = q.items[:len(q.items)-1]
 		if it.expire.After(now) {
+			if len(q.items) == 0 {
+				// Last item taken: drop the destination key so the pool
+				// cannot grow unboundedly across distinct destinations
+				// (no expiry sweep exists). A concurrent offer re-creates
+				// it via LoadOrStore — the only cost of the tiny race is
+				// losing one speculative pre-dial.
+				preconnPool.Delete(preconnKey(d))
+			}
 			return it.conn
 		}
 		it.conn.Close()
 	}
+	preconnPool.Delete(preconnKey(d))
 	return nil
 }
 
