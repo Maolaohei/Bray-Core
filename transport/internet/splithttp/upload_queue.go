@@ -37,7 +37,7 @@ func freePacketPayload(p *Packet) {
 const maxSeqGapWait = 2 * time.Second
 
 type uploadQueue struct {
-	reader atomic.Pointer[io.ReadCloser]
+	reader          atomic.Pointer[io.ReadCloser]
 	nomore          bool
 	pushedPackets   chan Packet
 	writeCloseMutex sync.Mutex

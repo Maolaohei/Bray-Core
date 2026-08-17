@@ -2,7 +2,7 @@ package mux
 
 // POC for the second, dispatch-independent XUDP DoS vector: a client
 // declaring an oversized XUDP payload length (> buf.Size) in a ~20-byte
-// frame used to tear down the whole Mux connection via reader.go:40 -> 
+// frame used to tear down the whole Mux connection via reader.go:40 ->
 // handleXUDPSingle -> handleFrame -> run() -> done.Close().
 
 import (
