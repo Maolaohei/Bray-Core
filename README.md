@@ -1,118 +1,108 @@
 # Bray-Core
 
-面向复杂网络环境的 Xray-core 深度改造内核：以 **VLESS + XHTTP + XMUX + REALITY** 为核心栈，在传输稳定性、调度与性能上持续投入。基于 [Xray-core](https://github.com/XTLS/Xray-core)，**两端均须使用本仓库构建**。
+> 面向复杂网络环境的 Xray-core 深度改造内核 —— 在保留 Xray 全部协议生态的同时，重构传输层、加固 DNS 与 VLESS 路径、收窄 wire 识别面，并配套一套可回归的性能门禁。
+
+Bray-Core 基于 XTLS/Xray-core 分叉持续跟踪上游（当前领先上游演进、协议面完全保留），核心价值不在"新增协议"，而在**把 Xray 已支持的传输做得更稳、更快、更不容易被区分**。**注意：Bray 与 Xray 的配置互通，但内核/双端不可互换**——见下文「与上游的关系」。
 
 ---
 
 ## 快速开始
 
+和 Xray-core 一样，以单一可执行文件 + JSON 配置运行，**配置文件与 Xray 完全互通**——直接换内核、同一份配置即可使用；Bray 特有参数不配置时走默认值：
+
 ```bash
-git submodule update --init --recursive   # 初始化 REALITY 子模块
-
-# Linux amd64（推荐 GOAMD64=v3）
-CGO_ENABLED=0 GOAMD64=v3 go build -o xray -trimpath -ldflags="-s -w -buildid=" ./main
-
-# Windows amd64
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v3 go build -o xray.exe -trimpath -ldflags="-s -w -buildid=" ./main
+# 服务端/客户端单一可执行文件
+bray-core -c config.json
 ```
 
-`go.mod` 通过 `replace github.com/Maolaohei/REALITY => ./REALITY` 固定本地子模块，请勿在未对齐子模块提交时单独改写该依赖。Linux 服务端 TCP 调优（可选）见 [`docs/server-tuning.md`](docs/server-tuning.md)。
-
-### 客户端
-
-| 平台 | 方式 |
-|------|------|
-| Windows | [v2rayN](https://github.com/2dust/v2rayN) 替换内核二进制（`bin/xray`），对端须为 Bray-Core |
-| Android | [v2rayNG（Bray-Core 内核发布）](https://github.com/Maolaohei/v2rayNG/releases) |
-| 通用 | 任意可替换 Xray 二进制的客户端，**两端均使用本仓库构建** |
+详见 [`production` 文档](./docs/)。客户端接入 Bray（非 Xray）内核：见下方「客户端下载」与「与上游的关系 · 双端互通」。
 
 ---
 
-## 项目状态
+## 客户端下载
 
-| 项目 | 值 |
-|------|-----|
-| 基线版本 | Xray-core **26.8.3** |
-| 语言版本 | Go **1.26.5** |
-| REALITY | [Maolaohei/REALITY](https://github.com/Maolaohei/REALITY) v0.5.5（子模块） |
-| 兼容策略 | **Bray-only**：两端均须本仓库内核 |
-
-分支：**`main`** = 当前主干（Bray 完全体）；**`v1`** = 旧主干快照（仅回滚/对比）。
+- **v2rayNG 定制版（Android）**：[Maolaohei/v2rayNG Releases](https://github.com/Maolaohei/v2rayNG/releases)
+- **v2rayN 官方版（Windows）**：[2dust/v2rayN Releases](https://github.com/2dust/v2rayN/releases)——使用 Bray 内核时，将本仓库 Release 中的内核文件替换 v2rayN 的 core 目录同名文件。
 
 ---
 
-## 特性
+## 与上游 Xray-core 的关系
 
-### 传输
+| 维度 | 说明 |
+|---|---|
+| 协议面 | VLESS / VMess / Trojan / Shadowsocks / SS2022 / Socks / HTTP / Hysteria / WireGuard / Dokodemo / TUN 全部保留，无协议削除 |
+| **双端互通（关键边界）** | **配置互通、双端 wire 不互通**：① 配置——与 Xray 配置完全互通，直接换内核 / 同一份配置即可，Bray 特有参数未配置走默认；② wire——**Bray 服务端需配对 Bray 客户端**（fork 特有 wire 扩展：XMUX 抖动、padding、session 机制等），**Bray 与 Xray 安装包不可互换**：Xray 客户端连不上 Bray 服务端，反之亦然；Bray 内核装入 v2rayN 后，服务端同样必须是 Bray |
+| 跟踪方式 | 持续吸收上游提交（覆盖清单见 `docs/upstream-coverage.md`），落后项通常仅在服务端无关的依赖/平台层 |
+| 差异定位 | **上游解决"能连哪些协议"；Bray 解决"同一个协议怎么连得更稳、更不像代理"** |
 
-- **REALITY v0.5.5**：TLS 1.3 握手形态基于目标站点观测构造，Profile 内存 + 持久化缓存，HotSwap 热切换；摊销 L0/L1/L2（默认 L2，证据充分后 zero-dial），降低对观测站点的重复访问。
-- **Happy Eyeballs v3**：基于历史失败率与质量评分的并行拨号与选路；DNS 缓存含正常命中、过期策略与并发查询加固；域名在 DNS 替换 IP 后保留（供 SNI 与目标使用）。
-- **TCP**：支持平台上默认更积极的 socket 参数（BBR、NODELAY 等，依 OS 能力）。
-
-### XHTTP / XMUX 数据面
-
-- 连接池调度：Min-inflight、RTT/质量评分、行为感知惩罚、AIMD 池规模；Active → Draining → Closed 生命周期，致命错误快速驱逐。
-- 身份隔离：`MuxKey` 含 `OriginalDomain` 等目的地身份；H2 连接按 TLS/主机身份隔离，同 IP 多域名不串池。
-- Packet-up：RTT 自适应窗口（默认 12 / 上限 24）与 chunk 档位；bulk 大包跳过 pacing。
-- 会话完整性：`sessionId` 带 HMAC 签名（密钥默认由 VLESS UUID 派生，零配置），服务端拒收未签名/错误会话。
-- 模式级联：stream-one → stream-up → packet-up 自动演进，失败可自愈；sticky 记住 last-good 模式与多落地赢家。
-- 热路径：零分配 seq、共享 header、池化缓冲、自适应 padding——每包 1 次堆分配消除（缓冲池指针化，Buffer 往返 -29%）。
-
-### 传输形态
-
-- 请求头与路径等 wire 形态经多轮改造，去除固定模式（详见 [CHANGELOG.md](CHANGELOG.md)）；每项改造均以实测 wire 审计 + 回归测试验收，并有兼容性说明。
-- 空闲连接以低频、不规则间隔维持轻量活动，连接生命周期与空闲驱逐参数均按真实客户端分布取值。
+一个容易混淆的点：Bray 不做协议削减。需要少暴露协议面时，用构建参数（build tag）裁剪，而不是砍代码——保证上游同步与生态兼容始终成立。
 
 ---
 
-## 性能
+## 特性（精选）
 
-- **回归门禁**：`scripts/bench_compare.sh` —— 对比工作区 vs 任意基线 commit，benchstat 统计显著（时间 ≥+3% 或吞吐 ≤-3%）即失败；每轮改造以此验收。
-- **基准套件**：每次推送 main 自动运行核心基准套件（XHTTP / XMUX / Happy Eyeballs / VLESS / Buffer），结果随 CI 报告归档；对比口径只信同名 Benchmark + 同 count + median。
+**传输层（XHTTP / XMUX 深度特化）**
+- 连接池反向 AIMD：丢包场景连接池外扩而非减半，隔离队头阻塞、提升弱网吞吐
+- 异步下载腿（B6）与目标预连池（B14）：复用连接路径各省 1 个 RTT
+- RTT 自适应的上传窗口 / 重试 / chunk / 空闲驱逐
+- 连接状态瘦身：每会话 eager 内存 7.9KB → ~150B（懒分配上传队列 / 单 sweeper 取代每会话 goroutine / 会话锁分片）
+- 连接池数量与并发参数采用**进程级抖动默认值**（每实例不同、进程内稳定），配合显式值收敛，避免部署集群呈现统一形态
 
----
+**识别面收窄（wire 形态）**
+- XHTTP 响应头清理、padding 名池化、偏态空闲 beacon、路径/会话随机化
+- REALITY 独立子模块：证书保真（fidelity）、可选 ML-DSA-65 后量子签名、64KB 证书链
 
-## 安全模型：会话签名与 `x-bray-*` 头
+**安全加固（本地审计 + 上游吸收）**
+- DNS：RFC5452 投毒防护、随机 query ID、负数缓存 TTL 语义
+- VLESS 请求头路径池化与 XRV seed 快速路径（wire 不变）
+- XUDP 单包故障不再牵连整条多路连接；握手槽、缓存容量、持久化写入等多处资源边界加固
 
-配置里的 `headers` / `x-bray-*` **不是**「再造一套用户口令」，也 **不会** 原样出现在公网 HTTP 上：
-
-- `headers` 普通项（User-Agent 等）进入 TLS 内的 HTTP 明文；有 TLS/REALITY 时链路加密，中间人不可见。
-- `x-bray-*`（`session-secret` / `session-uuid` / `mode-degrade` / `multi-endpoint` / sticky TTL）：**本地控制头，永不上线**（构建请求时剥离），默认无需手配。
-- **与 UUID 的关系**：VLESS UUID 是账号身份；会话签名是传输层对 `sessionId` 的认证。默认从同一 VLESS UUID 派生签名密钥，**不必**手工配 `x-bray-session-secret`；仅非 VLESS 或需多入站统一密钥时才写显式 secret。
-- 线上只有已签名的会话路径分量，签名密钥不出进程。
-
----
-
-## 兼容性
-
-| 场景 | 预期 |
-|------|------|
-| **Bray 客户端 → Bray 服务端** | **支持（唯一正式保证）** |
-| 上游 Xray 客户端 → Bray 服务端 | 不保证（会话签名、传输形态、XMUX 语义可能拒绝） |
-| Bray 客户端 → 上游 Xray 服务端 | 不保证 |
-| 配置 JSON | 沿用 Xray 字段外形，语义以 Bray 为准 |
-| 平台 | Linux / Windows / macOS / Android 等 Go 支持的目标 |
-
-> 传输形态改造（会话路径结构、padding 取值）需要**两端同步升级**：新客户端对旧服务端可能因校验不匹配被拒。
+**工程体系**
+- CI 基准回归门禁：每次 main 提交自动对比缓存基线（benchstat ±10%）
+- 弱网验证脚本（Linux tc netem）、上游覆盖清单、场景测试套件
 
 ---
 
-## 文档
+## 性能（回归门禁口径下的测量值）
 
-| 文档 | 内容 |
-|------|------|
-| [CHANGELOG.md](CHANGELOG.md) | 版本与变更记录 |
-| [docs/README.md](docs/README.md) | 文档索引 |
-| [docs/presets/README.md](docs/presets/README.md) | 传输预设与 `x-bray-*` 控制头 |
-| [docs/architecture-connection-lifecycle.md](docs/architecture-connection-lifecycle.md) | XMUX / 连接生命周期 |
-| [docs/server-tuning.md](docs/server-tuning.md) | Linux 服务端 TCP 调优 |
-| [SECURITY.md](SECURITY.md) | 安全策略 |
-| [REALITY](https://github.com/Maolaohei/REALITY) | 独立 REALITY 实现与发布 |
+以下为本地基准 / CI 回归门禁确认的**相对测量**（改造前后对比），不是绝对吞吐声明——实际表现随硬件、网络与配置波动（本机基准单次跳动可达 ±10-30%，见 `docs/README.md`）。口径与门槛详见仓库 `docs/`。
 
-问题反馈请使用 GitHub Issues，并附带：客户端/内核版本、传输组合、XHTTP mode、是否可稳定复现、服务端日志片段。
+| 指标 | 结果（相对改造前基线） |
+|---|---|
+| VLESS 请求头编码 | 322 → ~210 ns/op（约 -35%），每次分配 7 → 2（约 -71%） |
+| XHTTP 纯首包延迟 | 复用连接稳态口径下约 ~85 µs（连接建立完整生命周期不计入） |
+| XMUX 连接选择 / XUDP 小包帧 | ns 级，0–1 次分配/op |
+| 每会话常驻内存 | 改造前 eager 实现约 7.9KB → ~150B（约 -98%）；65536 会话满额最坏由约 520MB 降至 ~13MB |
+| 热路径分配 | 请求头 / 帧 / 选择路径均为池化零或有界，无每请求堆分配 |
+
+以上数字为**相对提升与门禁回归验证**，作为改动是否值得的判据；不做跨机器横向对比。弱网（丢包 / 高延迟）下的吞吐增益为设计目标，验证靠 `scripts/netem_loss_test.sh`（需 Linux tc），尚无本机实测量化。
 
 ---
 
-## 致谢与许可
+## 安全模型
 
-Bray-Core 建立在 [XTLS/Xray-core](https://github.com/XTLS/Xray-core) 及社区生态之上，并集成 [Maolaohei/REALITY](https://github.com/Maolaohei/REALITY)。许可与上游一致，详见 LICENSE。
+- 传输安全沿用 Xray：REALITY/TLS/XTLS vision、P0 防重放 seed、会话 MAC
+- 攻击面收敛原则：**凡"失败/异常"路径默认丢弃而非牵连全局**（UDP 无连接语义下尤其如此）
+- 审计纪律：高危改动先 POC 复现 → 修复 → 验证 → 记录（决策台账见 `docs`）
+
+---
+
+## 兼容性与适用边界
+
+- 协议无关的改动：双端可独立升级
+- 依赖 wire 格式的功能（如已移除的批帧）会在版本说明中标注双端同步要求与回退开关
+- **选型建议**：
+  - 自用 / 自有服务器 / 小型部署：Bray 的识别面与性能优势直接受益
+  - 大规模商业化部署 / 面向不确定受众：优先上游 Xray（社区维护、更新节奏快）；Bray 适合你愿意承担维护与支持责任的场景
+  - 无论哪种，Bray 始终把上游作为安全基线持续吸收
+
+---
+
+## 构建与开发
+
+- `go build`，Go 1.26+；可执行文件与 Xray 同形态
+- 开发/基准/发布工作流、上游同步、识别面审计细节见仓库 `docs/` 与 `scripts/`。
+
+---
+
+**License**: 与上游 Xray-core 一致（GPL-3.0 系）
