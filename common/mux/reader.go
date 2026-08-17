@@ -26,6 +26,12 @@ func NewPacketReader(reader io.Reader, dest *net.Destination) *PacketReader {
 	}
 }
 
+// errPacketSizeTooLarge is a sentinel for a malformed XUDP datagram whose
+// declared payload length exceeds the buffer size. It is treated as a
+// recoverable per-datagram fault (drop and continue) rather than a
+// connection-killing stream error.
+var errPacketSizeTooLarge = errors.New("packet size too large: ")
+
 // ReadMultiBuffer implements buf.Reader.
 func (r *PacketReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 	if r.eof {
@@ -38,7 +44,7 @@ func (r *PacketReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 	}
 
 	if size > buf.Size {
-		return nil, errors.New("packet size too large: ", size)
+		return nil, errPacketSizeTooLarge
 	}
 
 	b := buf.New()

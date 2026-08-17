@@ -237,6 +237,17 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 func (w *ServerWorker) handleXUDPSingle(ctx context.Context, meta *FrameMetadata, reader *buf.BufferedReader) error {
 	mb, err := NewPacketReader(reader, &meta.Target).ReadMultiBuffer()
 	if err != nil {
+		// A malformed/oversized XUDP payload length (client declared a
+		// size > 8KiB) means the frame stream is corrupt but only for
+		// THIS datagram — it must not tear down the whole multiplexed
+		// connection and every TCP stream on it (one-packet DoS). Drop
+		// the bad datagram and let the client retry. Genuine stream
+		// errors (EOF / underlying read failure / connection broken)
+		// still propagate and close the connection as before.
+		if errors.Cause(err) == errPacketSizeTooLarge {
+			errors.LogWarningInner(ctx, err, "dropped malformed XUDP datagram")
+			return nil
+		}
 		return err
 	}
 	return w.xudpEstablish(ctx, meta, mb)
