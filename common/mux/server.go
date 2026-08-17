@@ -283,8 +283,13 @@ func (w *ServerWorker) xudpEstablish(ctx context.Context, meta *FrameMetadata, m
 			XUDPManager.Lock()
 			delete(XUDPManager.Map, x.GlobalID)
 			XUDPManager.Unlock()
-			err = errors.New("XUDP new ", meta.GlobalID).Base(errors.New("failed to dispatch request to ", meta.Target).Base(err))
-			return err // it will break the whole Mux connection
+			buf.ReleaseMulti(mb)
+			// Do NOT propagate this error: a failing UDP target (unroutable,
+			// blackholed, fake IP) must not tear down the whole multiplexed
+			// connection and every TCP stream on it. UDP is connection-less —
+			// drop the datagram and let the client retry.
+			errors.LogWarningInner(ctx, err, "XUDP dispatch failed for ", meta.GlobalID, " to ", meta.Target)
+			return nil
 		}
 		link.Writer.WriteMultiBuffer(mb) // it's meaningless to test a new pipe
 		x.Mux = &Session{
