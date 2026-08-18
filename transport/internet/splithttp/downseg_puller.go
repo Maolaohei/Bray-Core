@@ -105,13 +105,13 @@ type DownSegPuller struct {
 	// prod is the optional dseg production leg closed on Close (EOF server-side).
 	prod io.Closer
 
-	mu           sync.Mutex
-	buf          map[uint64][]byte
-	skip         map[uint64]bool
-	eofAt        uint64 // first non-existent seq once known (0 = unknown)
-	consumedSeq  uint64 // next seq the stream needs
-	fatal        error
-	closed       bool
+	mu          sync.Mutex
+	buf         map[uint64][]byte
+	skip        map[uint64]bool
+	eofAt       uint64 // first non-existent seq once known (0 = unknown)
+	consumedSeq uint64 // next seq the stream needs
+	fatal       error
+	closed      bool
 
 	nextIssue atomic.Uint64
 	wg        sync.WaitGroup

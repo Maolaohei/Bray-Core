@@ -26,8 +26,8 @@ func refCountTestHandler(tb testing.TB) *requestHandler {
 		SessionIDLength:     &RangeConfig{From: 16, To: 16},
 		UplinkDataPlacement: PlacementBody,
 		UplinkDataKey:       "x_data",
-		XPaddingBytes: &RangeConfig{From: 16, To: 64},
-		Mode:          "packet-up", // sessioned download requires packet-up/stream-up
+		XPaddingBytes:       &RangeConfig{From: 16, To: 64},
+		Mode:                "packet-up", // sessioned download requires packet-up/stream-up
 		Headers: map[string]string{
 			BraySessionSecretHeader: "testsecret",
 		},

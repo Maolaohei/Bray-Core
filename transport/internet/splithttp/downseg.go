@@ -75,7 +75,7 @@ type downSegCache struct {
 func newDownSegCache() *downSegCache {
 	now := time.Now().UnixNano()
 	c := &downSegCache{
-		segs:        make(map[uint64][]byte, downsegMaxSegs),
+		segs:         make(map[uint64][]byte, downsegMaxSegs),
 		segSizeBySeq: make(map[uint64]int, downsegMaxSegs),
 	}
 	c.pullAtNs.Store(now)
