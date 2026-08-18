@@ -77,7 +77,7 @@ type httpSession struct {
 	// finalized segments with GET+seq. Legacy long-GET sessions keep
 	// downsegMode off and stream directly (unchanged).
 	downsegMode atomic.Int32
-	downseg     *downSegCache
+	downseg     atomic.Pointer[downSegCache]
 	downsegOnce sync.Once
 	// expiresAt is the unix-nano deadline for half-open sessions. Updated
 	// on every upsert (atomic, lock-free); the single session sweeper
@@ -114,7 +114,7 @@ func (s *httpSession) peekFullyConnected() *done.Instance {
 // after the call.
 func (s *httpSession) enterDownsegMode() bool {
 	s.downsegOnce.Do(func() {
-		s.downseg = newDownSegCache()
+		s.downseg.Store(newDownSegCache())
 		s.downsegMode.Store(1)
 	})
 	return s.downsegMode.Load() == 1
@@ -123,16 +123,16 @@ func (s *httpSession) enterDownsegMode() bool {
 // downsegAppend feeds downlink bytes into the segment cache. Only valid in
 // segment mode (called from the downlink producer).
 func (s *httpSession) downsegAppend(b []byte) {
-	if s.downseg != nil {
-		s.downseg.append(b)
+	if c := s.downseg.Load(); c != nil {
+		c.append(b)
 	}
 }
 
 // downsegFinalize marks the downlink stream complete (EOF): finalizes the
 // in-flight segment so the last segment becomes pullable.
 func (s *httpSession) downsegFinalize() {
-	if s.downseg != nil {
-		s.downseg.finalize()
+	if c := s.downseg.Load(); c != nil {
+		c.finalize()
 	}
 }
 
@@ -204,7 +204,7 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 	writer.Header().Set("Cache-Control", "no-store")
 	deadline := time.Now().Add(downsegPullWait)
 	for {
-		p, ok, gone := sess.downseg.get(seq)
+		p, ok, gone := sess.downseg.Load().get(seq)
 		if ok {
 			if _, werr := writer.Write(p); werr == nil {
 				if f, ok := writer.(http.Flusher); ok {
@@ -217,7 +217,7 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 			writer.WriteHeader(http.StatusGone) // 410: slid past, client re-pull/abort
 			return
 		}
-		if sess.downseg.over() {
+		if sess.downseg.Load().over() {
 			// Stream finalized and the segment never appeared: end of data.
 			// Signal EOF with an empty 200 body so the client can distinguish
 			// it from a transient 404 (see PullSegment).
@@ -1161,7 +1161,7 @@ func (c *httpServerConn) Close() error {
 			// Downlink lives in the segment cache. EOF here finalizes the
 			// in-flight segment so the last segment becomes pullable;
 			// nothing goes to this leg's HTTP response body.
-			if c.sess.downseg != nil {
+			if c.sess.downseg.Load() != nil {
 				c.sess.downsegFinalize()
 			}
 		} else {

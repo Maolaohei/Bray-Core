@@ -151,33 +151,38 @@ func (p *DownSegPuller) worker() {
 		}
 		p.mu.Unlock()
 
-		seg, err := p.client.PullSegment(p.ctx, p.base, p.sessionId, strconv.FormatUint(seq, 10))
+		// Retry loop: keep pulling the SAME reserved seq until it resolves
+		// (a 404 means not-produced-yet; abandoning it would strand the
+		// segment and deadlock the stream — audit Finding-2).
+		for {
+			seg, err := p.client.PullSegment(p.ctx, p.base, p.sessionId, strconv.FormatUint(seq, 10))
 
-		p.mu.Lock()
-		switch {
-		case err == nil && len(seg) > 0:
-			p.buf[seq] = seg
-		case err == nil: // empty 200 -> EOF marker at seq (first wins)
-			if p.eofAt == 0 || seq < p.eofAt {
-				p.eofAt = seq
+			p.mu.Lock()
+			switch {
+			case err == nil && len(seg) > 0:
+				p.buf[seq] = seg
+			case err == nil: // empty 200 -> EOF marker at seq (first wins)
+				if p.eofAt == 0 || seq < p.eofAt {
+					p.eofAt = seq
+				}
+			case err == errSegGone:
+				p.skip[seq] = true
+			case err == errSegNotFound:
+				// Not produced yet: retry after backoff, keeping seq.
+				p.mu.Unlock()
+				select {
+				case <-time.After(downSegRetryInterval):
+				case <-p.ctx.Done():
+					return
+				}
+				continue
+			case p.fatal == nil:
+				p.fatal = err
 			}
-		case err == errSegGone:
-			p.skip[seq] = true
-		case err == errSegNotFound:
-			// Not produced yet: retry after backoff (owning worker keeps
-			// the reserved seq).
 			p.mu.Unlock()
-			select {
-			case <-time.After(downSegRetryInterval):
-			case <-p.ctx.Done():
-				return
-			}
-			continue
-		case p.fatal == nil:
-			p.fatal = err
+			p.notify()
+			break
 		}
-		p.mu.Unlock()
-		p.notify()
 	}
 }
 

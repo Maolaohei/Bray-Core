@@ -75,7 +75,7 @@ func TestDownsegPullGoneAndEof(t *testing.T) {
 	if code, _ := pullSegmentWithID(h, id, 0); code != http.StatusGone {
 		t.Fatalf("slid segment: got %d want 410", code)
 	}
-	last := sess.downseg.producedCount() - 1
+	last := sess.downseg.Load().producedCount() - 1
 	if code, b := pullSegmentWithID(h, id, last); code != http.StatusOK || len(b) != downsegSize {
 		t.Fatalf("last segment: code=%d len=%d", code, len(b))
 	}
