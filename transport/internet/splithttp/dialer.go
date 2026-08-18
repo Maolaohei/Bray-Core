@@ -1070,14 +1070,36 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			{
 				var oerr error
 				if mode == "packet-up" {
-					// B6: open the download leg asynchronously — packet-up's
-					// upload loop can start immediately, saving one RTT on
-					// TTFB. The future reader resolves (and fills the conn
-					// addresses) on first Read; a failed GET surfaces as a
-					// read error there, cascading into the normal teardown.
-					conn.reader, oerr = httpClient2.OpenStreamAsync(ctx, &requestURL2, sessionId, nil, false, func(r, l net.Addr) {
-						conn.remoteAddr, conn.localAddr = r, l
-					})
+					// M1 downlink segmentation (Bray-paired): when opted in via the
+					// x-bray-dseg local control header, replace the single long GET
+					// download leg with a production leg (dseg GET, feeds cache) plus
+					// a sequentially pulled segment reader. Only the native dialer
+					// supports it; the browser dialer falls back to legacy.
+					if transportConfiguration.downsegEnabled() {
+						if dc, ok := httpClient2.(*DefaultDialerClient); ok {
+							var prodLeg io.ReadCloser
+							prodLeg, oerr = dc.OpenStreamAsyncDseg(ctx, &requestURL2, sessionId, "", false, func(r, l net.Addr) {
+								conn.remoteAddr, conn.localAddr = r, l
+							})
+							if oerr != nil {
+								return false, false, oerr
+							}
+							conn.reader = NewDownSegPuller(ctx, dc, &requestURL2, sessionId, prodLeg)
+						} else {
+							conn.reader, oerr = httpClient2.OpenStreamAsync(ctx, &requestURL2, sessionId, nil, false, func(r, l net.Addr) {
+								conn.remoteAddr, conn.localAddr = r, l
+							})
+						}
+					} else {
+						// B6: open the download leg asynchronously — packet-up's
+						// upload loop can start immediately, saving one RTT on
+						// TTFB. The future reader resolves (and fills the conn
+						// addresses) on first Read; a failed GET surfaces as a
+						// read error there, cascading into the normal teardown.
+						conn.reader, oerr = httpClient2.OpenStreamAsync(ctx, &requestURL2, sessionId, nil, false, func(r, l net.Addr) {
+							conn.remoteAddr, conn.localAddr = r, l
+						})
+					}
 				} else {
 					conn.reader, conn.remoteAddr, conn.localAddr, oerr = httpClient2.OpenStream(ctx, &requestURL2, sessionId, nil, false)
 				}

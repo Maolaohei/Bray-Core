@@ -539,6 +539,18 @@ func (c *Config) WriteResponseHeader(writer http.ResponseWriter, requestMethod s
 	}
 }
 
+// downsegEnabled reports whether downlink segmentation (Bray-paired M1) is
+// opted in via a local control header (never sent on wire). When on, the
+// packet-up client uses a production leg + segment puller instead of one long
+// GET download leg.
+func (c *Config) downsegEnabled() bool {
+	if c == nil || c.Headers == nil {
+		return false
+	}
+	v, ok := c.Headers["x-bray-dseg"]
+	return ok && (v == "1" || strings.EqualFold(v, "true"))
+}
+
 func (c *Config) GetNormalizedUplinkHTTPMethod() string {
 	if c.UplinkHTTPMethod == "" {
 		return "POST"

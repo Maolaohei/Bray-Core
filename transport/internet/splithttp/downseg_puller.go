@@ -92,19 +92,26 @@ type DownSegPuller struct {
 	sessionId string
 	ctx       context.Context
 
+	// prod is the optional dseg production leg (GET without seq) that feeds
+	// the server's segment cache; closed together with the puller to signal
+	// EOF (finalize) on the server.
+	prod io.Closer
+
 	seq    uint64 // next segment to pull
 	cur    []byte // current segment payload (being consumed)
 	eof    bool
 	closed bool
 }
 
-// NewDownSegPuller creates a segment puller for sessionId over base.
-func NewDownSegPuller(ctx context.Context, client *DefaultDialerClient, base *url.URL, sessionId string) *DownSegPuller {
+// NewDownSegPuller creates a segment puller for sessionId over base. prod
+// (optional) is the production leg whose Close finalizes the stream.
+func NewDownSegPuller(ctx context.Context, client *DefaultDialerClient, base *url.URL, sessionId string, prod io.Closer) *DownSegPuller {
 	return &DownSegPuller{
 		client:    client,
 		base:      base,
 		sessionId: sessionId,
 		ctx:       ctx,
+		prod:      prod,
 	}
 }
 
@@ -150,8 +157,12 @@ func (p *DownSegPuller) Read(b []byte) (int, error) {
 	return n, nil
 }
 
-// Close marks the puller finished.
+// Close marks the puller finished and, if present, closes the production leg
+// (which finalizes the server-side stream / EOF).
 func (p *DownSegPuller) Close() error {
 	p.closed = true
+	if p.prod != nil {
+		return p.prod.Close()
+	}
 	return nil
 }
