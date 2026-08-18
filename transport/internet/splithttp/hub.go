@@ -602,9 +602,13 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		if currentSession.downsegMode.Load() == 1 {
-			// Production leg: keep the request alive; its httpServerConn.Write
-			// now feeds the cache, and Close finalizes the stream (EOF). Count
-			// as a download leg so the session lives until this leg ends.
+			// Production leg: this sessioned GET is the downlink producer.
+			// Build the splitConn and register it with the inbound (as the
+			// legacy long-GET download leg does) so the upper layer's
+			// dispatcher writes the proxied response through httpSC.Write,
+			// which routes into the segment cache (segment mode). Close
+			// finalizes the stream (EOF). Count as a download leg so the
+			// session lives until this leg ends.
 			currentSession.fullyConnected().Close()
 			currentSession.downloadLegs.Add(1)
 			defer func() {
@@ -613,13 +617,32 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 					h.deleteSession(sessionId, currentSession)
 				}
 			}()
+
 			writer.WriteHeader(http.StatusOK)
 			if f, ok := writer.(http.Flusher); ok {
 				f.Flush()
 			}
+			httpSC := &httpServerConn{
+				Instance:       done.New(),
+				reader:         request.Body,
+				ResponseWriter: writer,
+				sess:           currentSession,
+			}
+			localAddr := h.localAddr
+			if la, ok := request.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la != nil {
+				localAddr = la
+			}
+			conn := splitConn{
+				writer:     httpSC,
+				reader:     currentSession.uploadQueue,
+				remoteAddr: remoteAddr,
+				localAddr:  localAddr,
+			}
+			h.ln.addConn(stat.Connection(&conn))
+			defer conn.Close()
 			select {
 			case <-request.Context().Done():
-			case <-time.After(time.Hour): // safety backstop; client drives teardown
+			case <-httpSC.Wait():
 			}
 			return
 		}
