@@ -351,7 +351,7 @@ type streamResult struct {
 // OpenStreamAsync wraps it in a future reader so the caller can start
 // writing (packet-up upload) while the download leg is still opening
 // (B6: saves one RTT on TTFB).
-func (c *DefaultDialerClient) openStreamStart(ctx context.Context, base *url.URL, sessionId, seqStr string, dseg bool, body io.Reader, uploadOnly bool) (<-chan streamResult, context.CancelFunc) {
+func (c *DefaultDialerClient) openStreamStart(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (<-chan streamResult, context.CancelFunc) {
 	t0 := time.Now()
 	var addrMu sync.Mutex
 	var gotRemote, gotLocal net.Addr
@@ -418,10 +418,7 @@ func (c *DefaultDialerClient) openStreamStart(ctx context.Context, base *url.URL
 		Body:       bodyRC,
 	}
 	req = req.WithContext(reqCtx)
-	c.transportConfig.FillStreamRequest(req, sessionId, seqStr)
-	if dseg {
-		req.Header.Set(downsegHeader, "1")
-	}
+	c.transportConfig.FillStreamRequest(req, sessionId, "")
 
 	go func() {
 		resp, doErr := c.client.Do(req)
@@ -505,7 +502,7 @@ func (c *DefaultDialerClient) openStreamStart(ctx context.Context, base *url.URL
 // returning (synchronous semantics for stream-one/stream-up and the
 // legacy dial path).
 func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
-	resultCh, reqCancel := c.openStreamStart(ctx, base, sessionId, "", false, body, uploadOnly)
+	resultCh, reqCancel := c.openStreamStart(ctx, base, sessionId, body, uploadOnly)
 
 	// Bound header wait: if caller already set a deadline, honor it; otherwise
 	// apply Bray default so blackholed H2 streams cannot pin Dial forever.
@@ -555,19 +552,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, base *url.URL, ses
 // while the download leg opens in the background. onReady, when set, is
 // invoked with the resolved remote/local addresses on first Read.
 func (c *DefaultDialerClient) OpenStreamAsync(ctx context.Context, base *url.URL, sessionId string, body io.Reader, uploadOnly bool, onReady func(remote, local net.Addr)) (io.ReadCloser, error) {
-	return c.openStreamAsync(ctx, base, sessionId, "", false, body, uploadOnly, onReady)
-}
-
-// OpenStreamAsyncDseg opens an async stream carrying the downlink-segmentation
-// marker; with seqStr set it is a segment pull producer-side leg (dseg header
-// + seq meta), without seq it is the production leg that feeds the server's
-// segment cache.
-func (c *DefaultDialerClient) OpenStreamAsyncDseg(ctx context.Context, base *url.URL, sessionId, seqStr string, uploadOnly bool, onReady func(remote, local net.Addr)) (io.ReadCloser, error) {
-	return c.openStreamAsync(ctx, base, sessionId, seqStr, true, nil, uploadOnly, onReady)
-}
-
-func (c *DefaultDialerClient) openStreamAsync(ctx context.Context, base *url.URL, sessionId, seqStr string, dseg bool, body io.Reader, uploadOnly bool, onReady func(remote, local net.Addr)) (io.ReadCloser, error) {
-	resultCh, reqCancel := c.openStreamStart(ctx, base, sessionId, seqStr, dseg, body, uploadOnly)
+	resultCh, reqCancel := c.openStreamStart(ctx, base, sessionId, body, uploadOnly)
 	return &futureStreamReader{
 		resultCh:  resultCh,
 		reqCancel: reqCancel,

@@ -65,8 +65,10 @@ func (c *DefaultDialerClient) PullSegment(ctx context.Context, base *url.URL, se
 		ProtoMinor: 1,
 	}
 	req = req.WithContext(ctx)
+	// FillStreamRequest stamps padding + meta(sessionId, seq) (seq now
+	// honored). No dseg marker header is needed: the server treats a
+	// sessioned GET whose meta token carries a seq as a segment pull.
 	c.transportConfig.FillStreamRequest(req, sessionId, seqStr)
-	req.Header.Set(downsegHeader, "1")
 
 	resp, err := c.client.Do(req)
 	if err != nil {

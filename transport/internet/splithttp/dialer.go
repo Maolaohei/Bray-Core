@@ -1070,15 +1070,20 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			{
 				var oerr error
 				if mode == "packet-up" {
-					// M1 downlink segmentation (Bray-paired): when opted in via the
-					// x-bray-dseg local control header, replace the single long GET
-					// download leg with a production leg (dseg GET, feeds cache) plus
-					// a sequentially pulled segment reader. Only the native dialer
-					// supports it; the browser dialer falls back to legacy.
+					// M1 downlink segmentation (Bray-paired), marker-free:
+					// replacing the single long GET download leg with
+					// (a) a production leg — a plain async GET (the server
+					// treats it as the producer once the session is in
+					// segment mode) — and (b) a sequentially pulled
+					// segment reader. Only the native dialer supports it;
+					// the browser dialer falls back to legacy.
 					if transportConfiguration.downsegEnabled() {
 						if dc, ok := httpClient2.(*DefaultDialerClient); ok {
+							// First a segment pull to enter the session into
+							// segment mode (result irrelevant: empty/404 fine).
+							_, _ = dc.PullSegment(ctx, &requestURL2, sessionId, "0")
 							var prodLeg io.ReadCloser
-							prodLeg, oerr = dc.OpenStreamAsyncDseg(ctx, &requestURL2, sessionId, "", false, func(r, l net.Addr) {
+							prodLeg, oerr = dc.OpenStreamAsync(ctx, &requestURL2, sessionId, nil, false, func(r, l net.Addr) {
 								conn.remoteAddr, conn.localAddr = r, l
 							})
 							if oerr != nil {

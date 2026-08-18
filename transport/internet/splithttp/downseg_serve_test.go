@@ -95,7 +95,7 @@ func pullSegmentWithID(h *requestHandler, id string, seq uint64) (int, []byte) {
 	h.config.FillStreamRequest(req, id, "")
 	req.URL.Path = h.path
 	h.config.ApplyMetaToRequest(req, id, strconv.FormatUint(seq, 10))
-	req.Header.Set(downsegHeader, "1")
+	// marker-free: a sessioned GET whose token carries a seq is a segment pull.
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

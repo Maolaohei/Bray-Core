@@ -149,8 +149,6 @@ func (c *downSegCache) over() bool {
 	return c.final
 }
 
-// downsegHeader is the client-local marker header that declares a GET as a
-// downlink-segmentation request (segment pull or production leg). It is a
-// request header only (never a fixed server header), enabling Bray-paired
-// segment mode without touching legacy long-GET clients.
-const downsegHeader = "X-Bray-Dseg"
+// downsegHeader is intentionally NOT used: downlink segmentation is detected
+// by "sessioned GET with a seq in the meta token" (dead-path reuse), so no
+// extra header/label is ever placed on the wire.

@@ -582,40 +582,47 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		isUplinkRequest = true
 	}
 
-	// Downlink segmentation (Bray-paired M1): a client that declares the
-	// dseg header on a sessioned GET enters segment mode. If seq is present
-	// it is a segment pull (read from the segment cache); without seq it is
-	// the production leg that feeds the cache (httpServerConn.Write already
-	// routes into the cache once the session is in segment mode).
-	if request.Method == "GET" && sessionId != "" && request.Header.Get(downsegHeader) != "" {
-		if !currentSession.enterDownsegMode() {
-			writer.WriteHeader(http.StatusNotFound)
-			return
-		}
+	// Downlink segmentation (Bray-paired M1), marker-free:
+	//   - a sessioned GET with seq is a segment pull (reuses the dead
+	//     GET+seq path) and also enters the session into segment mode;
+	//   - a sessioned GET without seq on an already-segment session is the
+	//     production leg (httpServerConn.Write routes into the cache);
+	//   - a sessioned GET without seq on a legacy session is the plain
+	//     long-GET download leg (unchanged).
+	// No extra header/label is sent on the wire: the segment pull differs
+	// from a legacy GET only by its (tokenish) meta token carrying a seq,
+	// which an observer cannot distinguish structurally.
+	if request.Method == "GET" && sessionId != "" {
 		if seqStr != "" {
+			if !currentSession.enterDownsegMode() {
+				writer.WriteHeader(http.StatusNotFound)
+				return
+			}
 			h.handleDownSegment(currentSession, seqStr, writer)
 			return
 		}
-		// Production leg: keep the request alive; its httpServerConn.Write
-		// now feeds the cache, and Close finalizes the stream (EOF). Count
-		// as a download leg so the session lives until this leg ends.
-		currentSession.fullyConnected().Close()
-		currentSession.downloadLegs.Add(1)
-		defer func() {
-			if currentSession.downloadLegs.Add(-1) == 0 {
-				currentSession.close()
-				h.deleteSession(sessionId, currentSession)
+		if currentSession.downsegMode.Load() == 1 {
+			// Production leg: keep the request alive; its httpServerConn.Write
+			// now feeds the cache, and Close finalizes the stream (EOF). Count
+			// as a download leg so the session lives until this leg ends.
+			currentSession.fullyConnected().Close()
+			currentSession.downloadLegs.Add(1)
+			defer func() {
+				if currentSession.downloadLegs.Add(-1) == 0 {
+					currentSession.close()
+					h.deleteSession(sessionId, currentSession)
+				}
+			}()
+			writer.WriteHeader(http.StatusOK)
+			if f, ok := writer.(http.Flusher); ok {
+				f.Flush()
 			}
-		}()
-		writer.WriteHeader(http.StatusOK)
-		if f, ok := writer.(http.Flusher); ok {
-			f.Flush()
+			select {
+			case <-request.Context().Done():
+			case <-time.After(time.Hour): // safety backstop; client drives teardown
+			}
+			return
 		}
-		select {
-		case <-request.Context().Done():
-		case <-time.After(time.Hour): // safety backstop; client drives teardown
-		}
-		return
 	}
 
 	uplinkDataKey := h.config.UplinkDataKey
