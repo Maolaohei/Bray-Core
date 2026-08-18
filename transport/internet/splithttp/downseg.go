@@ -129,7 +129,13 @@ func (c *downSegCache) append(b []byte) {
 			if idx >= downsegMaxSegs {
 				delete(c.segs, idx-downsegMaxSegs)
 			}
-			cur = nil
+			// Pre-allocate the segment's full payload once. Growing from
+			// nil via repeated append() reallocates/copies ~5x the segment
+			// size (14 allocs vs 1, ~6x CPU on 1 MiB segments — see POC).
+			// The final small segment overallocates its cap by at most
+			// downsegSizeMin, a bounded one-off per session; the win is on
+			// the fast path where full segments are the norm.
+			cur = make([]byte, 0, size)
 			c.segs[idx] = cur
 		}
 		cur = c.segs[idx]
