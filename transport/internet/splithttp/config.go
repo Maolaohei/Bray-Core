@@ -752,7 +752,7 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 	}
 
 	c.ApplyXPaddingToRequest(request, config)
-	c.ApplyMetaToRequest(request, sessionId, "")
+	c.ApplyMetaToRequest(request, sessionId, seqStr)
 
 	if request.Body != nil && !c.NoGRPCHeader { // stream-up/one
 		// Bray-only: application/grpc is a common XHTTP stream fingerprint,
