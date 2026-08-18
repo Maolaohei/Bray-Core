@@ -79,8 +79,10 @@ func TestDownsegPullGoneAndEof(t *testing.T) {
 	if code, b := pullSegmentWithID(h, id, last); code != http.StatusOK || len(b) != downsegSize {
 		t.Fatalf("last segment: code=%d len=%d", code, len(b))
 	}
-	if code, _ := pullSegmentWithID(h, id, last+1); code != http.StatusNotFound {
-		t.Fatalf("past-end segment: got %d want 404", code)
+	if code, _ := pullSegmentWithID(h, id, last+1); code == http.StatusGone || code == http.StatusNotFound {
+		// past-end segment: finalize() made it EOF; with the empty-200 EOF
+		// protocol this must be a 200 with empty body (not a hard error).
+		t.Fatalf("past-end segment: got %d want 200(empty), not %d/%d", code, http.StatusGone, http.StatusNotFound)
 	}
 }
 

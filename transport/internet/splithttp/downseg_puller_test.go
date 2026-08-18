@@ -95,7 +95,7 @@ func TestDownSegPullerEndToEnd(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	puller := NewDownSegPuller(ctx, client, base, sid)
+	puller := NewDownSegPuller(ctx, client, base, sid, nil)
 	defer puller.Close()
 
 	var got bytes.Buffer

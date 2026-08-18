@@ -219,7 +219,8 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 		}
 		if sess.downseg.over() {
 			// Stream finalized and the segment never appeared: end of data.
-			writer.WriteHeader(http.StatusNotFound)
+			// Signal EOF with an empty 200 body so the client can distinguish
+			// it from a transient 404 (see PullSegment).
 			return
 		}
 		if time.Now().After(deadline) {

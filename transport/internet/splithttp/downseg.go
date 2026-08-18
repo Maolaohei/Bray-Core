@@ -137,3 +137,17 @@ func (c *downSegCache) producedCount() uint64 {
 	defer c.mu.Unlock()
 	return c.produced
 }
+
+// over reports whether stream has ended (finalize ran) and no more segments
+// are coming.
+func (c *downSegCache) over() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.final
+}
+
+// downsegHeader is the client-local marker header that declares a GET as a
+// downlink-segmentation request (segment pull or production leg). It is a
+// request header only (never a fixed server header), enabling Bray-paired
+// segment mode without touching legacy long-GET clients.
+const downsegHeader = "X-Bray-Dseg"
