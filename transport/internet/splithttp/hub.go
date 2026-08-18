@@ -64,6 +64,13 @@ type httpSession struct {
 	// isFullyConnected is created lazily (H1): half-open sessions never
 	// pay the ~96B hchan until a GET actually connects the session.
 	isFullyConnected atomic.Pointer[done.Instance]
+	// downloadLegs counts active stream-down download legs sharing this
+	// session. A session may legitimately have several concurrent GET
+	// download legs (multi-connection download sharing, e.g. downlink
+	// segmentation): the session must live until the LAST leg finishes,
+	// not fall to the first-returning defer as before (which tore it down
+	// and killed the other legs).
+	downloadLegs atomic.Int64
 	// expiresAt is the unix-nano deadline for half-open sessions. Updated
 	// on every upsert (atomic, lock-free); the single session sweeper
 	// reaps expired entries. Fully-connected sessions are never reaped
@@ -752,12 +759,17 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			defer h.streamOneActive.Add(-1)
 		}
 		if sessionId != "" {
-			// after GET is done, the connection is finished. disable automatic
-			// session reaping, and handle it in defer
+			// A GET download leg is one of possibly several legs sharing
+			// this session. Mark fully-connected (sweeper escapes it) and
+			// account a leg; the session tears down only when the LAST leg
+			// closes (referenced shared multi-GET download).
 			currentSession.fullyConnected().Close()
+			currentSession.downloadLegs.Add(1)
 			defer func() {
-				currentSession.close()
-				h.deleteSession(sessionId, currentSession)
+				if currentSession.downloadLegs.Add(-1) == 0 {
+					currentSession.close()
+					h.deleteSession(sessionId, currentSession)
+				}
 			}()
 		}
 
