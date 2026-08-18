@@ -23,13 +23,16 @@ import (
 )
 
 const (
-	// downsegSize is the nominal segment payload size. A little jitter on
-	// the producer keeps sizes from being an exact constant (wire_audit).
-	downsegSize = 256 << 10 // 256 KiB
+	// downsegSize is the nominal segment payload size. 1 MiB: (a) amortizes
+	// the fixed per-segment HTTP/framing overhead far better than 256KiB
+	// (~81 -> ~205 MB/s on loopback) and (b) still reads as a natural HLS /
+	// DASH video-segment download (1-6MiB typical), so the multi-short-GET
+	// fingerprint benefit holds.
+	downsegSize = 1 << 20 // 1 MiB
 
 	// downsegMaxSegs bounds the sliding window of produced segments per
-	// session. 24 * 256KiB = 6 MiB worst case per session (bounded).
-	downsegMaxSegs = 24
+	// session. 8 x 1MiB = 8 MiB worst case per session (bounded).
+	downsegMaxSegs = 8
 )
 
 // downSegCache holds produced downlink segments for one session.

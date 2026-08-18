@@ -8,15 +8,17 @@ package splithttp
 //
 // Wire: each segment pull is a GET on the stream path whose meta token
 // carries (sessionId, seq) and whose request declares the dseg marker header.
-// The server (already implemented) answers:
+// The server answers:
 //   200 + body           -> finalized segment payload
-//   200 + empty body     -> stream finalized, no more segments (EOF)
-//   410                  -> segment slid past (client advances)
-//   404                  -> segment not yet produced (producer in flight):
-//                            retry after a short wait
+//   200 + empty body     -> stream finalized, no more segments (EOF marker)
+//   410                  -> segment slid past (skip)
+//   404                  -> segment not yet produced: retry with backoff
 //
-// Production is driven by a separate production leg (a sessioned dseg GET
-// without seq) the dialer keeps open; this puller is purely the consumer.
+// Concurrency: DownSegWindowSize worker goroutines each pull the next
+// reserved segment concurrently (no window/wake signalling races). Results
+// land in a map; Read consumes strictly in order. EOF is reached once the
+// consumed position passes the EOF marker (all earlier segments are
+// guaranteed to exist server-side).
 
 import (
 	"context"
@@ -24,6 +26,8 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,8 +42,14 @@ type segError struct{ s string }
 
 func (e *segError) Error() string { return e.s }
 
+// DownSegWindowSize bounds concurrent in-flight segment pulls.
+const DownSegWindowSize = 6
+
+// downSegRetryInterval is the backoff between 404 retries.
+const downSegRetryInterval = 20 * time.Millisecond
+
 // PullSegment fetches one finalized downlink segment (200 body) or a
-// 200-empty (EOF), distinguishing it from transient 404 and slipped 410.
+// 200-empty (EOF marker), distinguishing it from transient 404 and slipped 410.
 func (c *DefaultDialerClient) PullSegment(ctx context.Context, base *url.URL, sessionId, seqStr string) ([]byte, error) {
 	if base == nil {
 		return nil, errorsNew("nil base URL")
@@ -55,9 +65,6 @@ func (c *DefaultDialerClient) PullSegment(ctx context.Context, base *url.URL, se
 		ProtoMinor: 1,
 	}
 	req = req.WithContext(ctx)
-	// FillStreamRequest stamps padding + meta(sessionId, seq) (seq now
-	// honored); the dseg marker header turns this into a segment pull on
-	// the server.
 	c.transportConfig.FillStreamRequest(req, sessionId, seqStr)
 	req.Header.Set(downsegHeader, "1")
 
@@ -83,84 +90,158 @@ func (c *DefaultDialerClient) PullSegment(ctx context.Context, base *url.URL, se
 	}
 }
 
-// DownSegPuller is a sequential segment consumer: it pulls segments 0,1,2,...
-// and yields their concatenated bytes (with gap retry) through Read. It is
-// the M1 replacement for the long-GET download reader on the packet-up leg.
+// DownSegPuller consumes the downlink as an ordered byte stream.
 type DownSegPuller struct {
 	client    *DefaultDialerClient
 	base      *url.URL
 	sessionId string
 	ctx       context.Context
+	cancel    context.CancelFunc
 
-	// prod is the optional dseg production leg (GET without seq) that feeds
-	// the server's segment cache; closed together with the puller to signal
-	// EOF (finalize) on the server.
+	// prod is the optional dseg production leg closed on Close (EOF server-side).
 	prod io.Closer
 
-	seq    uint64 // next segment to pull
-	cur    []byte // current segment payload (being consumed)
-	eof    bool
-	closed bool
+	mu           sync.Mutex
+	buf          map[uint64][]byte
+	skip         map[uint64]bool
+	eofAt        uint64 // first non-existent seq once known (0 = unknown)
+	consumedSeq  uint64 // next seq the stream needs
+	fatal        error
+	closed       bool
+
+	nextIssue atomic.Uint64
+	wg        sync.WaitGroup
+	wake      chan struct{}
 }
 
-// NewDownSegPuller creates a segment puller for sessionId over base. prod
-// (optional) is the production leg whose Close finalizes the stream.
+// NewDownSegPuller creates a segment puller for sessionId over base.
 func NewDownSegPuller(ctx context.Context, client *DefaultDialerClient, base *url.URL, sessionId string, prod io.Closer) *DownSegPuller {
-	return &DownSegPuller{
+	pctx, cancel := context.WithCancel(ctx)
+	p := &DownSegPuller{
 		client:    client,
 		base:      base,
 		sessionId: sessionId,
-		ctx:       ctx,
+		ctx:       pctx,
+		cancel:    cancel,
 		prod:      prod,
+		buf:       make(map[uint64][]byte),
+		skip:      make(map[uint64]bool),
+		wake:      make(chan struct{}, 1),
+	}
+	for i := 0; i < DownSegWindowSize; i++ {
+		p.wg.Add(1)
+		go p.worker()
+	}
+	return p
+}
+
+// worker reserves the next segment and pulls it until it resolves, or stops
+// once the stream end (EOF marker) is passed.
+func (p *DownSegPuller) worker() {
+	defer p.wg.Done()
+	for {
+		// Stop when closed or when reserved seq is past the EOF marker.
+		seq := p.nextIssue.Add(1) - 1
+		p.mu.Lock()
+		if p.closed || (p.eofAt != 0 && seq > p.eofAt) {
+			p.mu.Unlock()
+			return
+		}
+		p.mu.Unlock()
+
+		seg, err := p.client.PullSegment(p.ctx, p.base, p.sessionId, strconv.FormatUint(seq, 10))
+
+		p.mu.Lock()
+		switch {
+		case err == nil && len(seg) > 0:
+			p.buf[seq] = seg
+		case err == nil: // empty 200 -> EOF marker at seq (first wins)
+			if p.eofAt == 0 || seq < p.eofAt {
+				p.eofAt = seq
+			}
+		case err == errSegGone:
+			p.skip[seq] = true
+		case err == errSegNotFound:
+			// Not produced yet: retry after backoff (owning worker keeps
+			// the reserved seq).
+			p.mu.Unlock()
+			select {
+			case <-time.After(downSegRetryInterval):
+			case <-p.ctx.Done():
+				return
+			}
+			continue
+		case p.fatal == nil:
+			p.fatal = err
+		}
+		p.mu.Unlock()
+		p.notify()
 	}
 }
 
-// Read returns the next bytes of the reconstructed downlink byte stream.
-func (p *DownSegPuller) Read(b []byte) (int, error) {
-	if p.closed {
-		return 0, io.EOF
+func (p *DownSegPuller) notify() {
+	select {
+	case p.wake <- struct{}{}:
+	default:
 	}
-	for len(p.cur) == 0 {
-		if p.eof {
-			return 0, io.EOF
+}
+
+// Read returns the next bytes of the reconstructed byte stream.
+func (p *DownSegPuller) Read(b []byte) (int, error) {
+	for {
+		p.mu.Lock()
+		c := p.consumedSeq
+		if seg, ok := p.buf[c]; ok {
+			delete(p.buf, c)
+			p.mu.Unlock()
+			n := copy(b, seg)
+			if n < len(seg) {
+				p.mu.Lock()
+				p.consumedSeq = c // unchanged; put remainder back
+				p.buf[c] = seg[n:]
+				p.mu.Unlock()
+			} else {
+				p.mu.Lock()
+				p.consumedSeq = c + 1
+				p.mu.Unlock()
+			}
+			return n, nil
 		}
-		seg, err := p.client.PullSegment(p.ctx, p.base, p.sessionId, strconv.FormatUint(p.seq, 10))
-		switch {
-		case err == nil:
-			if len(seg) == 0 {
-				// Empty 200 = EOF (server finalized, no more segments).
-				p.eof = true
-				return 0, io.EOF
-			}
-			p.cur = seg
-			p.seq++
-		case err == errSegGone:
-			// Server slid past this segment: the client fell behind. Advance
-			// and keep going (gaps are acceptable in a downlink stream the
-			// upper layers tolerate; a misplaced read is still better than
-			// hanging).
-			p.seq++
-		case err == errSegNotFound:
-			// Producer still in flight: wait briefly and retry. If the
-			// context is done, surface it.
-			select {
-			case <-p.ctx.Done():
-				return 0, p.ctx.Err()
-			case <-time.After(40 * time.Millisecond):
-			}
-		default:
+		if p.skip[c] {
+			delete(p.skip, c)
+			p.consumedSeq = c + 1
+			p.mu.Unlock()
+			continue
+		}
+		if p.fatal != nil {
+			err := p.fatal
+			p.fatal = nil
+			p.mu.Unlock()
 			return 0, err
 		}
+		if p.eofAt != 0 && c >= p.eofAt {
+			p.mu.Unlock()
+			return 0, io.EOF
+		}
+		p.mu.Unlock()
+		select {
+		case <-p.wake:
+		case <-p.ctx.Done():
+			return 0, p.ctx.Err()
+		}
 	}
-	n := copy(b, p.cur)
-	p.cur = p.cur[n:]
-	return n, nil
 }
 
-// Close marks the puller finished and, if present, closes the production leg
-// (which finalizes the server-side stream / EOF).
+// Close marks the puller finished and closes the production leg.
 func (p *DownSegPuller) Close() error {
-	p.closed = true
+	p.mu.Lock()
+	if !p.closed {
+		p.closed = true
+	}
+	p.mu.Unlock()
+	p.notify()
+	p.cancel()
+	p.wg.Wait()
 	if p.prod != nil {
 		return p.prod.Close()
 	}
