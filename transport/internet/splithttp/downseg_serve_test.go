@@ -8,9 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/xtls/xray-core/common/signal/done"
 )
@@ -24,8 +22,9 @@ func downsegTestSession(h *requestHandler) (*httpSession, string) {
 	return sess, id
 }
 
-// TestDownsegProduceThenPull: production leg writes into the segment cache, a
-// concurrent segment pull waits for and receives the finalized segment.
+// TestDownsegProduceThenPull: a brand-new session answers the first pull 404
+// immediately (fast-path, no 2s poll - audit Finding-3); once produced, the
+// pull returns the finalized segment.
 func TestDownsegProduceThenPull(t *testing.T) {
 	h := refCountTestHandler(t)
 	sess, id := downsegTestSession(h)
@@ -36,24 +35,18 @@ func TestDownsegProduceThenPull(t *testing.T) {
 	prod := &httpServerConn{Instance: done.New(), sess: sess}
 	payload := bytes.Repeat([]byte{0x42}, 2000)
 
-	var respCode int
-	var respBody []byte
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		respCode, respBody = pullSegmentWithID(h, id, 0)
-	}()
-	// Let the pull start polling; then produce and finalize.
-	time.Sleep(50 * time.Millisecond)
+	// Fast-path: nothing produced yet, stream not over -> immediate 404.
+	if code, _ := pullSegmentWithID(h, id, 0); code != http.StatusNotFound {
+		t.Fatalf("brand-new session: got %d want immediate 404 (no 2s poll)", code)
+	}
+	// Produce + finalize, then the segment is available.
 	if _, err := prod.Write(payload); err != nil {
 		t.Fatal(err)
 	}
 	_ = prod.Close() // finalize EOF
-	wg.Wait()
-
+	respCode, respBody := pullSegmentWithID(h, id, 0)
 	if respCode != http.StatusOK || !bytes.Equal(respBody, payload) {
-		t.Fatalf("pull: code=%d bodyLen=%d want 200/%d", respCode, len(respBody), len(payload))
+		t.Fatalf("pull after produce: code=%d bodyLen=%d want 200/%d", respCode, len(respBody), len(payload))
 	}
 }
 

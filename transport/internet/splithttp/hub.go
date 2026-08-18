@@ -202,6 +202,14 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 	}
 	// Web-compliant no-cache so the segment is never stalely cached.
 	writer.Header().Set("Cache-Control", "no-store")
+	// Fast-path for a brand-new session: nothing produced yet and the
+	// stream is not finalized — answer 404 immediately instead of polling
+	// downsegPullWait (the client's trigger pull / first segment GET must
+	// not add a 2s stall to TTFB; the puller retries on 404).
+	if c := sess.downseg.Load(); c != nil && c.producedCount() == 0 && !c.over() {
+		writer.WriteHeader(http.StatusNotFound)
+		return
+	}
 	deadline := time.Now().Add(downsegPullWait)
 	for {
 		p, ok, gone := sess.downseg.Load().get(seq)

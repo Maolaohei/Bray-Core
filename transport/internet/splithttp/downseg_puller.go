@@ -166,7 +166,12 @@ func (p *DownSegPuller) worker() {
 					p.eofAt = seq
 				}
 			case err == errSegGone:
-				p.skip[seq] = true
+				// A segment slid past before this worker pulled it — the
+				// byte stream would be silently corrupt (1MiB gap) without
+				// error. Treat as protocol error, not a silent skip.
+				if p.fatal == nil {
+					p.fatal = errSegGone
+				}
 			case err == errSegNotFound:
 				// Not produced yet: retry after backoff, keeping seq.
 				p.mu.Unlock()
