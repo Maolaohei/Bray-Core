@@ -51,3 +51,24 @@
 3. **未收敛的卡点**：worker 阻塞在某 HTTP 请求未返回（`persistConn.Read` 阻塞，但 dump 无 `ServeHTTP` goroutine）——疑似 http keep-alive 连接池/服务端并发交互，**需在 fresh 会话带 http 并发上下文专项调试**（加上请求级日志/超时，逐步收敛）。
 4. 设计骨架：单 worker 滑动窗口（produced/consumed + buf map + skip map + eofAt + wake channel），`DownSegWindowSize=6`；接口/测试与顺序版一致（同 `NewDownSegPuller` 签名）。
 5. 实现纪律：once 超长会话尾段做并发正确性改造易出隐蔽 bug（本会话多次手滑破坏性 patch）——**P1 必须独立 commit + 乱序/race/EOF 断言测试 + 双端联调后再上默认关门控**。
+
+## 外部审计（LLM-as-verifier，双 verifier）处置记录（2026-08-19）
+
+两次独立审计逐步验证并修掉了 **M1 端到端死路**（Verifier-1 HIGH#1 = Verifier-2 headline）。最终逐条裁决：
+
+| 发现 | 级别 | 处置 | commit |
+|---|---|---|---|
+| 生产腿未接线 = M1 端到端死路 | HIGH | 镜像 legacy 腿建 splitConn+addConn | 726fe7e7 |
+| 404 重试丢弃保留 seq = 流死锁 | HIGH | 内层循环重试同一 seq | 4e9a305f |
+| trigger 拉取 +2s TTFB | MED | 新会话首拉立即 404（fast-path） | cf83e132 |
+| 410 静默跳 = 字节流损坏 | MED | 410 → 协议错误（不静默 skip） | cf83e132 |
+| s.downseg 数据竞争 | MED | → atomic.Pointer | 4e9a305f |
+| 默认 ON 对 legacy 黑盒 | MED | 仅双端 Bray 前提，文档标注；回退探测后项 | 保留默认 ON |
+| 生产腿僵尸 8MiB+goroutine | MED | 生产腿自身 idle 兜底回收（30min 无 pull/produce 即关） | 94877f1b |
+| 固定 1MiB/W/节律 = 聚类特征 | LOW | 段大小右偏 ±10% 抖动 + 404 backoff 抖动（客户端盲拉 seq，协议零影响） | 94877f1b |
+| 无 Content-Type | LOW | **决策：不加**（固定 media type 反成新固定指纹；默认 octet-stream 更像普通下载） | — |
+| 全局 cache 无 aggregate cap | MED | 单会话 8MiB bounded 已够；每客户端仅 1 个 dseg 会话，接受 | — |
+| LeftRequests underrun 无下限 | LOW | 无害 unbalanced（永久生产腿不 idle 排水），跳过 | — |
+
+**违反的教训（记录在案）**：Verifier-1 ANY 测试全绿却功能全死——**单包内造 production leg 的测试绿了不代表 transport 可用**。真实生产腿必须 VLESS inbound 参与才算数，故 flaky 的单包"真实生产腿"测试（downseg_protocol_test.go / downseg_prodconn_test.go）已删除，改由**双端（VLESS）集成**验证——这必须发生在 push 之后的双端联调阶段。
+
