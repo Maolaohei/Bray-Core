@@ -26,6 +26,7 @@ func downsegTestSession(h *requestHandler) (*httpSession, string) {
 // immediately (fast-path, no 2s poll - audit Finding-3); once produced, the
 // pull returns the finalized segment.
 func TestDownsegProduceThenPull(t *testing.T) {
+	withZeroDownsegJitter(t)
 	h := refCountTestHandler(t)
 	sess, id := downsegTestSession(h)
 	if sess == nil {
@@ -52,6 +53,7 @@ func TestDownsegProduceThenPull(t *testing.T) {
 
 // TestDownsegPullGoneAndEof: slid-past is 410, beyond-final is 404.
 func TestDownsegPullGoneAndEof(t *testing.T) {
+	withZeroDownsegJitter(t)
 	h := refCountTestHandler(t)
 	sess, id := downsegTestSession(h)
 	if sess == nil {

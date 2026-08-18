@@ -16,6 +16,7 @@ import (
 )
 
 func TestConcurrentPullSegmentIsolation(t *testing.T) {
+	withZeroDownsegJitter(t)
 	h, base, client := newEndToEndServer(t)
 	sid := h.config.GenerateSessionID()
 

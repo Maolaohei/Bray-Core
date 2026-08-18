@@ -5,7 +5,18 @@ import (
 	"testing"
 )
 
+// withZeroDownsegJitter pins the per-segment size jitter to 0 for the
+// duration of t/b so tests that assert exact segment boundaries (1 MiB) stay
+// deterministic; restored via t.Cleanup.
+func withZeroDownsegJitter(tb testing.TB) {
+	tb.Helper()
+	old := downsegSizeJitterFn
+	downsegSizeJitterFn = func() int32 { return 0 }
+	tb.Cleanup(func() { downsegSizeJitterFn = old })
+}
+
 func TestDownSegAppendGet(t *testing.T) {
+	withZeroDownsegJitter(t)
 	c := newDownSegCache()
 
 	// Feed bytes larger than one segment: must split across segments.
@@ -56,6 +67,7 @@ func TestDownSegAppendPartial(t *testing.T) {
 }
 
 func TestDownSegSlidingGone(t *testing.T) {
+	withZeroDownsegJitter(t)
 	c := newDownSegCache()
 	// Produce more than the sliding window.
 	for i := 0; i < downsegMaxSegs+5; i++ {

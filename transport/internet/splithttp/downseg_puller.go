@@ -45,7 +45,9 @@ func (e *segError) Error() string { return e.s }
 // DownSegWindowSize bounds concurrent in-flight segment pulls.
 const DownSegWindowSize = 6
 
-// downSegRetryInterval is the backoff between 404 retries.
+// downSegRetryInterval is the base backoff between 404 retries; the actual
+// wait is jittered around it so the retry cadence does not form a uniform
+// 20 ms row across clients (fingerprint clustering risk).
 const downSegRetryInterval = 20 * time.Millisecond
 
 // PullSegment fetches one finalized downlink segment (200 body) or a
@@ -173,10 +175,15 @@ func (p *DownSegPuller) worker() {
 					p.fatal = errSegGone
 				}
 			case err == errSegNotFound:
-				// Not produced yet: retry after backoff, keeping seq.
+				// Not produced yet: retry after jittered backoff, keeping
+				// seq (jittered so retries don't form a fixed cadence).
 				p.mu.Unlock()
+				wait := downSegRetryInterval + time.Duration(biasedRangeRand(-int32(downSegRetryInterval/time.Millisecond), int32(downSegRetryInterval/time.Millisecond)))*time.Millisecond
+				if wait < 1*time.Millisecond {
+					wait = 1 * time.Millisecond
+				}
 				select {
-				case <-time.After(downSegRetryInterval):
+				case <-time.After(wait):
 				case <-p.ctx.Done():
 					return
 				}

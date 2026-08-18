@@ -87,6 +87,7 @@ func TestDownsegDialIntegration(t *testing.T) {
 
 // BenchmarkDownlinkSegments measures the sequential segment-pull throughput.
 func BenchmarkDownlinkSegments(b *testing.B) {
+	withZeroDownsegJitter(b)
 	b.SetBytes(downsegSize)
 	h := refCountTestHandler(b)
 	client := &DefaultDialerClient{transportConfig: h.config, client: &http.Client{Timeout: 30 * time.Second}}

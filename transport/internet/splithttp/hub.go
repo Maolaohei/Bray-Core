@@ -243,6 +243,16 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 // segment to finalize before answering 404.
 const downsegPullWait = 2 * time.Second
 
+// downsegProdIdleCheck is how often the production-leg handler checks for a
+// zombie session; downsegProdIdleLimit is how long it tolerates complete
+// inactivity (no pull, no production) before reaping. Far above any burst
+// between client pulls (the puller keeps a window of segments flowing), so a
+// live but quiet download is unaffected.
+const (
+	downsegProdIdleCheck = 5 * time.Second
+	downsegProdIdleLimit = 30 * time.Minute
+)
+
 func (h *requestHandler) getSessionTtl() int32 {
 	if h.cfDetected.Load() {
 		return 75
@@ -648,11 +658,29 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			}
 			h.ln.addConn(stat.Connection(&conn))
 			defer conn.Close()
-			select {
-			case <-request.Context().Done():
-			case <-httpSC.Wait():
+			// The production leg is deliberately exempt from the session
+			// sweeper (fully-connected, and an idle client is a legal
+			// long download). But it must not pin its per-session 8 MiB
+			// segment cache + goroutine forever: if neither a segment
+			// pull nor any downlink production has happened for
+			// downsegProdIdleLimit (client vanished / TCP half-open /
+			// crashed without FIN), reap the leg. A live download always
+			// regenerates activity, so a healthy transfer is never cut.
+			reaper := time.NewTicker(downsegProdIdleCheck)
+			defer reaper.Stop()
+			for {
+				select {
+				case <-request.Context().Done():
+					return
+				case <-httpSC.Wait():
+					return
+				case <-reaper.C:
+					if c := currentSession.downseg.Load(); c != nil && !c.over() &&
+						c.idleFor() > downsegProdIdleLimit {
+						return
+					}
+				}
 			}
-			return
 		}
 	}
 
