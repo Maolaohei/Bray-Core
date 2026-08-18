@@ -71,6 +71,14 @@ type httpSession struct {
 	// not fall to the first-returning defer as before (which tore it down
 	// and killed the other legs).
 	downloadLegs atomic.Int64
+	// Downlink segmentation state (M1, Bray-paired). When downsegMode is
+	// on, the session's downlink producer (httpServerConn.Write) writes
+	// bytes into downseg instead of an HTTP response, and the client pulls
+	// finalized segments with GET+seq. Legacy long-GET sessions keep
+	// downsegMode off and stream directly (unchanged).
+	downsegMode atomic.Int32
+	downseg     *downSegCache
+	downsegOnce sync.Once
 	// expiresAt is the unix-nano deadline for half-open sessions. Updated
 	// on every upsert (atomic, lock-free); the single session sweeper
 	// reaps expired entries. Fully-connected sessions are never reaped
@@ -99,6 +107,33 @@ func (s *httpSession) fullyConnected() *done.Instance {
 // peekFullyConnected returns the done.Instance without creating it.
 func (s *httpSession) peekFullyConnected() *done.Instance {
 	return s.isFullyConnected.Load()
+}
+
+// enterDownsegMode turns on downlink segmentation for this session (once),
+// creating the segment cache. Returns whether the session is in segment mode
+// after the call.
+func (s *httpSession) enterDownsegMode() bool {
+	s.downsegOnce.Do(func() {
+		s.downseg = newDownSegCache()
+		s.downsegMode.Store(1)
+	})
+	return s.downsegMode.Load() == 1
+}
+
+// downsegAppend feeds downlink bytes into the segment cache. Only valid in
+// segment mode (called from the downlink producer).
+func (s *httpSession) downsegAppend(b []byte) {
+	if s.downseg != nil {
+		s.downseg.append(b)
+	}
+}
+
+// downsegFinalize marks the downlink stream complete (EOF): finalizes the
+// in-flight segment so the last segment becomes pullable.
+func (s *httpSession) downsegFinalize() {
+	if s.downseg != nil {
+		s.downseg.finalize()
+	}
 }
 
 // chunkSlicePool reuses the per-POST header/cookie chunk slices (L4).
@@ -153,6 +188,51 @@ func (s *httpSession) close() {
 }
 
 const maxSessionsPerHandler = 65536
+
+// handleDownSegment serves a downlink-segment pull request (Bray-paired M1):
+// reads finalized segment seq from the session's segment cache. The segment
+// may still be in-flight (production in progress): poll briefly (up to
+// downsegPullWait) for it to finalize, then answer 200+payload, 410 Gone
+// (slid past) or 404 (not produced / stream over).
+func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, writer http.ResponseWriter) {
+	seq, err := strconv.ParseUint(seqStr, 10, 64)
+	if err != nil {
+		writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+	// Web-compliant no-cache so the segment is never stalely cached.
+	writer.Header().Set("Cache-Control", "no-store")
+	deadline := time.Now().Add(downsegPullWait)
+	for {
+		p, ok, gone := sess.downseg.get(seq)
+		if ok {
+			if _, werr := writer.Write(p); werr == nil {
+				if f, ok := writer.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+			return
+		}
+		if gone {
+			writer.WriteHeader(http.StatusGone) // 410: slid past, client re-pull/abort
+			return
+		}
+		if sess.downseg.over() {
+			// Stream finalized and the segment never appeared: end of data.
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if time.Now().After(deadline) {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// downsegPullWait bounds how long a segment pull waits for an in-flight
+// segment to finalize before answering 404.
+const downsegPullWait = 2 * time.Second
 
 func (h *requestHandler) getSessionTtl() int32 {
 	if h.cfDetected.Load() {
@@ -501,6 +581,42 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		isUplinkRequest = true
 	}
 
+	// Downlink segmentation (Bray-paired M1): a client that declares the
+	// dseg header on a sessioned GET enters segment mode. If seq is present
+	// it is a segment pull (read from the segment cache); without seq it is
+	// the production leg that feeds the cache (httpServerConn.Write already
+	// routes into the cache once the session is in segment mode).
+	if request.Method == "GET" && sessionId != "" && request.Header.Get(downsegHeader) != "" {
+		if !currentSession.enterDownsegMode() {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if seqStr != "" {
+			h.handleDownSegment(currentSession, seqStr, writer)
+			return
+		}
+		// Production leg: keep the request alive; its httpServerConn.Write
+		// now feeds the cache, and Close finalizes the stream (EOF). Count
+		// as a download leg so the session lives until this leg ends.
+		currentSession.fullyConnected().Close()
+		currentSession.downloadLegs.Add(1)
+		defer func() {
+			if currentSession.downloadLegs.Add(-1) == 0 {
+				currentSession.close()
+				h.deleteSession(sessionId, currentSession)
+			}
+		}()
+		writer.WriteHeader(http.StatusOK)
+		if f, ok := writer.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-request.Context().Done():
+		case <-time.After(time.Hour): // safety backstop; client drives teardown
+		}
+		return
+	}
+
 	uplinkDataKey := h.config.UplinkDataKey
 
 	if isUplinkRequest && sessionId != "" { // stream-up, packet-up
@@ -803,6 +919,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			Instance:       done.New(),
 			reader:         request.Body,
 			ResponseWriter: writer,
+			sess:           currentSession, // nil for stream-one; drives downseg split
 		}
 		localAddr := h.localAddr
 		if la, ok := request.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la != nil {
@@ -862,6 +979,10 @@ type httpServerConn struct {
 	*done.Instance
 	reader io.Reader // request body (no need to Close)
 	http.ResponseWriter
+	// sess is the owning session; non-nil only for sessioned (packet-up /
+	// stream-up) download legs. In segment mode the session's downlink
+	// goes into its segment cache instead of this ResponseWriter.
+	sess *httpSession
 	// Downlink write aggregation: flushing every Write() forces one TCP
 	// segment / H2 DATA frame per chunk, which inflates frame count on
 	// high-chunk-rate tunnels. Bytes are buffered and flushed at a size
@@ -911,6 +1032,13 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	c.touch() // write activity resets the stream-one idle reaper
+	// Segment-mode session: feed downlink into the segment cache instead
+	// of writing this (production-leg) HTTP response body. The client
+	// pulls finalized segments with GET+seq.
+	if c.sess != nil && c.sess.downsegMode.Load() == 1 {
+		c.sess.downsegAppend(b)
+		return len(b), nil
+	}
 	if len(b) == 0 {
 		return 0, nil
 	}
@@ -996,9 +1124,19 @@ func (c *httpServerConn) flushLocked() error {
 func (c *httpServerConn) Close() error {
 	c.Lock()
 	defer c.Unlock()
+	segMode := c.sess != nil && c.sess.downsegMode.Load() == 1
 	if !c.Instance.Done() {
-		// Deliver any buffered downlink bytes before the stream is torn down.
-		_ = c.flushLocked()
+		if segMode {
+			// Downlink lives in the segment cache. EOF here finalizes the
+			// in-flight segment so the last segment becomes pullable;
+			// nothing goes to this leg's HTTP response body.
+			if c.sess.downseg != nil {
+				c.sess.downsegFinalize()
+			}
+		} else {
+			// Deliver any buffered downlink bytes before the stream is torn down.
+			_ = c.flushLocked()
+		}
 	}
 	// M2: return the downlink aggregation buffer to the pool instead of
 	// pinning up to streamFlushThreshold per connection for its lifetime.
