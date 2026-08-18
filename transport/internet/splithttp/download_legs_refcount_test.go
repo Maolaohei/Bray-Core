@@ -19,8 +19,8 @@ import (
 	"github.com/xtls/xray-core/transport/internet/stat"
 )
 
-func refCountTestHandler(t *testing.T) *requestHandler {
-	t.Helper()
+func refCountTestHandler(tb testing.TB) *requestHandler {
+	tb.Helper()
 	cfg := &Config{
 		Path:                "/sh",
 		SessionIDLength:     &RangeConfig{From: 16, To: 16},
