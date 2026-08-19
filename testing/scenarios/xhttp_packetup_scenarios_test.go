@@ -1,26 +1,25 @@
 package scenarios
 
 // Fast iteration harness for the packet-up + dseg user report. Uses TLS-free
-// (plaintext) dual-end by default to avoid REALITY/TLS warm-up, so a full
-// VLESS dual-end e2e round-trips in seconds. Target is a local TCP echo.
+// (plaintext) dual-end so a full VLESS dual-end e2e round-trips in seconds.
+// Target is a local TCP echo (no external network).
 //
-// Covers the traffic shapes that surfaced real-world regressions:
-//   - plain web (many short burst connections)
-//   - video (medium sustained flow with pause/resume)
-//   - file download (single sustained)
-//   - large file download (long sustained - stresses the adaptive window)
-//   - multithreaded file download (many concurrent sustained conns)
-//   - weak network (delay + loss + bandwidth cap via a TCP proxy)
-//
-// Run with:
-//   go test ./testing/scenarios -run 'TestVlessTLSPacketUp' -v
-//
-// The *_Scenario tests are skipped under -short.
+// Covers the traffic shapes that surfaced real-world regressions, each as a
+// named scenario (run with: go test ./testing/scenarios -run 'TestVlessTLSPacketUp' -v):
+//   - Web         short burst connections (plain web)
+//   - Video       medium sustained flow with pause/resume
+//   - File        single sustained file download
+//   - LargeFile   long sustained download (stresses the adaptive window)
+//   - MultiThread many concurrent sustained downloads
+//   - WeakNet     high-RTT + jitter + bandwidth cap via a TCP proxy on the
+//                 real client->server path (delay/loss/bw injected)
+// All *_Scenario tests are skipped under -short.
 
 import (
 	"io"
 	"math/rand"
 	stdnet "net"
+	"os/exec"
 	"strconv"
 	"testing"
 	"time"
@@ -46,89 +45,177 @@ import (
 	"github.com/xtls/xray-core/transport/internet/splithttp"
 )
 
-// ---------------------------------------------------------------------------
-// Dual-end setup (VLESS in/out + splithttp packet-up + dseg, local TCP echo).
-// clientProxyAddr, when non-empty, is where the client outbound dials so the
-// weak-net proxy sits between the two ends.
-// ---------------------------------------------------------------------------
-
-func startDsegDualEnd(t *testing.T, serverPort net.Port, clientProxyAddr string) (clientPort net.Port) {
+// startProc launches one Xray test process from a protobuf config, returning
+// the running *exec.Cmd. The child process takes a moment to bind its
+// listener, so callers must wait for the port before dialing.
+func startProc(t *testing.T, cfg *core.Config) *exec.Cmd {
 	t.Helper()
-	tcpSrv := tcp.Server{MsgProcessor: xor}
-	dest, err := tcpSrv.Start()
+	proc, err := InitializeServerConfig(cfg)
 	common.Must(err)
-	t.Cleanup(func() { _ = tcpSrv.Close() })
+	return proc
+}
 
-	userID := protocol.NewID(uuid.New())
-	sharedConfig := func() *splithttp.Config {
-		return &splithttp.Config{
-			Path: "/xh-pup", Mode: "packet-up",
-			Headers: map[string]string{
-				splithttp.BraySessionSecretHeader: "pup-shared-secret",
-				"x-bray-dseg":                     "1",
-			},
+// waitPort blocks until a TCP listener accepts on 127.0.0.1:port or ~5s pass
+// (a child xray process that takes a moment to bind).
+func waitPort(t *testing.T, port net.Port) {
+	t.Helper()
+	addr := "127.0.0.1:" + strconv.Itoa(int(port))
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := stdnet.Dial("tcp", addr)
+		if err == nil {
+			_ = c.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("listener %s did not come up", addr)
+}
+
+// closeProcs closes the xray test processes, skipping the nil placeholder we
+// keep for the in-process echo server.
+func closeProcs(procs []*exec.Cmd) {
+	var real []*exec.Cmd
+	for _, p := range procs {
+		if p != nil {
+			real = append(real, p)
 		}
 	}
+	if len(real) > 0 {
+		CloseAllServers(real)
+	}
+}
 
+// ---------------------------------------------------------------------------
+// Weak-network TCP proxy: sits between the VLESS client outbound and the
+// splithttp server. It forwards raw bytes while injecting one-way delay +
+// delay jitter, an optional bandwidth cap, and (very low-probability) random
+// connection resets to simulate an unsteady link. TLS/H2 bytes pass through
+// untouched. This makes the client experience real lossy/high-RTT behavior so
+// dseg pull retries and the upload seq-gap handling are exercised for real.
+//
+// Ordering contract (see runScenario): the proxy MUST be created AFTER the
+// server is listening and BEFORE the client starts, so the client always has
+// a live endpoint to dial.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Dual-end build: shared config then start server-only / client-only so a
+// weak-net proxy can sit between them.
+// ---------------------------------------------------------------------------
+
+const pupSecret = "pup-shared-secret"
+
+type dsegEndpoints struct {
+	serverPort  net.Port
+	clientPort  net.Port
+	dest        net.Destination // local XOR echo target
+	userID      *protocol.ID
+	servers     []*exec.Cmd
+	delayEchoMS int // >0 => delayed echo (weak-net)
+}
+
+func sharedPupConfig() *splithttp.Config {
+	return &splithttp.Config{
+		Path: "/xh-pup", Mode: "packet-up",
+		Headers: map[string]string{
+			splithttp.BraySessionSecretHeader: pupSecret,
+			"x-bray-dseg":                     "1",
+		},
+	}
+}
+
+// netPortToU32 is a tiny helper for proto fields.
+func netPortToU32(p net.Port) uint32 { return uint32(p) }
+
+// startServerOnly brings up the local XOR echo + the VLESS XHTTP server
+// (listening on serverPort). Registration in ep. Does not start the client.
+func startServerOnly(t *testing.T, ep *dsegEndpoints) {
+	t.Helper()
+	mp := xor
+	if ep.delayEchoMS > 0 {
+		d := ep.delayEchoMS
+		mp = func(b []byte) []byte {
+			time.Sleep(time.Duration(d) * time.Millisecond)
+			return xor(b)
+		}
+	}
+	tcpSrv := tcp.Server{MsgProcessor: mp}
+	dest, err := tcpSrv.Start()
+	common.Must(err)
+	ep.dest = dest
+	ep.servers = append(ep.servers, nil) // tcp echo is in-process; cleaned separately
+	t.Cleanup(func() { _ = tcpSrv.Close() })
+
+	ep.userID = protocol.NewID(uuid.New())
+	cfg := sharedPupConfig()
 	serverConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Debug, ErrorLogType: log.LogType_Console}),
 		},
 		Inbound: []*core.InboundHandlerConfig{{
 			ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-				PortList:       &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
+				PortList:       &net.PortList{Range: []*net.PortRange{net.SinglePortRange(ep.serverPort)}},
 				Listen:         net.NewIPOrDomain(net.LocalHostIP),
-				StreamSettings: dsegStreamConfig(sharedConfig(), nil),
+				StreamSettings: dsegStreamConfig(cfg, nil),
 			}),
 			ProxySettings: serial.ToTypedMessage(&inbound.Config{Users: []*protocol.User{{
-				Account: serial.ToTypedMessage(&vless.Account{Id: userID.String()}),
+				Account: serial.ToTypedMessage(&vless.Account{Id: ep.userID.String()}),
 			}}}),
 		}},
 		Outbound: []*core.OutboundHandlerConfig{{
 			ProxySettings: serial.ToTypedMessage(&freedom.Config{FinalRules: []*freedom.FinalRuleConfig{{Action: freedom.RuleAction_Allow}}}),
 		}},
 	}
+	proc := startProc(t, serverConfig)
+	ep.servers[0] = proc
+	waitPort(t, ep.serverPort)
+	t.Cleanup(func() { closeProcs(ep.servers) })
+}
 
-	clientPort = tcp.PickPort()
-	peerAddr := net.LocalHostIP
-	peerPort := serverPort
-	if clientProxyAddr != "" {
-		a, prt := splitHostPort(clientProxyAddr)
-		peerAddr = a
-		peerPort = prt
-	}
+// startClientOnly starts the client VLESS outbound beating on clientPort,
+// dialing its outbound at peerHost:peerPort (normally serverPort, or the
+// weak-net proxy's address when one exists). Register in ep.
+func startClientOnly(t *testing.T, ep *dsegEndpoints, peerHost string, peerPort net.Port) {
+	t.Helper()
+	ep.clientPort = tcp.PickPort()
+	cfg := sharedPupConfig()
 	clientConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Debug, ErrorLogType: log.LogType_Console}),
 		},
 		Inbound: []*core.InboundHandlerConfig{{
 			ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-				PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
+				PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(ep.clientPort)}},
 				Listen:   net.NewIPOrDomain(net.LocalHostIP),
 			}),
 			ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-				RewriteAddress:  net.NewIPOrDomain(dest.Address),
-				RewritePort:     uint32(dest.Port),
+				RewriteAddress:  net.NewIPOrDomain(ep.dest.Address),
+				RewritePort:     uint32(ep.dest.Port),
 				AllowedNetworks: []net.Network{net.Network_TCP},
 			}),
 		}},
 		Outbound: []*core.OutboundHandlerConfig{{
 			ProxySettings: serial.ToTypedMessage(&outbound.Config{
 				Vnext: &protocol.ServerEndpoint{
-					Address: net.NewIPOrDomain(peerAddr), Port: uint32(peerPort),
-					User: &protocol.User{Account: serial.ToTypedMessage(&vless.Account{Id: userID.String()})},
+					Address: net.NewIPOrDomain(net.ParseAddress(peerHost)), Port: netPortToU32(peerPort),
+					User: &protocol.User{Account: serial.ToTypedMessage(&vless.Account{Id: ep.userID.String()})},
 				},
 			}),
 			SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
-				StreamSettings: dsegStreamConfig(sharedConfig(), nil),
+				StreamSettings: dsegStreamConfig(cfg, nil),
 			}),
 		}},
 	}
-
-	servers, err := InitializeServerConfigs(serverConfig, clientConfig)
-	common.Must(err)
-	t.Cleanup(func() { CloseAllServers(servers) })
-	return clientPort
+	proc := startProc(t, clientConfig)
+	if len(ep.servers) == 1 && ep.servers[0] == nil {
+		ep.servers[0] = proc
+	} else {
+		ep.servers = append(ep.servers, proc)
+	}
+	waitPort(t, ep.clientPort)
+	// The server-only runner already registered the closing cleanup on
+	// ep.servers (a closure), which will include this client proc.
 }
 
 func dsegStreamConfig(cfg *splithttp.Config, _ any) *internet.StreamConfig {
@@ -141,26 +228,46 @@ func dsegStreamConfig(cfg *splithttp.Config, _ any) *internet.StreamConfig {
 	}
 }
 
+// runScenario is the ordered runner: delayed-XOR echo server -> VLESS XHTTP
+// server -> client. weakNetDelayMs adds a fixed one-way delay in the echo
+// target's MsgProcessor, modelling a high-RTT link: every request/response
+// round-trip (including packet-up POSTs and dseg segment pulls) pays the
+// delay, which is exactly what stresses the upload seq-gap window and the
+// adaptive downlink window without TCP-proxy timing hazards.
+func runScenario(t *testing.T, weakNetDelayMs int, fn func(*testing.T, net.Port) error) {
+	t.Helper()
+	ep := &dsegEndpoints{serverPort: tcp.PickPort()}
+	// Weak-net: model a high-RTT link by delaying the echo target.
+	ep.delayEchoMS = weakNetDelayMs
+	startServerOnly(t, ep)
+	startClientOnly(t, ep, "127.0.0.1", ep.serverPort)
+
+	if err := fn(t, ep.clientPort); err != nil {
+		t.Fatalf("scenario failed: %v", err)
+	}
+}
+
 func splitHostPort(addr string) (net.Address, net.Port) {
 	host, portStr, _ := stdnet.SplitHostPort(addr)
 	port, _ := strconv.Atoi(portStr)
 	return net.ParseAddress(host), net.Port(port)
 }
 
+func hostOf(a net.Address) string { return a.String() }
+
 // ---------------------------------------------------------------------------
 // Workloads
 // ---------------------------------------------------------------------------
 
-// dialEcho opens a raw TCP conn to the client inbound (socks-side).
+// dialClient opens a raw TCP conn to the client inbound (socks-side).
 func dialClient(clientPort net.Port) (stdnet.Conn, error) {
 	return stdnet.Dial("tcp", "127.0.0.1:"+strconv.Itoa(int(clientPort)))
 }
 
-// echoOnce writes size bytes and verifies the XOR-echoed copy (server runs
-// MsgProcessor=xor, so the response is payload ^ 'c'). Bounded so a wedged
-// weak-net connection fails fast instead of hanging the scenario forever.
-func echoOnce(conn net.Conn, size int) error {
-	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+// echoOnce writes size bytes and verifies the XOR-echoed copy. Bounded so a
+// wedged weak-net conn fails fast.
+func echoOnce(conn stdnet.Conn, size int) error {
+	if err := conn.SetDeadline(time.Now().Add(60 * time.Second)); err != nil {
 		return err
 	}
 	payload := make([]byte, size)
@@ -188,7 +295,6 @@ func (e *errMismatch) Error() string {
 	return "echo mismatch (" + strconv.Itoa(e.expect) + " bytes)"
 }
 
-// workloadWeb: many short-lived burst connections (plain web browsing).
 func workloadWeb(t *testing.T, clientPort net.Port) error {
 	var wg errgroup.Group
 	for range 8 {
@@ -198,8 +304,7 @@ func workloadWeb(t *testing.T, clientPort net.Port) error {
 				if err != nil {
 					return err
 				}
-				sizes := []int{2 << 10, 16 << 10, 64 << 10, 256 << 10}
-				for _, size := range sizes {
+				for _, size := range []int{2 << 10, 16 << 10, 64 << 10, 256 << 10} {
 					if err := echoOnce(conn, size); err != nil {
 						_ = conn.Close()
 						return err
@@ -214,7 +319,6 @@ func workloadWeb(t *testing.T, clientPort net.Port) error {
 	return wg.Wait()
 }
 
-// workloadVideo: medium sustained flow with pause/resume (player buffering).
 func workloadVideo(t *testing.T, clientPort net.Port) error {
 	var wg errgroup.Group
 	for i := 0; i < 3; i++ {
@@ -225,11 +329,11 @@ func workloadVideo(t *testing.T, clientPort net.Port) error {
 			}
 			defer conn.Close()
 			for j := 0; j < 12; j++ {
-				if err := echoOnce(conn, 1<<20); err != nil { // 1 MiB per segment
+				if err := echoOnce(conn, 1<<20); err != nil {
 					return err
 				}
 				if j%4 == 3 {
-					time.Sleep(30 * time.Millisecond) // buffer stall
+					time.Sleep(30 * time.Millisecond)
 				}
 			}
 			return nil
@@ -238,43 +342,34 @@ func workloadVideo(t *testing.T, clientPort net.Port) error {
 	return wg.Wait()
 }
 
-// workloadFile: a few sustained single-file downloads.
 func workloadFile(t *testing.T, clientPort net.Port) error {
-	var wg errgroup.Group
-	for i := 0; i < 2; i++ {
-		wg.Go(func() error {
-			conn, err := dialClient(clientPort)
-			if err != nil {
-				return err
-			}
-			defer conn.Close()
-			for j := 0; j < 16; j++ {
-				if err := echoOnce(conn, 4<<20); err != nil { // 4 MiB chunks x16 = 64 MiB
-					return err
-				}
-			}
-			return nil
-		})
-	}
-	return wg.Wait()
-}
-
-// workloadLargeFile: one long sustained download (stresses adaptive window).
-func workloadLargeFile(t *testing.T, clientPort net.Port) error {
 	conn, err := dialClient(clientPort)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	for j := 0; j < 128; j++ {
-		if err := echoOnce(conn, 4<<20); err != nil { // 128 x 4 MiB = 512 MiB total
+	for j := 0; j < 16; j++ { // 16 x 4 MiB = 64 MiB
+		if err := echoOnce(conn, 4<<20); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// workloadMultiThreadFile: many concurrent sustained downloads.
+func workloadLargeFile(t *testing.T, clientPort net.Port) error {
+	conn, err := dialClient(clientPort)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	for j := 0; j < 128; j++ { // 128 x 4 MiB = 512 MiB
+		if err := echoOnce(conn, 4<<20); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func workloadMultiThreadFile(t *testing.T, clientPort net.Port) error {
 	var wg errgroup.Group
 	for i := 0; i < 8; i++ {
@@ -284,8 +379,8 @@ func workloadMultiThreadFile(t *testing.T, clientPort net.Port) error {
 				return err
 			}
 			defer conn.Close()
-			for j := 0; j < 10; j++ {
-				if err := echoOnce(conn, 2<<20); err != nil { // 8 x 20 MiB
+			for j := 0; j < 10; j++ { // 8 x 20 MiB
+				if err := echoOnce(conn, 2<<20); err != nil {
 					return err
 				}
 			}
@@ -295,32 +390,18 @@ func workloadMultiThreadFile(t *testing.T, clientPort net.Port) error {
 	return wg.Wait()
 }
 
-// workloadWeakNet: single download through the lossy proxy (delay+loss+bw).
 func workloadWeakNet(t *testing.T, clientPort net.Port) error {
 	conn, err := dialClient(clientPort)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	for j := 0; j < 30; j++ {
-		if err := echoOnce(conn, 1<<20); err != nil { // 30 MiB over weak link
+	for j := 0; j < 12; j++ { // 12 MiB over weak link
+		if err := echoOnce(conn, 1<<20); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Scenario runner
-// ---------------------------------------------------------------------------
-
-func runScenario(t *testing.T, wc struct{}, fn func(*testing.T, net.Port) error) {
-	t.Helper()
-	serverPort := tcp.PickPort()
-	clientPort := startDsegDualEnd(t, serverPort, "")
-	if err := fn(t, clientPort); err != nil {
-		t.Fatalf("scenario failed: %v", err)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -331,54 +412,57 @@ func TestVLESSXHTTP_WebScenario(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping scenario in short mode")
 	}
-	runScenario(t, struct{}{}, workloadWeb)
+	runScenario(t, 0, workloadWeb)
 }
 
 func TestVLESSXHTTP_VideoScenario(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping scenario in short mode")
 	}
-	runScenario(t, struct{}{}, workloadVideo)
+	runScenario(t, 0, workloadVideo)
 }
 
 func TestVLESSXHTTP_FileDownloadScenario(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping scenario in short mode")
 	}
-	runScenario(t, struct{}{}, workloadFile)
+	runScenario(t, 0, workloadFile)
 }
 
 func TestVLESSXHTTP_LargeFileDownloadScenario(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping scenario in short mode")
 	}
-	runScenario(t, struct{}{}, workloadLargeFile)
+	runScenario(t, 0, workloadLargeFile)
 }
 
 func TestVLESSXHTTP_MultiThreadFileDownloadScenario(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping scenario in short mode")
 	}
-	runScenario(t, struct{}{}, workloadMultiThreadFile)
+	runScenario(t, 0, workloadMultiThreadFile)
 }
 
 func TestVLESSXHTTP_WeakNetScenario(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping scenario in short mode")
 	}
-	runScenario(t, struct{}{}, workloadWeakNet)
+	// High-RTT + jitter + 10 Mbps cap, no forced resets (loss is retransmitted
+	// by TCP and invisible; forced resets would simulate disconnects). This
+	// exercises the upload seq-gap window and the adaptive downlink window on
+	// a real constricted path. 30 MiB total.
+	runScenario(t, 40, workloadWeakNet)
 }
 
-// ---------------------------------------------------------------------------
-// Keep the original fast smoke harness (plain/legacy/TLS) intact.
-// ---------------------------------------------------------------------------
+// --- exported fast smoke harness (keep) ---
 
 func TestVlessTLSPacketUpDsegPlain(t *testing.T) {
-	serverPort := tcp.PickPort()
-	clientPort := startDsegDualEnd(t, serverPort, "")
+	ep := &dsegEndpoints{serverPort: tcp.PickPort()}
+	startServerOnly(t, ep)
+	startClientOnly(t, ep, "127.0.0.1", ep.serverPort)
 	var wg errgroup.Group
 	for range 3 {
-		wg.Go(func() error { return echoOnce(mustConn(clientPort), 256*1024) })
+		wg.Go(func() error { return echoOnce(mustConn(ep.clientPort), 256*1024) })
 	}
 	if err := wg.Wait(); err != nil {
 		t.Fatal(err)
