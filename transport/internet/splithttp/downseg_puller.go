@@ -72,6 +72,13 @@ func (c *DefaultDialerClient) PullSegment(ctx context.Context, base *url.URL, se
 	// sessioned GET whose meta token carries a seq as a segment pull.
 	c.transportConfig.FillStreamRequest(req, sessionId, seqStr)
 
+	// Bound the pull with a hard timeout so a wedged transport (TLS/h2
+	// handshake against a peer that never responds) surfaces as an error
+	// instead of blocking the worker forever.
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req = req.WithContext(pctx)
+
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err

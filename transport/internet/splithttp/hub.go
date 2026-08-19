@@ -206,9 +206,17 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 	// stream is not finalized — answer 404 immediately instead of polling
 	// downsegPullWait (the client's trigger pull / first segment GET must
 	// not add a 2s stall to TTFB; the puller retries on 404).
-	if c := sess.downseg.Load(); c != nil && c.producedCount() == 0 && !c.over() {
-		writer.WriteHeader(http.StatusNotFound)
-		return
+	if c := sess.downseg.Load(); c != nil && !c.over() {
+		// Lazy-commit the in-flight segment BEFORE checking producedCount:
+		// a producer that wrote a sub-1MiB response (VLESS handshake, first
+		// bytes) and went quiet has no further append to trigger the
+		// time-based commit, so without this the fast-path would never see
+		// it and the pull would 404 forever (deadlock).
+		c.LazyCommitStale()
+		if c.producedCount() == 0 {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
 	}
 	deadline := time.Now().Add(downsegPullWait)
 	for {
@@ -507,6 +515,16 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		writer.WriteHeader(http.StatusOK)
 		return
 	}
+	// Bray-only: XMUX health probes are session-less HEAD requests
+	// (mux.go:1355). Under locked packet-up/stream-up they must not be
+	// rejected by the empty-sessionId gate below (that gate exists to stop
+	// *data* shapes without a session, not liveness probes). Answer 200
+	// with no body, same as OPTIONS — indistinguishable from a generic
+	// reverse-proxy health check, so no fingerprint delta.
+	if request.Method == "HEAD" {
+		writer.WriteHeader(http.StatusOK)
+		return
+	}
 
 	/*
 		clientVer := []int{0, 0, 0}
@@ -554,7 +572,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	// Empty sessionId is stream-one shape only. Locked stream-up/packet-up reject it.
 	// (auto/empty config still allow stream-one for compatibility.)
 	if sessionId == "" && !ServerModeAllowsStreamOne(h.config.Mode) {
-		errors.LogDebug(context.Background(), "sessionId required for mode")
+		errors.LogDebug(context.Background(), "sessionId required for mode method=", request.Method, " path=", request.URL.Path, " mode=", h.config.Mode, " sidLen=", len(sessionId))
 		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -1099,11 +1117,18 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	c.touch() // write activity resets the stream-one idle reaper
-	// Segment-mode session: feed downlink into the segment cache instead
-	// of writing this (production-leg) HTTP response body. The client
-	// pulls finalized segments with GET+seq.
+	// Segment-mode session: feed downlink into the segment cache instead of
+	// writing this (production-leg) HTTP response body. The client pulls
+	// committed segments with GET+seq. Bytes go into the cache immediately
+	// (not via writeBuf): downSegCache commits a segment when it fills or
+	// after downsegCommitInterval, so a sub-1MiB stream (VLESS handshake,
+	// first response bytes, small TUN packet) becomes pullable without
+	// stranding until 1 MiB fills. No HTTP response body is produced, so
+	// there is nothing for writeBuf to flush to on this leg.
 	if c.sess != nil && c.sess.downsegMode.Load() == 1 {
-		c.sess.downsegAppend(b)
+		if len(b) > 0 {
+			c.sess.downsegAppend(b)
+		}
 		return len(b), nil
 	}
 	if len(b) == 0 {
@@ -1194,9 +1219,12 @@ func (c *httpServerConn) Close() error {
 	segMode := c.sess != nil && c.sess.downsegMode.Load() == 1
 	if !c.Instance.Done() {
 		if segMode {
-			// Downlink lives in the segment cache. EOF here finalizes the
-			// in-flight segment so the last segment becomes pullable;
-			// nothing goes to this leg's HTTP response body.
+			// Downlink lives in the segment cache. Flush any aggregated but
+			// uncommitted bytes into a readable segment first (a producer that
+			// wrote below the size threshold and closed would otherwise strand
+			// them), then finalize the in-flight segment so EOF becomes
+			// pullable; nothing goes to this leg's HTTP response body.
+			_ = c.flushLocked()
 			if c.sess.downseg.Load() != nil {
 				c.sess.downsegFinalize()
 			}

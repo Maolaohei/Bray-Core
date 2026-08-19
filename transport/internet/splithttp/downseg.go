@@ -43,6 +43,15 @@ const (
 	// downsegSizeMin floors segments so the pull overhead amortizes even
 	// with jitter drawn low.
 	downsegSizeMin = downsegSize / 2
+	// downsegCommitInterval bounds how long a segment may keep receiving
+	// bytes before it is committed (made readable), even when far below
+	// downsegSize. This is what makes a sub-1MiB stream (VLESS handshake,
+	// first response bytes, small TUN packet) pullable instead of stranding
+	// until 1 MiB fills — otherwise any short transaction deadlocks. Large
+	// bursts still fill full segments and are committed by size, so the
+	// sliding window does not flood with tiny segments on bulk traffic.
+	// Bounded: a busy connection commits at most once per interval.
+	downsegCommitInterval = 10 * time.Millisecond
 )
 
 // downSegCache holds produced downlink segments for one session.
@@ -59,6 +68,13 @@ type downSegCache struct {
 	// emit a perfectly uniform 1 MiB cadence (fingerprint-clustering
 	// risk; real HLS/DASH segments vary with bitrate).
 	segSizeBySeq map[uint64]int
+	// segStartedAt is the unix-nano time the in-flight (partial) segment
+	// received its first byte. Used to commit a segment once it has been
+	// receiving for downsegCommitInterval even if far below size, so a
+	// sub-1MiB stream (VLESS handshake / first response bytes / small TUN
+	// packet) becomes pullable without waiting to fill 1 MiB — otherwise
+	// any sub-1MiB transaction deadlocks.
+	segStartedAt int64
 	// final is true once finalize() ran (stream complete; no more
 	// segments will be produced).
 	final bool
@@ -109,8 +125,10 @@ var downsegSizeJitterFn = func() int32 {
 	return biasedRangeRand(-downsegSizeJitterMax/2, downsegSizeJitterMax)
 }
 
-// append writes downlink bytes into segments, producing new segment slots as
-// needed (sliding, evicting the oldest when over capacity).
+// append writes downlink bytes into segments. A segment is committed
+// (produced++, readable) when it fills to its target size OR has been
+// receiving bytes for downsegCommitInterval — the time bound is what makes a
+// sub-1MiB stream pullable instead of stranding until 1 MiB fills.
 func (c *downSegCache) append(b []byte) {
 	if len(b) == 0 {
 		return
@@ -137,6 +155,7 @@ func (c *downSegCache) append(b []byte) {
 			// the fast path where full segments are the norm.
 			cur = make([]byte, 0, size)
 			c.segs[idx] = cur
+			c.segStartedAt = time.Now().UnixNano()
 		}
 		cur = c.segs[idx]
 		tail := size - len(cur)
@@ -146,7 +165,9 @@ func (c *downSegCache) append(b []byte) {
 		}
 		c.segs[idx] = append(cur, b[off:off+n]...)
 		off += n
-		if len(c.segs[idx]) >= size {
+		filled := len(c.segs[idx]) >= size
+		stale := !filled && time.Now().UnixNano()-c.segStartedAt >= int64(downsegCommitInterval)
+		if filled || stale {
 			c.produced++
 		} else {
 			break
@@ -170,6 +191,14 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pullAtNs.Store(time.Now().UnixNano())
+	// Lazy commit: the producer may have written bytes into the in-flight
+	// segment and gone quiet below the size threshold (VLESS handshake,
+	// short response, small packet) with no further append to trigger the
+	// time-based commit. If that segment has been receiving for
+	// downsegCommitInterval, commit it now so this pull can see it —
+	// otherwise a sub-1MiB transaction deadlocks forever (404 on a never
+	// finalized segment).
+	c.commitIfStaleLazy()
 	// Only finalized segments (index < produced) are readable.
 	if seq >= c.produced {
 		return nil, false, false
@@ -186,6 +215,37 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 		return nil, false, true // evicted
 	}
 	return p, true, false
+}
+
+// commitIfStaleLazy commits the in-flight segment if it has been receiving
+// bytes for at least downsegCommitInterval (regardless of size). Caller must
+// hold c.mu.
+func (c *downSegCache) commitIfStaleLazy() {
+	if c.segStartedAt == 0 {
+		return
+	}
+	if time.Now().UnixNano()-c.segStartedAt < int64(downsegCommitInterval) {
+		return
+	}
+	if cur, ok := c.segs[c.produced]; ok && len(cur) > 0 {
+		c.produced++
+	}
+	if c.produced > downsegMaxSegs {
+		lo := c.produced - downsegMaxSegs
+		for idx := range c.segs {
+			if idx < lo {
+				delete(c.segs, idx)
+			}
+		}
+	}
+}
+
+// LazyCommitStale is the lock-taking wrapper used by the segment pull
+// handler's fast path.
+func (c *downSegCache) LazyCommitStale() {
+	c.mu.Lock()
+	c.commitIfStaleLazy()
+	c.mu.Unlock()
 }
 
 // finalize marks the stream complete: the current partial segment (if any)

@@ -859,8 +859,11 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	if requestURL.Host == "" {
 		requestURL.Host = dest.ServerName()
 	}
-	if false /* Bray-only: browser dialer disabled */ && realityConfig == nil {
-		// For Browser Dialer's optimized IP and non-standard port
+	if realityConfig == nil {
+		// Browser Dialer is disabled (Bray): always append the non-standard
+		// port so downstream requests (incl. dseg PullSegment, which uses the
+		// URL host via http.Client) resolve the real listener instead of the
+		// scheme default (443 for https, 80 for http).
 		if !(requestURL.Scheme == "http" && dest.Port == 80) && !(requestURL.Scheme == "https" && dest.Port == 443) {
 			requestURL.Host += ":" + dest.Port.String()
 		}
