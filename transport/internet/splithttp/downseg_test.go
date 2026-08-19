@@ -66,35 +66,42 @@ func TestDownSegAppendPartial(t *testing.T) {
 	}
 }
 
-// TestDownSegSlidingGone: with the reader keeping up, the window stays at
-// the steady-state bound and truly-old segments go 410.
+// TestDownSegSlidingGone: with an unbounded producer and no consumer pulling,
+// retained undelivered segments are bounded by the hard overflow bound; the
+// oldest overflow-evicted segments go 410 while the retained ones stay
+// pullable (deliver-on-get).
 func TestDownSegSlidingGone(t *testing.T) {
 	withZeroDownsegJitter(t)
 	c := newDownSegCache()
-	// Produce enough that the adaptive window is saturated, so the oldest
-	// segments have genuinely slid past (410) while the newest stay.
-	nSegs := downsegMaxSegs + DownSegWindowSize + downsegAdaptiveSegs
-	for i := 0; i < nSegs; i++ {
+	// Produce far beyond the hard bound with zero pulls: overflow evicts
+	// the oldest undelivered segments (the 410 "slid past" case).
+	for i := 0; i < downsegMaxSegs+downsegAdaptiveSegs+32; i++ {
 		c.append(bytes.Repeat([]byte{byte(i)}, downsegSize))
 	}
-	// Oldest-ever segments are gone (410), newest available.
+	// The very oldest segments are overflow-evicted -> 410.
 	if _, _, gone := c.get(0); !gone {
-		t.Fatalf("seg 0 should be gone after slide")
+		t.Fatalf("seg 0 should be gone after unbounded production overflow")
 	}
-	// Everything in the current window is pullable.
-	c.mu.Lock()
-	lo := c.loIndex()
-	c.mu.Unlock()
-	for seq := lo; seq < c.producedCount(); seq++ {
-		if _, ok, gone := c.get(seq); !ok || gone {
-			t.Fatalf("seg %d should be available (lo=%d)", seq, lo)
+	// Everything still retained is pullable; the retained count is bounded.
+	pulled := uint64(0)
+	for seq := uint64(0); seq < c.producedCount(); seq++ {
+		_, ok, gone := c.get(seq)
+		if gone {
+			continue // overflow-evicted slice we already consumed past
 		}
+		if !ok {
+			t.Fatalf("seg %d should be delivered permanently once read", seq)
+		}
+		pulled = seq + 1
+	}
+	if pulled < c.producedCount()-downsegAdaptiveSegs {
+		t.Fatalf("expected ~all retained segments pullable, pulled up to %d of %d", pulled, c.producedCount())
 	}
 	// Cache must not exceed the adaptive bound (memory safety).
 	c.mu.Lock()
 	n := len(c.segs)
 	c.mu.Unlock()
-	if n > int(downsegAdaptiveSegs) {
+	if n > int(downsegAdaptiveSegs)+1 {
 		t.Fatalf("cache grew to %d segs (adaptive bound %d)", n, downsegAdaptiveSegs)
 	}
 }

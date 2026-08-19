@@ -185,9 +185,15 @@ func (p *DownSegPuller) worker() {
 			switch {
 			case err == nil && len(seg) > 0:
 				p.buf[seq] = seg
+				if pctxd := p.ctx.Err(); pctxd != nil && dbgDownSeg {
+					println("[DBGPULL] seg", seq, "ok len", len(seg), "BUT ctx err", pctxd.Error())
+				}
 			case err == nil: // empty 200 -> EOF marker at seq (first wins)
 				if p.eofAt == 0 || seq < p.eofAt {
 					p.eofAt = seq
+					if dbgDownSeg {
+						println("[DBGPULL] EOF marker at seq", seq, "sid=", p.sessionId)
+					}
 				}
 			case err == errSegGone:
 				// A segment slid past before this worker pulled it — the
@@ -195,6 +201,9 @@ func (p *DownSegPuller) worker() {
 				// error. Treat as protocol error, not a silent skip.
 				if p.fatal == nil {
 					p.fatal = errSegGone
+					if dbgDownSeg {
+						println("[DBGPULL] FATAL gone seq", seq, "sid=", p.sessionId)
+					}
 				}
 			case err == errSegNotFound:
 				// Not produced yet: retry after jittered backoff, keeping
@@ -216,6 +225,9 @@ func (p *DownSegPuller) worker() {
 				// of killing the whole download. Real high-RTT/lossy paths
 				// hit these intermittently; treating them as fatal caused
 				// the "偶发中断" file-download drops.
+				if dbgDownSeg {
+					println("[DBGPULL] transient err seq", seq, ":", err.Error())
+				}
 				p.mu.Unlock()
 				select {
 				case <-time.After(downSegRetryInterval):
@@ -226,6 +238,9 @@ func (p *DownSegPuller) worker() {
 			default:
 				if p.fatal == nil {
 					p.fatal = err
+					if dbgDownSeg {
+						println("[DBGPULL] FATAL err seq", seq, ":", err.Error(), "sid=", p.sessionId)
+					}
 				}
 			}
 			p.mu.Unlock()

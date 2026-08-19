@@ -19,6 +19,7 @@ package splithttp
 //     is expected to keep up; a far-ahead producer would leak memory).
 
 import (
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,12 @@ const (
 	// downsegAdaptiveHeadroom is extra window (segments) kept beyond the
 	// exact production-consumption gap so out-of-order/retried pulls of
 	// already-produced segments do not spuriously 410.
+	// NOTE: this is NOT the primary 410-protection mechanism — that is
+	// deliver-on-get (see get()), which keeps every produced-but-not-yet-
+	// delivered segment regardless of window math. The headroom only pads
+	// the legacy window-SIZE bookkeeping that bounds total retained cache
+	// entries (downsegAdaptiveSegs); 8 is sufficient padding given
+	// deliver-on-get guarantees no gap below the last delivered seq.
 	downsegAdaptiveHeadroom = 8
 
 	// downsegSizeJitterMax is the per-segment size jitter (±~10% of
@@ -146,45 +153,14 @@ var downsegSizeJitterFn = func() int32 {
 	return biasedRangeRand(-downsegSizeJitterMax/2, downsegSizeJitterMax)
 }
 
-// windowSegs returns the sliding-window size (in segments) to keep. At
-// steady state downsegMaxSegs; when the client lags production by more than
-// the steady-state window, grow up to downsegAdaptiveSegs (with headroom) so
-// the lagging reader does not 410. Caller must hold c.mu.
-//
-// lastPulled is the HIGHEST seq the client has pulled (worker goroutines pull
-// out of order), so the window must additionally cushion the concurrency of
-// the puller: an in-flight worker may still pull as far back as
-// lastPulled - DownSegWindowSize. Otherwise a straggler worker 410s even
-// though the client is overall keeping up (V2rayN large-download drop).
-func (c *downSegCache) windowSegs() uint64 {
-	// The puller reserves (takes) segment numbers monotonically but
-	// completes them out of order. lastPulled is the highest COMPLETED seq,
-	// yet in-flight workers may be taking up to DownSegWindowSize further
-	// ahead, and the highest *completed* can lag what readers still need.
-	// Keep enough so a storage worker isn't 410'd by a straggler.
-	if c.produced <= c.lastPulled {
-		return downsegMaxSegs
-	}
-	lag := c.produced - c.lastPulled
-	// Cushion for out-of-order in-flight pulls of reserved-but-unfinished
-	// segments. Without this a worker occasionally 410s even when the
-	// client generally keeps up (V2rayN large-download drop).
-	need := lag + DownSegWindowSize + downsegAdaptiveHeadroom
-	if need > downsegAdaptiveSegs {
-		need = downsegAdaptiveSegs
-	}
-	return need
-}
-
-// loIndex returns the lowest (produced, readable) segment index for the
-// current window. seq < loIndex is Gone. Caller must hold c.mu.
-func (c *downSegCache) loIndex() uint64 {
-	win := c.windowSegs()
-	if c.produced <= win {
-		return 0
-	}
-	return c.produced - win
-}
+// NOTE: there is deliberately NO sliding-window/loIndex eviction in this
+// cache. Eviction is "deliver-on-get" (get() deletes a segment once the
+// client receives it) plus a hard overflow bound (evictOverflowLocked drops
+// the oldest UNDELIVERED segments only when retained undelivered entries
+// exceed downsegAdaptiveSegs). A produced-but-undelivered segment is never
+// dropped while a straggler puller worker might still need it — window-size
+// eviction keyed on lastPulled (a pre-fetch watermark) caused spurious 410s
+// that tore down large downloads (V2rayN large-download drop).
 
 // append writes downlink bytes into segments. A segment is committed
 // (produced++, readable) when it fills to its target size OR has been
@@ -203,13 +179,11 @@ func (c *downSegCache) append(b []byte) {
 		cur, ok := c.segs[idx]
 		size := c.downsegSizeFor(idx)
 		if !ok || len(cur) >= size {
-			// Start/spill into a new segment; eject the oldest when the
-			// (adaptive) sliding window is full.
-			if lo := c.loIndex(); lo > 0 {
-				// Defensive: the append loop itself can create gaps during
-				// multi-segment appends; keep the exact oldest boundary.
-				delete(c.segs, lo-1)
-			}
+			// Start/spill into a new segment. No window-size eviction here
+			// (deliver-on-get is the eviction policy — see get()); the only
+			// eviction is the hard overflow bound below, so an in-flight
+			// produced-but-undelivered old segment is never dropped while a
+			// straggler might still need it.
 			// Pre-allocate the segment's full payload once. Growing from
 			// nil via repeated append() reallocates/copies ~5x the segment
 			// size (14 allocs vs 1, ~6x CPU on 1 MiB segments — see POC).
@@ -236,21 +210,47 @@ func (c *downSegCache) append(b []byte) {
 			break
 		}
 	}
-	// Trim any segments older than the (adaptive) window. The producer may run
-	// far ahead of a slow consumer; keeping only the window (which grows with
-	// lag) bounds memory while preserving what the client still needs.
-	if lo := c.loIndex(); lo > 0 {
-		for idx := range c.segs {
-			if idx < lo {
-				delete(c.segs, idx)
-			}
+	// Hard bound: never retain more than downsegAdaptiveSegs undelivered
+	// segments. A live client continuously delivers via get() (deliver-on-
+	// get), so this only triggers for a runaway producer whose client
+	// vanished — dropping the oldest undelivered is the correct 410
+	// behavior there, not a false eviction of a merely-slow consumer.
+	c.evictOverflowLocked()
+}
+
+// evictOverflowLocked drops the oldest UNDELIVERED segments until at most
+// downsegAdaptiveSegs remain. Caller must hold c.mu.
+func (c *downSegCache) evictOverflowLocked() {
+	// Delivered segments are removed from c.segs by get(); the retained set
+	// is exactly [lastPulled, produced) plus the in-flight segment at
+	// produced. Count them; drop oldest undelivered (lastPulled upward)
+	// while over the bound. Never drop the in-flight segment the producer
+	// is currently writing (index == produced).
+	for uint64(len(c.segs)) > downsegAdaptiveSegs {
+		if c.lastPulled >= c.produced {
+			return // only the in-flight segment remains; cannot drop it
 		}
+		delete(c.segs, c.lastPulled)
+		delete(c.segSizeBySeq, c.lastPulled)
+		c.lastPulled++
 	}
 }
 
 // get returns the payload of a FINALIZED segment seq, and whether it is
 // available. A produced-but-partial (in-flight) segment reports ok=false,
 // gone=false: the client should wait; the producer finalizes it at EOF.
+//
+// Deliver-on-get: on a successful delivery the segment is removed from the
+// cache immediately — the client now holds the payload, so retaining it only
+// wastes memory. Keeping ONLY undelivered segments is what makes the cache
+// correct under out-of-order pullers: a straggler worker may still need a
+// LOW seq long after fast workers have been delivered seq numbers far
+// ahead (lastPulled is a pre-fetch watermark, not the consumer position), so
+// window-size eviction keyed on lastPulled would 410 that straggler even
+// though the client overall keeps up. Undelivered segments are therefore
+// never evicted below the hard bound in evictOverflow (only a runaway
+// producer whose client vanished pushes retained undelivered segments past
+// downsegAdaptiveSegs, and THAT is the 410 case).
 func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -267,18 +267,29 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	if seq >= c.produced {
 		return nil, false, false
 	}
-	if seq < c.loIndex() {
-		return nil, false, true // slid past
-	}
+	// Deliver-on-get: no window/low-watermark eviction is applied — the
+	// retained set is exactly the undelivered finalized segments
+	// ([lastPulled, produced)), so a missing entry means the segment was
+	// already delivered (deleted on get) or dropped by the hard overflow
+	// bound. Both are genuinely gone; a straggler's still-undelivered low
+	// seq is always present here, which is what prevents the false-410
+	// tear-down (previously loIndex could rise past undelivered segments
+	// via out-of-order lastPulled, marking a needed-but-unfetched segment
+	// Gone and killing the download).
 	p, ok := c.segs[seq]
 	if !ok {
-		return nil, false, true // evicted
+		return nil, false, true // already delivered or overflow-evicted
 	}
 	// Advance the consumption watermark so the adaptive window tracks how
 	// far the client has actually read (not just reserved).
 	if seq+1 > c.lastPulled {
 		c.lastPulled = seq + 1
 	}
+	// Deliver-on-get: the payload is handed to the client; drop it from the
+	// cache so retained entries equal undelivered segments only.
+	delete(c.segs, seq)
+	// Clean up the size bookkeeping now that the segment is gone.
+	delete(c.segSizeBySeq, seq)
 	return p, true, false
 }
 
@@ -295,13 +306,10 @@ func (c *downSegCache) commitIfStaleLazy() {
 	if cur, ok := c.segs[c.produced]; ok && len(cur) > 0 {
 		c.produced++
 	}
-	if lo := c.loIndex(); lo > 0 {
-		for idx := range c.segs {
-			if idx < lo {
-				delete(c.segs, idx)
-			}
-		}
-	}
+	// No window-size trim here: the hard overflow bound is the only
+	// eviction (see append / evictOverflowLocked); a just-produced segment
+	// must stay until delivered (deliver-on-get).
+	c.evictOverflowLocked()
 }
 
 // LazyCommitStale is the lock-taking wrapper used by the segment pull
@@ -316,13 +324,19 @@ func (c *downSegCache) LazyCommitStale() {
 // becomes finalized, and no more segments will be produced.
 func (c *downSegCache) finalize() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	// produced points at the next finalized index; if a partial segment
 	// exists there (in-flight), finalize it by advancing produced.
 	if _, exists := c.segs[c.produced]; exists {
 		c.produced++
 	}
 	c.final = true
+	if dbgDownSeg {
+		pc := c.produced
+		c.mu.Unlock()
+		println("[DBGFIN] finalize produced:", pc)
+		return
+	}
+	c.mu.Unlock()
 }
 
 // producedCount returns the highest produced index + 1 (for gap / EOF logic).
@@ -358,3 +372,10 @@ func (c *downSegCache) idleFor() time.Duration {
 // downsegHeader is intentionally NOT used: downlink segmentation is detected
 // by "sessioned GET with a seq in the meta token" (dead-path reuse), so no
 // extra header/label is ever placed on the wire.
+
+// dbgDownSeg enables temporary per-session downlink-segmentation diagnostics
+// (trace of finalize / production-leg exits). Enabled via the BRAY_DSEG_DEBUG
+// environment variable (any non-empty value) so the dual-end e2e tests can
+// opt in without shipping an API. Kept off otherwise; not compiled into
+// production logs.
+var dbgDownSeg = os.Getenv("BRAY_DSEG_DEBUG") != ""

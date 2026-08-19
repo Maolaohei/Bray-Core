@@ -689,12 +689,21 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			for {
 				select {
 				case <-request.Context().Done():
+					if dbgDownSeg {
+						println("[DBGPROD] prodLeg exit: ctx done, sid=", sessionId)
+					}
 					return
 				case <-httpSC.Wait():
+					if dbgDownSeg {
+						println("[DBGPROD] prodLeg exit: httpSC.Wait, sid=", sessionId)
+					}
 					return
 				case <-reaper.C:
 					if c := currentSession.downseg.Load(); c != nil && !c.over() &&
 						c.idleFor() > downsegProdIdleLimit {
+						if dbgDownSeg {
+							println("[DBGPROD] prodLeg exit: idle reaper, sid=", sessionId)
+						}
 						return
 					}
 				}
