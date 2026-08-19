@@ -48,8 +48,8 @@ import (
 // startProc launches one Xray test process from a protobuf config, returning
 // the running *exec.Cmd. The child process takes a moment to bind its
 // listener, so callers must wait for the port before dialing.
-func startProc(t *testing.T, cfg *core.Config) *exec.Cmd {
-	t.Helper()
+func startProc(tb testing.TB, cfg *core.Config) *exec.Cmd {
+	tb.Helper()
 	proc, err := InitializeServerConfig(cfg)
 	common.Must(err)
 	return proc
@@ -57,8 +57,8 @@ func startProc(t *testing.T, cfg *core.Config) *exec.Cmd {
 
 // waitPort blocks until a TCP listener accepts on 127.0.0.1:port or ~5s pass
 // (a child xray process that takes a moment to bind).
-func waitPort(t *testing.T, port net.Port) {
-	t.Helper()
+func waitPort(tb testing.TB, port net.Port) {
+	tb.Helper()
 	addr := "127.0.0.1:" + strconv.Itoa(int(port))
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -69,20 +69,13 @@ func waitPort(t *testing.T, port net.Port) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("listener %s did not come up", addr)
+	tb.Fatalf("listener %s did not come up", addr)
 }
 
-// closeProcs closes the xray test processes, skipping the nil placeholder we
-// keep for the in-process echo server.
+// closeProcs closes the xray test processes.
 func closeProcs(procs []*exec.Cmd) {
-	var real []*exec.Cmd
-	for _, p := range procs {
-		if p != nil {
-			real = append(real, p)
-		}
-	}
-	if len(real) > 0 {
-		CloseAllServers(real)
+	if len(procs) > 0 {
+		CloseAllServers(procs)
 	}
 }
 
@@ -107,12 +100,21 @@ func closeProcs(procs []*exec.Cmd) {
 const pupSecret = "pup-shared-secret"
 
 type dsegEndpoints struct {
-	serverPort  net.Port
-	clientPort  net.Port
-	dest        net.Destination // local XOR echo target
-	userID      *protocol.ID
-	servers     []*exec.Cmd
-	delayEchoMS int // >0 => delayed echo (weak-net)
+	serverPort net.Port
+	clientPort net.Port
+	dest       net.Destination // local upstream target (XOR echo by default)
+	userID     *protocol.ID
+	servers    []*exec.Cmd // real xray test processes only
+	// delayEchoMS > 0 makes the default echo target add that one-way delay
+	// (weak-net simulation).
+	delayEchoMS int
+	// destOverride, when Address is non-nil, replaces the default XOR echo
+	// upstream with a caller-provided downstream (e.g. a data-push server for
+	// downlink-throughput benchmarking). startServerOnly skips creating the
+	// echo server in that case.
+	destOverride net.Destination
+	// echoCleanup closes the in-process XOR echo server (if started).
+	echoCleanup func()
 }
 
 func sharedPupConfig() *splithttp.Config {
@@ -128,24 +130,31 @@ func sharedPupConfig() *splithttp.Config {
 // netPortToU32 is a tiny helper for proto fields.
 func netPortToU32(p net.Port) uint32 { return uint32(p) }
 
-// startServerOnly brings up the local XOR echo + the VLESS XHTTP server
-// (listening on serverPort). Registration in ep. Does not start the client.
-func startServerOnly(t *testing.T, ep *dsegEndpoints) {
-	t.Helper()
-	mp := xor
-	if ep.delayEchoMS > 0 {
-		d := ep.delayEchoMS
-		mp = func(b []byte) []byte {
-			time.Sleep(time.Duration(d) * time.Millisecond)
-			return xor(b)
+// startServerOnly brings up the upstream target + the VLESS XHTTP server
+// (listening on serverPort). The upstream is the caller-provided
+// destOverride when set (e.g. a data-push server for downlink benchmarking),
+// else the in-process XOR echo. Registration in ep. Does not start client.
+func startServerOnly(tb testing.TB, ep *dsegEndpoints) {
+	tb.Helper()
+	if ep.destOverride.Address != nil {
+		// Caller supplied a custom downstream (push server): use it directly.
+		ep.dest = ep.destOverride
+	} else {
+		mp := xor
+		if ep.delayEchoMS > 0 {
+			d := ep.delayEchoMS
+			mp = func(b []byte) []byte {
+				time.Sleep(time.Duration(d) * time.Millisecond)
+				return xor(b)
+			}
 		}
+		tcpSrv := tcp.Server{MsgProcessor: mp}
+		dest, err := tcpSrv.Start()
+		common.Must(err)
+		ep.dest = dest
+		ep.echoCleanup = func() { _ = tcpSrv.Close() }
+		tb.Cleanup(ep.echoCleanup)
 	}
-	tcpSrv := tcp.Server{MsgProcessor: mp}
-	dest, err := tcpSrv.Start()
-	common.Must(err)
-	ep.dest = dest
-	ep.servers = append(ep.servers, nil) // tcp echo is in-process; cleaned separately
-	t.Cleanup(func() { _ = tcpSrv.Close() })
 
 	ep.userID = protocol.NewID(uuid.New())
 	cfg := sharedPupConfig()
@@ -167,17 +176,17 @@ func startServerOnly(t *testing.T, ep *dsegEndpoints) {
 			ProxySettings: serial.ToTypedMessage(&freedom.Config{FinalRules: []*freedom.FinalRuleConfig{{Action: freedom.RuleAction_Allow}}}),
 		}},
 	}
-	proc := startProc(t, serverConfig)
-	ep.servers[0] = proc
-	waitPort(t, ep.serverPort)
-	t.Cleanup(func() { closeProcs(ep.servers) })
+	proc := startProc(tb, serverConfig)
+	ep.servers = append(ep.servers, proc)
+	waitPort(tb, ep.serverPort)
+	tb.Cleanup(func() { closeProcs(ep.servers) })
 }
 
 // startClientOnly starts the client VLESS outbound beating on clientPort,
 // dialing its outbound at peerHost:peerPort (normally serverPort, or the
 // weak-net proxy's address when one exists). Register in ep.
-func startClientOnly(t *testing.T, ep *dsegEndpoints, peerHost string, peerPort net.Port) {
-	t.Helper()
+func startClientOnly(tb testing.TB, ep *dsegEndpoints, peerHost string, peerPort net.Port) {
+	tb.Helper()
 	ep.clientPort = tcp.PickPort()
 	cfg := sharedPupConfig()
 	clientConfig := &core.Config{
@@ -207,13 +216,9 @@ func startClientOnly(t *testing.T, ep *dsegEndpoints, peerHost string, peerPort 
 			}),
 		}},
 	}
-	proc := startProc(t, clientConfig)
-	if len(ep.servers) == 1 && ep.servers[0] == nil {
-		ep.servers[0] = proc
-	} else {
-		ep.servers = append(ep.servers, proc)
-	}
-	waitPort(t, ep.clientPort)
+	proc := startProc(tb, clientConfig)
+	ep.servers = append(ep.servers, proc)
+	waitPort(tb, ep.clientPort)
 	// The server-only runner already registered the closing cleanup on
 	// ep.servers (a closure), which will include this client proc.
 }
