@@ -937,6 +937,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		if err != nil {
 			errors.LogDebug(context.Background(), "failed to upload (PushPayload)")
 			// Bray-only: queue-full / closed -> 404, not 500 (no liveness oracle).
+			if dbgDownSeg {
+				sess := currentSession
+				println("[DBGPUPS] packet-up Push 404 seq=", seq, "closed=", sess.uploadQueue.closed.Load(),
+					"sid=", sessionId, "dllegs=", sess.downloadLegs.Load(), "err=", err.Error())
+			}
 			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -963,6 +968,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			// lifetime per listener so fake streams cannot pin goroutines/fds.
 			if n := h.streamOneActive.Add(1); n > streamOneMaxActive {
 				h.streamOneActive.Add(-1)
+				if dbgDownSeg {
+					println("[DBGGET404] stream-one concurrency cap hit, sid empty")
+				}
 				writer.WriteHeader(http.StatusTooManyRequests)
 				return
 			}
