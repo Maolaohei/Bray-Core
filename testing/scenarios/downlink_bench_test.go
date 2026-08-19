@@ -82,7 +82,7 @@ func startPushServer(totalBytes int64) (net.Destination, func()) {
 func BenchmarkDsegRealDownlink(b *testing.B) {
 	// 64 MiB per iteration: big enough to amortize connection/session setup
 	// and to hit the adaptive-window / segment-pull path under load.
-	const totalBytes = int64(32 << 20)
+	const totalBytes = int64(64 << 20)
 
 	pushDest, cleanup := startPushServer(totalBytes)
 	b.Cleanup(cleanup)
@@ -108,6 +108,41 @@ func BenchmarkDsegRealDownlink(b *testing.B) {
 		}
 		if n != totalBytes {
 			b.Fatalf("got %d bytes, want %d", n, totalBytes)
+		}
+	}
+}
+
+// TestDsegLargeSustainedDownload asserts that a large server-initiated
+// download (32 MiB push server, not consumer-driven echo) is delivered
+// intact. This is the regression that BenchmarkDownlinkSegments (synthetic
+// producer) and the echo-driven scenarios cannot catch — a sustained
+// downlink previously truncated near ~1 MiB intermittently (production leg
+// finalized after only ~13 segments).
+func TestDsegLargeSustainedDownload(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large download regression in short mode")
+	}
+	const totalBytes = int64(32 << 20)
+	pushDest, cleanup := startPushServer(totalBytes)
+	defer cleanup()
+
+	ep := &dsegEndpoints{serverPort: tcp.PickPort(), destOverride: pushDest}
+	startServerOnly(t, ep)
+	startClientOnly(t, ep, "127.0.0.1", ep.serverPort)
+
+	// Repeat a few times to surface the intermittency.
+	for i := 0; i < 5; i++ {
+		conn, err := stdnet.Dial("tcp", "127.0.0.1:"+strconv.Itoa(int(ep.clientPort)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := io.Copy(io.Discard, conn)
+		_ = conn.Close()
+		if err != nil {
+			t.Fatalf("iter %d: %v", i, err)
+		}
+		if n != totalBytes {
+			t.Fatalf("iter %d: got %d bytes, want %d (sustained downlink truncated)", i, n, totalBytes)
 		}
 	}
 }

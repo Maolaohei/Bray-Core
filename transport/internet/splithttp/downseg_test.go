@@ -71,34 +71,26 @@ func TestDownSegAppendPartial(t *testing.T) {
 func TestDownSegSlidingGone(t *testing.T) {
 	withZeroDownsegJitter(t)
 	c := newDownSegCache()
-	// Produce more than the steady-state window.
-	for i := 0; i < downsegMaxSegs+5; i++ {
+	// Produce enough that the adaptive window is saturated, so the oldest
+	// segments have genuinely slid past (410) while the newest stay.
+	nSegs := downsegMaxSegs + DownSegWindowSize + downsegAdaptiveSegs
+	for i := 0; i < nSegs; i++ {
 		c.append(bytes.Repeat([]byte{byte(i)}, downsegSize))
 	}
-	// Simulate the client having consumed up to the newest-1 (steady state:
-	// watermark near produced, window back at 8). Only then should the
-	// truly oldest fall off the window -> 410.
-	last := c.producedCount()
-	for i := 0; i < int(last)-1; i++ {
-		if _, ok, _ := c.get(uint64(i)); !ok {
-			t.Fatalf("seg %d should be available", i)
+	// Oldest-ever segments are gone (410), newest available.
+	if _, _, gone := c.get(0); !gone {
+		t.Fatalf("seg 0 should be gone after slide")
+	}
+	// Everything in the current window is pullable.
+	c.mu.Lock()
+	lo := c.loIndex()
+	c.mu.Unlock()
+	for seq := lo; seq < c.producedCount(); seq++ {
+		if _, ok, gone := c.get(seq); !ok || gone {
+			t.Fatalf("seg %d should be available (lo=%d)", seq, lo)
 		}
 	}
-	// Oldest-ever segments are gone (410), newest available.
-	oldestEver := uint64(0)
-	if _, _, gone := c.get(oldestEver); !gone {
-		t.Fatalf("seg %d should be gone after slide", oldestEver)
-	}
-	firstKept := c.producedCount() - downsegMaxSegs
-	if _, ok, gone := c.get(firstKept); !ok || gone {
-		t.Fatalf("seg %d should still be available", firstKept)
-	}
-	last = c.producedCount() - 1
-	if _, ok, _ := c.get(last); !ok {
-		t.Fatalf("seg %d should be available", last)
-	}
-	// Cache must not exceed the adaptive bound (memory safety), even though
-	// it legitimately grew beyond steady state while the reader lagged.
+	// Cache must not exceed the adaptive bound (memory safety).
 	c.mu.Lock()
 	n := len(c.segs)
 	c.mu.Unlock()

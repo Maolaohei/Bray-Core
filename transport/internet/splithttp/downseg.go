@@ -150,15 +150,26 @@ var downsegSizeJitterFn = func() int32 {
 // steady state downsegMaxSegs; when the client lags production by more than
 // the steady-state window, grow up to downsegAdaptiveSegs (with headroom) so
 // the lagging reader does not 410. Caller must hold c.mu.
+//
+// lastPulled is the HIGHEST seq the client has pulled (worker goroutines pull
+// out of order), so the window must additionally cushion the concurrency of
+// the puller: an in-flight worker may still pull as far back as
+// lastPulled - DownSegWindowSize. Otherwise a straggler worker 410s even
+// though the client is overall keeping up (V2rayN large-download drop).
 func (c *downSegCache) windowSegs() uint64 {
+	// The puller reserves (takes) segment numbers monotonically but
+	// completes them out of order. lastPulled is the highest COMPLETED seq,
+	// yet in-flight workers may be taking up to DownSegWindowSize further
+	// ahead, and the highest *completed* can lag what readers still need.
+	// Keep enough so a storage worker isn't 410'd by a straggler.
 	if c.produced <= c.lastPulled {
 		return downsegMaxSegs
 	}
 	lag := c.produced - c.lastPulled
-	if lag <= downsegMaxSegs {
-		return downsegMaxSegs
-	}
-	need := lag + downsegAdaptiveHeadroom
+	// Cushion for out-of-order in-flight pulls of reserved-but-unfinished
+	// segments. Without this a worker occasionally 410s even when the
+	// client generally keeps up (V2rayN large-download drop).
+	need := lag + DownSegWindowSize + downsegAdaptiveHeadroom
 	if need > downsegAdaptiveSegs {
 		need = downsegAdaptiveSegs
 	}

@@ -60,25 +60,20 @@ func TestDownsegPullGoneAndEof(t *testing.T) {
 		t.Fatal("enterDownsegMode failed")
 	}
 	prod := &httpServerConn{Instance: done.New(), sess: sess}
-	for i := 0; i < downsegMaxSegs+3; i++ {
+	// Produce beyond the adaptive window so the oldest segments slid (410);
+	// the newest remain available; past-end is a clean EOF (200 empty).
+	for i := 0; i < downsegMaxSegs+DownSegWindowSize+downsegAdaptiveSegs; i++ {
 		if _, err := prod.Write(bytes.Repeat([]byte{byte(i)}, downsegSize)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	_ = prod.Close() // finalize
 
-	// Consume up to produced-1 so the adaptive window is back near steady
-	// state; only then does the truly-oldest segment fall off -> 410.
-	n := sess.downseg.Load().producedCount()
-	for i := 0; i < int(n)-1; i++ {
-		if code, _ := pullSegmentWithID(h, id, uint64(i)); code != http.StatusOK {
-			t.Fatalf("consume seg %d: got %d want 200", i, code)
-		}
-	}
-
+	// Oldest slid -> 410.
 	if code, _ := pullSegmentWithID(h, id, 0); code != http.StatusGone {
 		t.Fatalf("slid segment: got %d want 410", code)
 	}
+	// Newest segment (in window) -> 200.
 	last := sess.downseg.Load().producedCount() - 1
 	if code, b := pullSegmentWithID(h, id, last); code != http.StatusOK || len(b) != downsegSize {
 		t.Fatalf("last segment: code=%d len=%d", code, len(b))
