@@ -80,8 +80,16 @@ func startPushServer(totalBytes int64) (net.Destination, func()) {
 }
 
 func BenchmarkDsegRealDownlink(b *testing.B) {
-	// 64 MiB per iteration: big enough to amortize connection/session setup
-	// and to hit the adaptive-window / segment-pull path under load.
+	// 64 MiB per iteration: big enough to be a meaningful single download
+	// and to keep the run fast for CI regression. NOTE on measurement
+	// validity: at this size a large fraction of wall time is connection
+	// setup + H2 window warm-up, so the reported rate (~30 MB/s) is NOT
+	// the steady-state ceiling. 512 MiB measures the real stable
+	// throughput (~173 MB/s loopback, matching the synthetic path); use
+	// the large size when you need the actual link rate, the small size
+	// for a fast integrity/smoke regression. The 410 tear-down bug this
+	// benchmark guards against (TestDsegLargeSustainedDownload regression)
+	// reproduces at BOTH sizes, so 64MiB is a valid regression signal.
 	const totalBytes = int64(64 << 20)
 
 	pushDest, cleanup := startPushServer(totalBytes)
