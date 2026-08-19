@@ -36,6 +36,21 @@ var (
 	errSegNotFound = errorsNew("downlink segment not produced yet (404)")
 )
 
+// isTransientPullError reports whether a segment-pull error is a transient
+// network-level fault worth retrying (connect timeout / reset / deadline /
+// EOF / closed pipe), as opposed to a hard protocol error (410, bad status).
+// On lossy/high-RTT paths these fire intermittently; fatal-ing on them would
+// tear down the download (V2rayN "偶发中断").
+func isTransientPullError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == errSegGone || err == errSegNotFound {
+		return false
+	}
+	return true
+}
+
 func errorsNew(s string) error { return &segError{s} }
 
 type segError struct{ s string }
@@ -195,8 +210,23 @@ func (p *DownSegPuller) worker() {
 					return
 				}
 				continue
-			case p.fatal == nil:
-				p.fatal = err
+			case isTransientPullError(err):
+				// Transient network error on the segment pull (connect
+				// timeout / reset / deadline): retry the SAME seq instead
+				// of killing the whole download. Real high-RTT/lossy paths
+				// hit these intermittently; treating them as fatal caused
+				// the "偶发中断" file-download drops.
+				p.mu.Unlock()
+				select {
+				case <-time.After(downSegRetryInterval):
+				case <-p.ctx.Done():
+					return
+				}
+				continue
+			default:
+				if p.fatal == nil {
+					p.fatal = err
+				}
 			}
 			p.mu.Unlock()
 			p.notify()

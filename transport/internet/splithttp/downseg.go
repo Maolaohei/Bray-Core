@@ -36,16 +36,20 @@ const (
 	// session at steady state. 8 x 1MiB = 8 MiB typical per session.
 	downsegMaxSegs = 8
 	// downsegAdaptiveSegs is the upper bound the window may grow to when the
-	// client falls behind production (slow reader, burst, video throttling).
-	// Growing the window keeps temporarily-lagging consumers from getting
-	// 410 (which today tears the stream down); bounded so a runaway producer
-	// (dead client / TCP half-open) cannot pin unbounded memory — that case
-	// is additionally reaped by the production-leg idle sweeper.
-	downsegAdaptiveSegs = 24 // 24 x 1MiB = 24 MiB worst case per session
+	// client falls behind production (slow reader, burst, video throttling,
+	// high-RTT bulk downloads). Growing the window keeps temporarily-lagging
+	// consumers from getting 410 (which today tears the stream down); bounded
+	// so a runaway producer (dead client / TCP half-open) cannot pin
+	// unbounded memory — that case is additionally reaped by the
+	// production-leg idle sweeper.
+	// Set high enough to absorb the consumer lag of high-throughput file
+	// downloads over lossy/high-RTT paths (V2rayN report: fixed 8 caused
+	// 410 drops on file download).
+	downsegAdaptiveSegs = 64 // 64 x 1MiB = 64 MiB worst case per session
 	// downsegAdaptiveHeadroom is extra window (segments) kept beyond the
 	// exact production-consumption gap so out-of-order/retried pulls of
 	// already-produced segments do not spuriously 410.
-	downsegAdaptiveHeadroom = 4
+	downsegAdaptiveHeadroom = 8
 
 	// downsegSizeJitterMax is the per-segment size jitter (±~10% of
 	// 1 MiB, right-skewed) so a Bray download emits bitrate-variable
