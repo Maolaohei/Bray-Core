@@ -67,6 +67,15 @@ func TestDownsegPullGoneAndEof(t *testing.T) {
 	}
 	_ = prod.Close() // finalize
 
+	// Consume up to produced-1 so the adaptive window is back near steady
+	// state; only then does the truly-oldest segment fall off -> 410.
+	n := sess.downseg.Load().producedCount()
+	for i := 0; i < int(n)-1; i++ {
+		if code, _ := pullSegmentWithID(h, id, uint64(i)); code != http.StatusOK {
+			t.Fatalf("consume seg %d: got %d want 200", i, code)
+		}
+	}
+
 	if code, _ := pullSegmentWithID(h, id, 0); code != http.StatusGone {
 		t.Fatalf("slid segment: got %d want 410", code)
 	}

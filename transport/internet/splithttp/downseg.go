@@ -33,8 +33,19 @@ const (
 	downsegSize = 1 << 20 // 1 MiB
 
 	// downsegMaxSegs bounds the sliding window of produced segments per
-	// session. 8 x 1MiB = 8 MiB worst case per session (bounded).
+	// session at steady state. 8 x 1MiB = 8 MiB typical per session.
 	downsegMaxSegs = 8
+	// downsegAdaptiveSegs is the upper bound the window may grow to when the
+	// client falls behind production (slow reader, burst, video throttling).
+	// Growing the window keeps temporarily-lagging consumers from getting
+	// 410 (which today tears the stream down); bounded so a runaway producer
+	// (dead client / TCP half-open) cannot pin unbounded memory — that case
+	// is additionally reaped by the production-leg idle sweeper.
+	downsegAdaptiveSegs = 24 // 24 x 1MiB = 24 MiB worst case per session
+	// downsegAdaptiveHeadroom is extra window (segments) kept beyond the
+	// exact production-consumption gap so out-of-order/retried pulls of
+	// already-produced segments do not spuriously 410.
+	downsegAdaptiveHeadroom = 4
 
 	// downsegSizeJitterMax is the per-segment size jitter (±~10% of
 	// 1 MiB, right-skewed) so a Bray download emits bitrate-variable
@@ -59,6 +70,12 @@ type downSegCache struct {
 	mu sync.Mutex
 
 	produced uint64 // next segment index to finalize (first unwritten/full)
+	// lastPulled is the highest segment index the client has successfully
+	// pulled (+1), i.e. the consumption watermark. The sliding window grows
+	// from the steady-state downsegMaxSegs up to downsegAdaptiveSegs so a
+	// reader that lags production keeps the needed segments instead of
+	// stranding them behind a fixed 8-segment cut (which caused 410 drop).
+	lastPulled uint64
 	// segs maps segment index -> payload. Sliding: we keep at most
 	// downsegMaxSegs; seq < (produced - downsegMaxSegs) is 410 Gone.
 	segs map[uint64][]byte
@@ -125,6 +142,35 @@ var downsegSizeJitterFn = func() int32 {
 	return biasedRangeRand(-downsegSizeJitterMax/2, downsegSizeJitterMax)
 }
 
+// windowSegs returns the sliding-window size (in segments) to keep. At
+// steady state downsegMaxSegs; when the client lags production by more than
+// the steady-state window, grow up to downsegAdaptiveSegs (with headroom) so
+// the lagging reader does not 410. Caller must hold c.mu.
+func (c *downSegCache) windowSegs() uint64 {
+	if c.produced <= c.lastPulled {
+		return downsegMaxSegs
+	}
+	lag := c.produced - c.lastPulled
+	if lag <= downsegMaxSegs {
+		return downsegMaxSegs
+	}
+	need := lag + downsegAdaptiveHeadroom
+	if need > downsegAdaptiveSegs {
+		need = downsegAdaptiveSegs
+	}
+	return need
+}
+
+// loIndex returns the lowest (produced, readable) segment index for the
+// current window. seq < loIndex is Gone. Caller must hold c.mu.
+func (c *downSegCache) loIndex() uint64 {
+	win := c.windowSegs()
+	if c.produced <= win {
+		return 0
+	}
+	return c.produced - win
+}
+
 // append writes downlink bytes into segments. A segment is committed
 // (produced++, readable) when it fills to its target size OR has been
 // receiving bytes for downsegCommitInterval — the time bound is what makes a
@@ -143,9 +189,11 @@ func (c *downSegCache) append(b []byte) {
 		size := c.downsegSizeFor(idx)
 		if !ok || len(cur) >= size {
 			// Start/spill into a new segment; eject the oldest when the
-			// sliding window is full.
-			if idx >= downsegMaxSegs {
-				delete(c.segs, idx-downsegMaxSegs)
+			// (adaptive) sliding window is full.
+			if lo := c.loIndex(); lo > 0 {
+				// Defensive: the append loop itself can create gaps during
+				// multi-segment appends; keep the exact oldest boundary.
+				delete(c.segs, lo-1)
 			}
 			// Pre-allocate the segment's full payload once. Growing from
 			// nil via repeated append() reallocates/copies ~5x the segment
@@ -173,9 +221,10 @@ func (c *downSegCache) append(b []byte) {
 			break
 		}
 	}
-	if c.produced > downsegMaxSegs {
-		// Trim any gaps older than the window (defensive).
-		lo := c.produced - downsegMaxSegs
+	// Trim any segments older than the (adaptive) window. The producer may run
+	// far ahead of a slow consumer; keeping only the window (which grows with
+	// lag) bounds memory while preserving what the client still needs.
+	if lo := c.loIndex(); lo > 0 {
 		for idx := range c.segs {
 			if idx < lo {
 				delete(c.segs, idx)
@@ -203,16 +252,17 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	if seq >= c.produced {
 		return nil, false, false
 	}
-	lo := uint64(0)
-	if c.produced > downsegMaxSegs {
-		lo = c.produced - downsegMaxSegs
-	}
-	if seq < lo {
+	if seq < c.loIndex() {
 		return nil, false, true // slid past
 	}
 	p, ok := c.segs[seq]
 	if !ok {
 		return nil, false, true // evicted
+	}
+	// Advance the consumption watermark so the adaptive window tracks how
+	// far the client has actually read (not just reserved).
+	if seq+1 > c.lastPulled {
+		c.lastPulled = seq + 1
 	}
 	return p, true, false
 }
@@ -230,8 +280,7 @@ func (c *downSegCache) commitIfStaleLazy() {
 	if cur, ok := c.segs[c.produced]; ok && len(cur) > 0 {
 		c.produced++
 	}
-	if c.produced > downsegMaxSegs {
-		lo := c.produced - downsegMaxSegs
+	if lo := c.loIndex(); lo > 0 {
 		for idx := range c.segs {
 			if idx < lo {
 				delete(c.segs, idx)

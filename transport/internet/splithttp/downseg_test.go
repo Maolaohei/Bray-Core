@@ -66,14 +66,25 @@ func TestDownSegAppendPartial(t *testing.T) {
 	}
 }
 
+// TestDownSegSlidingGone: with the reader keeping up, the window stays at
+// the steady-state bound and truly-old segments go 410.
 func TestDownSegSlidingGone(t *testing.T) {
 	withZeroDownsegJitter(t)
 	c := newDownSegCache()
-	// Produce more than the sliding window.
+	// Produce more than the steady-state window.
 	for i := 0; i < downsegMaxSegs+5; i++ {
 		c.append(bytes.Repeat([]byte{byte(i)}, downsegSize))
 	}
-	// Oldest segments are gone (410), newest available.
+	// Simulate the client having consumed up to the newest-1 (steady state:
+	// watermark near produced, window back at 8). Only then should the
+	// truly oldest fall off the window -> 410.
+	last := c.producedCount()
+	for i := 0; i < int(last)-1; i++ {
+		if _, ok, _ := c.get(uint64(i)); !ok {
+			t.Fatalf("seg %d should be available", i)
+		}
+	}
+	// Oldest-ever segments are gone (410), newest available.
 	oldestEver := uint64(0)
 	if _, _, gone := c.get(oldestEver); !gone {
 		t.Fatalf("seg %d should be gone after slide", oldestEver)
@@ -82,15 +93,67 @@ func TestDownSegSlidingGone(t *testing.T) {
 	if _, ok, gone := c.get(firstKept); !ok || gone {
 		t.Fatalf("seg %d should still be available", firstKept)
 	}
-	last := c.producedCount() - 1
+	last = c.producedCount() - 1
 	if _, ok, _ := c.get(last); !ok {
 		t.Fatalf("seg %d should be available", last)
 	}
-	// Cache must not exceed the window bound.
+	// Cache must not exceed the adaptive bound (memory safety), even though
+	// it legitimately grew beyond steady state while the reader lagged.
 	c.mu.Lock()
 	n := len(c.segs)
 	c.mu.Unlock()
-	if n > downsegMaxSegs {
-		t.Fatalf("cache grew to %d segs (window %d)", n, downsegMaxSegs)
+	if n > int(downsegAdaptiveSegs) {
+		t.Fatalf("cache grew to %d segs (adaptive bound %d)", n, downsegAdaptiveSegs)
+	}
+}
+
+// TestDownSegAdaptiveWindow: a reader that lags production keeps the window
+// growing (up to the adaptive bound) so the stream does NOT 410 mid-flight —
+// the regression for "偶发中断/转圈" (V2rayN video drops).
+func TestDownSegAdaptiveWindow(t *testing.T) {
+	withZeroDownsegJitter(t)
+	c := newDownSegCache()
+
+	// Produce far more than the steady-state window without the client
+	// pulling (simulates a slow reader / burst production).
+	for i := 0; i < downsegMaxSegs*3; i++ {
+		c.append(bytes.Repeat([]byte{byte(i)}, downsegSize))
+	}
+
+	// The client eventually catches up: it should be able to pull segments
+	// well beyond the fixed 8-segment bound — the window must have grown.
+	// Without the adaptive window these would have been evicted -> 410.
+	pulled := uint64(0)
+	for seq := uint64(0); seq < c.producedCount(); seq++ {
+		p, ok, gone := c.get(seq)
+		if gone {
+			t.Fatalf("seq %d gone 410 though client is catching up (lag=%d)", seq, c.producedCount()-seq)
+		}
+		if !ok {
+			break // not yet produced
+		}
+		if len(p) == 0 {
+			t.Fatalf("seq %d empty", seq)
+		}
+		pulled = seq + 1
+	}
+	if pulled < downsegMaxSegs*3-2 {
+		t.Fatalf("expected to pull ~%d produced segments, got only %d (window didn't grow)", downsegMaxSegs*3, pulled)
+	}
+}
+
+// TestDownSegAdaptiveWindowBounded: the adaptive window must not grow without
+// bound even if production runs far ahead (memory bound).
+func TestDownSegAdaptiveWindowBounded(t *testing.T) {
+	withZeroDownsegJitter(t)
+	c := newDownSegCache()
+	for i := 0; i < downsegAdaptiveSegs+10; i++ {
+		c.append(bytes.Repeat([]byte{byte(i)}, downsegSize))
+	}
+	c.mu.Lock()
+	n := len(c.segs)
+	c.mu.Unlock()
+	if n > int(downsegAdaptiveSegs)+1 {
+		t.Fatalf("cache grew to %d segs (adaptive bound %d)", n, downsegAdaptiveSegs)
 	}
 }
