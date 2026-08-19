@@ -96,6 +96,8 @@ func BenchmarkDsegRealDownlink(b *testing.B) {
 	b.SetBytes(totalBytes)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		// Fresh downstream conn per iteration, but the xray server/client
+		// processes persist across iterations (XMUX/H2 connection reuse).
 		conn, err := stdnet.Dial("tcp", addr)
 		if err != nil {
 			b.Fatal(err)
