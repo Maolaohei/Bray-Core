@@ -144,7 +144,7 @@ func TestUploadQueue_GapTimeout(t *testing.T) {
 		if !strings.Contains(err.Error(), "gap timeout") {
 			t.Fatalf("want gap timeout, got %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(7 * time.Second):
 		t.Fatal("Read did not return within gap timeout window")
 	}
 }

@@ -376,6 +376,7 @@ var knownBrayControlKeys = map[string]struct{}{
 	"x-bray-endpoints":           {},
 	"x-bray-sse":                 {},
 	"x-bray-x-accel":             {},
+	"x-bray-dseg":                {},
 }
 
 func validateBrayControlHeaders(headers map[string]string) {

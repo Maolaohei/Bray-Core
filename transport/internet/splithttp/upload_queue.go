@@ -33,8 +33,12 @@ func freePacketPayload(p *Packet) {
 }
 
 // maxSeqGapWait is how long Read will wait for a missing nextSeq before
-// aborting the session stream. Prevents a lost packet from stalling forever.
-const maxSeqGapWait = 2 * time.Second
+// aborting the session stream. Prevents a lost packet from stalling forever,
+// but wide enough to survive real weak links: on high-RTT/lossy paths a
+// retransmitted seq can arrive late (client backoff + outer network). 2s was
+// too tight and aborted uploads under high-RTT/limited-bandwidth links
+// (V2rayN weak-net drops: "packet sequence gap timeout waiting for seq=N").
+const maxSeqGapWait = 5 * time.Second
 
 type uploadQueue struct {
 	reader          atomic.Pointer[io.ReadCloser]

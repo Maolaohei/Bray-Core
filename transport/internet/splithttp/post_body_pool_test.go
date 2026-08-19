@@ -167,7 +167,7 @@ func TestUploadQueue_PooledReturnOnGapTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected gap timeout error")
 	}
-	if time.Since(start) > 3*time.Second {
+	if time.Since(start) > 6*time.Second {
 		t.Fatal("gap timeout took too long")
 	}
 }
