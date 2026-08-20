@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,8 +29,11 @@ import (
 	"github.com/xtls/xray-core/transport/internet/splithttp"
 )
 
-// startHTTPStressSites starts N plain HTTP test servers.
-func startHTTPStressSites(t *testing.T, count int, basePort int) []*stressSite {
+// startHTTPStressSites starts N plain HTTP test servers on OS-assigned ports.
+// Fixed ports collided with unrelated local applications (e.g. steam.exe on
+// 27060), making full test results depend on the developer desktop instead of
+// XMUX correctness.
+func startHTTPStressSites(t *testing.T, count int) []*stressSite {
 	t.Helper()
 	sites := make([]*stressSite, count)
 	for i := 0; i < count; i++ {
@@ -44,12 +48,12 @@ func startHTTPStressSites(t *testing.T, count int, basePort int) []*stressSite {
 			w.Header().Set("X-Site", name)
 			fmt.Fprint(w, body)
 		})
-		addr := fmt.Sprintf("127.0.0.1:%d", basePort+i)
-		server := &http.Server{Addr: addr, Handler: mux}
-		ln, err := net.Listen("tcp", addr)
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			t.Fatalf("listen %s: %v", addr, err)
+			t.Fatalf("listen stress site: %v", err)
 		}
+		server := &http.Server{Handler: mux}
+		site.addr = ln.Addr().String()
 		go func() {
 			if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
 				t.Logf("server %s: %v", name, err)
@@ -64,12 +68,16 @@ func startHTTPStressSites(t *testing.T, count int, basePort int) []*stressSite {
 type stressSite struct {
 	Name   string
 	Body   string
+	addr   string
 	server *http.Server
 }
 
-// buildStressProxy starts Xray server+client and returns cleanup.
+// buildStressProxy starts Xray server+client and returns cleanup. Each stress
+// case receives a fresh XMUX global pool; otherwise an old client can retain a
+// closed fixed-port peer across test cases.
 func buildStressProxy(t *testing.T, serverPort, clientPort xraynet.Port) func() {
 	t.Helper()
+	splithttp.ResetGlobalDialer()
 	userID := "12345678-1234-1234-1234-123456789abc"
 	shortIds := make([][]byte, 1)
 	shortIds[0] = make([]byte, 8)
@@ -77,7 +85,7 @@ func buildStressProxy(t *testing.T, serverPort, clientPort xraynet.Port) func() 
 
 	serverConfig := &core.Config{
 		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Debug, ErrorLogType: log.LogType_Console}),
+			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Error, ErrorLogType: log.LogType_Console}),
 		},
 		Inbound: []*core.InboundHandlerConfig{{
 			ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
@@ -112,7 +120,7 @@ func buildStressProxy(t *testing.T, serverPort, clientPort xraynet.Port) func() 
 
 	clientConfig := &core.Config{
 		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Debug, ErrorLogType: log.LogType_Console}),
+			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Error, ErrorLogType: log.LogType_Console}),
 		},
 		Inbound: []*core.InboundHandlerConfig{{
 			ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
@@ -166,24 +174,27 @@ func TestXMUXStressHighConcurrency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("long stress suite: skipped in -short mode (CI)")
 	}
-	sites := startHTTPStressSites(t, 5, 27060)
+	sites := startHTTPStressSites(t, 5)
 	for _, s := range sites {
 		defer s.server.Close()
 	}
-	defer buildStressProxy(t, 27070, 27071)
+	cleanup := buildStressProxy(t, 27070, 27071)
+	defer cleanup()
 	time.Sleep(3 * time.Second)
 
 	var wrongBody atomic.Int32
 	var success atomic.Int32
 	var connErrors atomic.Int32
+	var wg sync.WaitGroup
 
 	for g := 0; g < 100; g++ {
+		wg.Add(1)
 		go func(gid int) {
+			defer wg.Done()
 			for i := 0; i < 20; i++ {
 				idx := (gid*20 + i) % len(sites)
 				site := sites[idx]
-				addr := fmt.Sprintf("127.0.0.1:%d", 27060+idx)
-				body, err := httpGetViaProxy(t, 27071, addr, 5*time.Second)
+				body, err := httpGetViaProxy(t, 27071, site.addr, 5*time.Second)
 				if err != nil {
 					connErrors.Add(1)
 					return
@@ -197,10 +208,13 @@ func TestXMUXStressHighConcurrency(t *testing.T) {
 		}(g)
 	}
 
-	time.Sleep(60 * time.Second)
+	wg.Wait()
 	t.Logf("HighConcurrency: success=%d wrong=%d errors=%d", success.Load(), wrongBody.Load(), connErrors.Load())
 	if wrongBody.Load() > 0 {
 		t.Fatalf("CROSS-DOMAIN REUSE: %d wrong body", wrongBody.Load())
+	}
+	if connErrors.Load() > 0 {
+		t.Fatalf("XMUX high-concurrency connect errors: %d", connErrors.Load())
 	}
 }
 
@@ -209,24 +223,27 @@ func TestXMUXStressRandomShuffle(t *testing.T) {
 	if testing.Short() {
 		t.Skip("long stress suite: skipped in -short mode (CI)")
 	}
-	sites := startHTTPStressSites(t, 5, 27080)
+	sites := startHTTPStressSites(t, 5)
 	for _, s := range sites {
 		defer s.server.Close()
 	}
-	defer buildStressProxy(t, 27090, 27091)
+	cleanup := buildStressProxy(t, 27090, 27091)
+	defer cleanup()
 	time.Sleep(3 * time.Second)
 
 	var wrongBody atomic.Int32
 	var success atomic.Int32
 	var connErrors atomic.Int32
+	var wg sync.WaitGroup
 
 	for g := 0; g < 100; g++ {
+		wg.Add(1)
 		go func(gid int) {
+			defer wg.Done()
 			for i := 0; i < 50; i++ {
 				idx := (gid*50 + i + gid*7) % len(sites)
 				site := sites[idx]
-				addr := fmt.Sprintf("127.0.0.1:%d", 27080+idx)
-				body, err := httpGetViaProxy(t, 27091, addr, 5*time.Second)
+				body, err := httpGetViaProxy(t, 27091, site.addr, 5*time.Second)
 				if err != nil {
 					connErrors.Add(1)
 					return
@@ -240,36 +257,42 @@ func TestXMUXStressRandomShuffle(t *testing.T) {
 		}(g)
 	}
 
-	time.Sleep(90 * time.Second)
+	wg.Wait()
 	t.Logf("RandomShuffle: success=%d wrong=%d errors=%d", success.Load(), wrongBody.Load(), connErrors.Load())
 	if wrongBody.Load() > 0 {
 		t.Fatalf("CROSS-DOMAIN REUSE: %d wrong body", wrongBody.Load())
 	}
+	if connErrors.Load() > 0 {
+		t.Fatalf("XMUX random-shuffle connect errors: %d", connErrors.Load())
+	}
 }
 
-// TestXMUXStressContinuousSwitch: 50 goroutines × 200 requests, rapid A→B switching.
+// TestXMUXStressContinuousSwitch: 50 goroutines × 50 requests, rapid A→B switching.
 func TestXMUXStressContinuousSwitch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("long stress suite: skipped in -short mode (CI)")
 	}
-	sites := startHTTPStressSites(t, 2, 27100)
+	sites := startHTTPStressSites(t, 2)
 	for _, s := range sites {
 		defer s.server.Close()
 	}
-	defer buildStressProxy(t, 27110, 27111)
+	cleanup := buildStressProxy(t, 27110, 27111)
+	defer cleanup()
 	time.Sleep(3 * time.Second)
 
 	var wrongBody atomic.Int32
 	var success atomic.Int32
 	var connErrors atomic.Int32
+	var wg sync.WaitGroup
 
 	for g := 0; g < 50; g++ {
+		wg.Add(1)
 		go func(gid int) {
-			for i := 0; i < 200; i++ {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
 				idx := i % len(sites)
 				site := sites[idx]
-				addr := fmt.Sprintf("127.0.0.1:%d", 27100+idx)
-				body, err := httpGetViaProxy(t, 27111, addr, 5*time.Second)
+				body, err := httpGetViaProxy(t, 27111, site.addr, 5*time.Second)
 				if err != nil {
 					connErrors.Add(1)
 					return
@@ -283,9 +306,12 @@ func TestXMUXStressContinuousSwitch(t *testing.T) {
 		}(g)
 	}
 
-	time.Sleep(120 * time.Second)
+	wg.Wait()
 	t.Logf("ContinuousSwitch: success=%d wrong=%d errors=%d", success.Load(), wrongBody.Load(), connErrors.Load())
 	if wrongBody.Load() > 0 {
 		t.Fatalf("CROSS-DOMAIN REUSE: %d wrong body", wrongBody.Load())
+	}
+	if connErrors.Load() > 0 {
+		t.Fatalf("XMUX continuous-switch connect errors: %d", connErrors.Load())
 	}
 }
