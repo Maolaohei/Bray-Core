@@ -16,6 +16,15 @@ type CounterConnection struct {
 	WriteCounter stats.Counter
 }
 
+// Close preserves the wrapper contract when a dial failed before producing a
+// connection. Callers commonly defer cleanup before inspecting the dial error.
+func (c *CounterConnection) Close() error {
+	if c.Connection == nil {
+		return nil
+	}
+	return c.Connection.Close()
+}
+
 func (c *CounterConnection) Read(b []byte) (int, error) {
 	nBytes, err := c.Connection.Read(b)
 	if c.ReadCounter != nil {
