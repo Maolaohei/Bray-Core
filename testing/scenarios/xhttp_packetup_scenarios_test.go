@@ -115,14 +115,35 @@ type dsegEndpoints struct {
 	destOverride net.Destination
 	// echoCleanup closes the in-process XOR echo server (if started).
 	echoCleanup func()
+	// dsegDisable turns off downlink segmentation on BOTH ends (header
+	// x-bray-dseg:0) so the legacy long-GET download leg is exercised — the
+	// clean A/B baseline for "new packet-up (dseg) vs legacy packet-up".
+	dsegDisable bool
 }
 
 func sharedPupConfig() *splithttp.Config {
+	return sharedPupConfigMode("1")
+}
+
+// sharedPupConfigFor picks the packet-up config per the endpoint's dseg
+// setting: dsegDisable selects the legacy long-GET downlink for A/B.
+func sharedPupConfigFor(ep *dsegEndpoints) *splithttp.Config {
+	if ep != nil && ep.dsegDisable {
+		return sharedPupConfigMode("0")
+	}
+	return sharedPupConfigMode("1")
+}
+
+// sharedPupConfigMode returns the packet-up config with the given dseg value
+// ("1" = downlink segmentation ON, "0"/"false" = legacy long-GET downlink).
+// The harness defaults to dseg-on; dsegDisable on dsegEndpoints switches to
+// the legacy downlink for A/B benchmarking.
+func sharedPupConfigMode(dseg string) *splithttp.Config {
 	return &splithttp.Config{
 		Path: "/xh-pup", Mode: "packet-up",
 		Headers: map[string]string{
 			splithttp.BraySessionSecretHeader: pupSecret,
-			"x-bray-dseg":                     "1",
+			"x-bray-dseg":                     dseg,
 		},
 	}
 }
@@ -157,7 +178,7 @@ func startServerOnly(tb testing.TB, ep *dsegEndpoints) {
 	}
 
 	ep.userID = protocol.NewID(uuid.New())
-	cfg := sharedPupConfig()
+	cfg := sharedPupConfigFor(ep)
 	serverConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Debug, ErrorLogType: log.LogType_Console}),
@@ -188,7 +209,7 @@ func startServerOnly(tb testing.TB, ep *dsegEndpoints) {
 func startClientOnly(tb testing.TB, ep *dsegEndpoints, peerHost string, peerPort net.Port) {
 	tb.Helper()
 	ep.clientPort = tcp.PickPort()
-	cfg := sharedPupConfig()
+	cfg := sharedPupConfigFor(ep)
 	clientConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Debug, ErrorLogType: log.LogType_Console}),

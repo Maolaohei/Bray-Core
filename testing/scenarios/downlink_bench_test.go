@@ -79,6 +79,47 @@ func startPushServer(totalBytes int64) (net.Destination, func()) {
 	return dest, cleanup
 }
 
+// BenchmarkLegacyLongGETDownlink measures the legacy long-GET downlink
+// throughput over the same real dual-end push-server link. Segment pulls
+// require H2/H3; benchmark on the same push-server real dual-end with dseg
+// disabled => the legacy long-GET download leg. This is the clean per-op
+// baseline for "new packet-up (dseg) vs the legacy it is designed to beat".
+// 512 MiB is used so the measured rate reflects the stable ceiling, not
+// connection warm-up (see the dseg variant's note).
+func BenchmarkLegacyLongGETDownlink(b *testing.B) {
+	const totalBytes = int64(512 << 20)
+
+	pushDest, cleanup := startPushServer(totalBytes)
+	b.Cleanup(cleanup)
+
+	ep := &dsegEndpoints{serverPort: tcp.PickPort(), destOverride: pushDest, dsegDisable: true}
+	startServerOnly(b, ep)
+	startClientOnly(b, ep, "127.0.0.1", ep.serverPort)
+	clientPort := ep.clientPort
+	addr := "127.0.0.1:" + strconv.Itoa(int(clientPort))
+
+	b.SetBytes(totalBytes)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		conn, err := stdnet.Dial("tcp", addr)
+		if err != nil {
+			b.Fatal(err)
+		}
+		// Read the full downstream exactly once op = one download.
+		n, err := io.Copy(io.Discard, conn)
+		_ = conn.Close()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if n != totalBytes {
+			b.Fatalf("got %d bytes, want %d", n, totalBytes)
+		}
+	}
+}
+
+// BenchmarkDsegRealDownlink measures the new packet-up + downlink-segment
+// real dual-end downlink throughput (see the legacy variant just above for
+// the A/B contrast).
 func BenchmarkDsegRealDownlink(b *testing.B) {
 	// 64 MiB per iteration: big enough to be a meaningful single download
 	// and to keep the run fast for CI regression. NOTE on measurement
