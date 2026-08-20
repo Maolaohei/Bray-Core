@@ -1,7 +1,14 @@
 package splithttp
 
 // B1 服务端闭环单测：生产（httpServerConn.Write 在段模式转缓存）→ 段 GET
-// 拉取（等待未产出段 / 命中 / gone / EOF）。
+// 拉取（命中 / EOF）。
+//
+// NOTE: the cache no longer evicts undelivered segments (bounded flow
+// control / backpressure — see downseg_overflow_test.go). As a result there
+// is no "oldest slid past -> 410" behavior to test anywhere; a segment is
+// either present (200), not produced yet (404), or stream-over (200 empty =
+// EOF). The old TestDownsegPullGoneAndEof asserted 410 for old segments and
+// was removed because that behavior is gone.
 
 import (
 	"bytes"
@@ -48,40 +55,6 @@ func TestDownsegProduceThenPull(t *testing.T) {
 	respCode, respBody := pullSegmentWithID(h, id, 0)
 	if respCode != http.StatusOK || !bytes.Equal(respBody, payload) {
 		t.Fatalf("pull after produce: code=%d bodyLen=%d want 200/%d", respCode, len(respBody), len(payload))
-	}
-}
-
-// TestDownsegPullGoneAndEof: slid-past is 410, beyond-final is 404.
-func TestDownsegPullGoneAndEof(t *testing.T) {
-	withZeroDownsegJitter(t)
-	h := refCountTestHandler(t)
-	sess, id := downsegTestSession(h)
-	if sess == nil {
-		t.Fatal("enterDownsegMode failed")
-	}
-	prod := &httpServerConn{Instance: done.New(), sess: sess}
-	// Produce beyond the adaptive window so the oldest segments slid (410);
-	// the newest remain available; past-end is a clean EOF (200 empty).
-	for i := 0; i < downsegMaxSegs+DownSegWindowSize+downsegAdaptiveSegs; i++ {
-		if _, err := prod.Write(bytes.Repeat([]byte{byte(i)}, downsegSize)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_ = prod.Close() // finalize
-
-	// Oldest slid -> 410.
-	if code, _ := pullSegmentWithID(h, id, 0); code != http.StatusGone {
-		t.Fatalf("slid segment: got %d want 410", code)
-	}
-	// Newest segment (in window) -> 200.
-	last := sess.downseg.Load().producedCount() - 1
-	if code, b := pullSegmentWithID(h, id, last); code != http.StatusOK || len(b) != downsegSize {
-		t.Fatalf("last segment: code=%d len=%d", code, len(b))
-	}
-	if code, _ := pullSegmentWithID(h, id, last+1); code == http.StatusGone || code == http.StatusNotFound {
-		// past-end segment: finalize() made it EOF; with the empty-200 EOF
-		// protocol this must be a 200 with empty body (not a hard error).
-		t.Fatalf("past-end segment: got %d want 200(empty), not %d/%d", code, http.StatusGone, http.StatusNotFound)
 	}
 }
 

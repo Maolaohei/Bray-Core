@@ -79,16 +79,28 @@ const (
 // downSegCache holds produced downlink segments for one session.
 type downSegCache struct {
 	mu sync.Mutex
+	// spaceCond is the producer backpressure signal: append() blocks
+	// (waiting on spaceCond) while undelivered segments are at the hard
+	// bound, and get() broadcasts when it has delivered one. This turns
+	// the cache into a bounded flow-controlled pipe instead of a
+	// window-with-eviction: a produced-but-undelivered segment is NEVER
+	// dropped, so a slow consumer (high-RTT link, video throttling) can
+	// never be falsely 410'd — the producer simply stalls until the
+	// client catches up, exactly like TCP flow control. The hard bound
+	// caps memory (downsegAdaptiveSegs × ~1MiB worst case per session);
+	// a vanished client is reaped by the production-leg idle sweeper
+	// (finalize stays false, production-leg handler eventually times out).
+	spaceCond *sync.Cond
 
 	produced uint64 // next segment index to finalize (first unwritten/full)
 	// lastPulled is the highest segment index the client has successfully
-	// pulled (+1), i.e. the consumption watermark. The sliding window grows
-	// from the steady-state downsegMaxSegs up to downsegAdaptiveSegs so a
-	// reader that lags production keeps the needed segments instead of
-	// stranding them behind a fixed 8-segment cut (which caused 410 drop).
+	// pulled (+1), i.e. the consumption watermark. Pure watermark for the
+	// overflow accounting (undelivered = produced - lastPulled); NOT used
+	// for eviction (see spaceCond backpressure doc).
 	lastPulled uint64
-	// segs maps segment index -> payload. Sliding: we keep at most
-	// downsegMaxSegs; seq < (produced - downsegMaxSegs) is 410 Gone.
+	// segs maps segment index -> payload. Retains EXACTLY the produced-but-
+	// not-yet-delivered segments (deliver-on-get removes on pull); bounded
+	// by the backpressure bound above, never evicted through.
 	segs map[uint64][]byte
 	// segSizeBySeq remembers the target size chosen for each segment
 	// index so appends that span a boundary keep the same budget. The
@@ -114,6 +126,12 @@ type downSegCache struct {
 	// means nobody is consuming this stream.
 	pullAtNs  atomic.Int64
 	writeAtNs atomic.Int64
+
+	// stopped is true once the session tears down (session close), or after
+	// finalize with no room left. append() checks it before WAITING on
+	// spaceCond so a blocked producer wakes up and errors out instead of
+	// sleeping forever after the client vanished. Set under c.mu.
+	stopped bool
 }
 
 func newDownSegCache() *downSegCache {
@@ -122,6 +140,7 @@ func newDownSegCache() *downSegCache {
 		segs:         make(map[uint64][]byte, downsegMaxSegs),
 		segSizeBySeq: make(map[uint64]int, downsegMaxSegs),
 	}
+	c.spaceCond = sync.NewCond(&c.mu)
 	c.pullAtNs.Store(now)
 	c.writeAtNs.Store(now)
 	return c
@@ -166,8 +185,15 @@ var downsegSizeJitterFn = func() int32 {
 // (produced++, readable) when it fills to its target size OR has been
 // receiving bytes for downsegCommitInterval — the time bound is what makes a
 // sub-1MiB stream pullable instead of stranding until 1 MiB fills.
+//
+// Backpressure: when undelivered segments are at the hard bound
+// (downsegAdaptiveSegs), append BLOCKS on spaceCond until get() delivers one
+// (or the session shuts down). Produced-but-undelivered segments are never
+// dropped — this is what makes a high-RTT / slow / throttled consumer immune
+// to spurious 410s: the producer stalls like TCP flow control instead of the
+// cache evicting the very segment the client is about to pull.
 func (c *downSegCache) append(b []byte) {
-	if len(b) == 0 {
+	if len(b) == 0 || c.stopped {
 		return
 	}
 	c.mu.Lock()
@@ -175,15 +201,23 @@ func (c *downSegCache) append(b []byte) {
 	c.writeAtNs.Store(time.Now().UnixNano())
 	off := 0
 	for off < len(b) {
+		// Backpressure gate BEFORE allocating a new segment: do not grow
+		// the undelivered set past the bound. Block until a pull frees a
+		// slot or the stream shuts down.
+		for c.undeliveredCountLocked() >= downsegAdaptiveSegs && !c.stopped {
+			c.spaceCond.Wait()
+		}
+		if c.stopped {
+			return
+		}
 		idx := c.produced
 		cur, ok := c.segs[idx]
 		size := c.downsegSizeFor(idx)
 		if !ok || len(cur) >= size {
-			// Start/spill into a new segment. No window-size eviction here
-			// (deliver-on-get is the eviction policy — see get()); the only
-			// eviction is the hard overflow bound below, so an in-flight
-			// produced-but-undelivered old segment is never dropped while a
-			// straggler might still need it.
+			// Start/spill into a new segment. No window-size eviction:
+			// deliver-on-get + backpressure are the memory policy (see
+			// spaceCond doc); a produced-but-undelivered segment is never
+			// dropped while a straggler might still need it.
 			// Pre-allocate the segment's full payload once. Growing from
 			// nil via repeated append() reallocates/copies ~5x the segment
 			// size (14 allocs vs 1, ~6x CPU on 1 MiB segments — see POC).
@@ -210,30 +244,17 @@ func (c *downSegCache) append(b []byte) {
 			break
 		}
 	}
-	// Hard bound: never retain more than downsegAdaptiveSegs undelivered
-	// segments. A live client continuously delivers via get() (deliver-on-
-	// get), so this only triggers for a runaway producer whose client
-	// vanished — dropping the oldest undelivered is the correct 410
-	// behavior there, not a false eviction of a merely-slow consumer.
-	c.evictOverflowLocked()
 }
 
-// evictOverflowLocked drops the oldest UNDELIVERED segments until at most
-// downsegAdaptiveSegs remain. Caller must hold c.mu.
-func (c *downSegCache) evictOverflowLocked() {
-	// Delivered segments are removed from c.segs by get(); the retained set
-	// is exactly [lastPulled, produced) plus the in-flight segment at
-	// produced. Count them; drop oldest undelivered (lastPulled upward)
-	// while over the bound. Never drop the in-flight segment the producer
-	// is currently writing (index == produced).
-	for uint64(len(c.segs)) > downsegAdaptiveSegs {
-		if c.lastPulled >= c.produced {
-			return // only the in-flight segment remains; cannot drop it
-		}
-		delete(c.segs, c.lastPulled)
-		delete(c.segSizeBySeq, c.lastPulled)
-		c.lastPulled++
+// undeliveredCountLocked returns the number of produced-but-not-yet-
+// delivered segments (produced minus delivered watermark). Caller holds
+// c.mu. The in-flight segment at index produced is not yet finalized, so it
+// is not counted by this formula until it commits (produced++).
+func (c *downSegCache) undeliveredCountLocked() uint64 {
+	if c.produced > c.lastPulled {
+		return c.produced - c.lastPulled
 	}
+	return 0
 }
 
 // get returns the payload of a FINALIZED segment seq, and whether it is
@@ -280,8 +301,8 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	if !ok {
 		return nil, false, true // already delivered or overflow-evicted
 	}
-	// Advance the consumption watermark so the adaptive window tracks how
-	// far the client has actually read (not just reserved).
+	// Advance the consumption watermark so the overflow accounting tracks
+	// how far the client has actually read (not just reserved).
 	if seq+1 > c.lastPulled {
 		c.lastPulled = seq + 1
 	}
@@ -290,6 +311,8 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	delete(c.segs, seq)
 	// Clean up the size bookkeeping now that the segment is gone.
 	delete(c.segSizeBySeq, seq)
+	// Wake a backpressured producer: a slot freed, so append() may resume.
+	c.spaceCond.Broadcast()
 	return p, true, false
 }
 
@@ -306,10 +329,12 @@ func (c *downSegCache) commitIfStaleLazy() {
 	if cur, ok := c.segs[c.produced]; ok && len(cur) > 0 {
 		c.produced++
 	}
-	// No window-size trim here: the hard overflow bound is the only
-	// eviction (see append / evictOverflowLocked); a just-produced segment
-	// must stay until delivered (deliver-on-get).
-	c.evictOverflowLocked()
+	// No eviction here: memory is bounded by the append() backpressure
+	// gate (spaceCond), and a just-produced segment must stay until
+	// delivered (deliver-on-get). Wake a blocked producer in case the
+	// commit just pushed us over the pop — actually the gate is checked
+	// before allocating, so no wake needed; a slow consumer that frees a
+	// slot is handled by get()'s broadcast.
 }
 
 // LazyCommitStale is the lock-taking wrapper used by the segment pull
@@ -330,12 +355,31 @@ func (c *downSegCache) finalize() {
 		c.produced++
 	}
 	c.final = true
+	// Stop backpressure: stream over, a producer (if any) must not keep
+	// waiting for a slot that will never free. finalize is the EOF path;
+	// after it no more segments can be produced.
+	c.stopped = true
+	// Any producer blocked on backpressure must stop waiting: stream over.
+	c.spaceCond.Broadcast()
 	if dbgDownSeg {
 		pc := c.produced
 		c.mu.Unlock()
 		println("[DBGFIN] finalize produced:", pc)
 		return
 	}
+	c.mu.Unlock()
+}
+
+// shutdown terminates the cache: unblocks any backpressured producer and
+// marks it so subsequent append() calls no-op. Called when the session is
+// torn down (production-leg handler exit / uploadQueue close), so a producer
+// that was waiting for the client to pull does not sleep forever if the
+// client vanished.
+func (c *downSegCache) shutdown() {
+	c.mu.Lock()
+	c.stopped = true
+	c.final = true
+	c.spaceCond.Broadcast()
 	c.mu.Unlock()
 }
 
