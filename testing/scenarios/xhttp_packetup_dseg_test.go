@@ -1,13 +1,11 @@
 package scenarios
 
-// Regression: V2rayN-style packet-up against a dseg-enabled server returned
-// 404 on both the production-leg GET and the packet-up upload POST (only
-// packet-up fails; stream-one/stream-up don't). This test reproduces the
-// user scenario with a REAL dual-end (VLESS inbound + VLESS outbound +
-// splithttp packet-up) on localhost and a local TCP echo target — the ONE
-// thing missing from the prior all-green CI suite, which always ran XHTTP
-// under stream-one (REALITY default) and never hit the dseg-on-packet-up
-// path.
+// Regression: V2rayN-style packet-up against an auto-mode dseg-enabled server
+// returned 404 on both the production-leg GET and the packet-up upload POST.
+// This test reproduces the user scenario with a REAL dual-end (VLESS inbound
+// + VLESS outbound + REALITY + splithttp packet-up) on localhost and a local
+// TCP echo target. The server deliberately stays mode:auto so this covers the
+// production policy that accepts all three XHTTP wire shapes.
 
 import (
 	"testing"
@@ -59,7 +57,7 @@ func TestVlessXHTTPRealityPacketUpDseg(t *testing.T) {
 					TransportSettings: []*internet.TransportConfig{{
 						ProtocolName: "splithttp",
 						Settings: serial.ToTypedMessage(&splithttp.Config{
-							Path: "/xhttp-pup", Mode: "packet-up",
+							Path: "/xhttp-pup", Mode: "auto",
 							Headers: map[string]string{splithttp.BraySessionSecretHeader: "pup-shared-secret"},
 						}),
 					}},

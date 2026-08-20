@@ -757,8 +757,12 @@ func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqS
 		// Both ends use header from the padding-name pool (not query/Referer)
 		// unless obfs mode. Tokenish shapes (base62/UUID/hex mix) — NOT the
 		// legacy repeat-x: an all-"X" value is a one-glance fake to any
-		// observer. Server validates tokenish via huffman length.
-		config.Method = PaddingMethodTokenish
+		// observer. An explicitly configured method still wins so the emitted
+		// wire always matches the server-side validation policy.
+		config.Method = PaddingMethod(c.XPaddingMethod)
+		if config.Method == "" {
+			config.Method = PaddingMethodTokenish
+		}
 		config.methodIdx = methodIndex(config.Method)
 		name := c.paddingHeaderNameForSession(sessionId)
 		config.Placement = XPaddingPlacement{
@@ -885,9 +889,12 @@ func (c *Config) finishPacketRequest(request *http.Request, sessionId string, se
 		// Bray-only default wire: session-derived header name from the
 		// padding-name pool (server accepts any member). Avoids the stock
 		// Xray Referer?x_padding fingerprint AND a fixed "X-Padding" rule.
-		// Header placement needs no RawURL string build. Tokenish shapes,
-		// not repeat-x (see FillStreamRequest).
-		config.Method = PaddingMethodTokenish
+		// Header placement needs no RawURL string build. The explicit method
+		// wins; the unset runtime default remains tokenish (see FillStreamRequest).
+		config.Method = PaddingMethod(c.XPaddingMethod)
+		if config.Method == "" {
+			config.Method = PaddingMethodTokenish
+		}
 		config.methodIdx = methodIndex(config.Method)
 		name := c.paddingHeaderNameForSession(sessionId)
 		config.Placement = XPaddingPlacement{

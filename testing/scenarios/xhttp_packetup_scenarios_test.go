@@ -232,6 +232,11 @@ type dsegEndpoints struct {
 	// when empty). Stream-one / stream-up / packet-up are exercised via the
 	// same real dual-end push link for cross-mode downlink comparison.
 	mode string
+	// serverMode/clientMode optionally override mode per endpoint. They let the
+	// matrix verify one server in mode:auto against every client wire shape;
+	// existing scenarios leave both empty and retain the shared mode behavior.
+	serverMode string
+	clientMode string
 	// maxBufferedPosts overrides the packet-up reorder capacity on BOTH test
 	// ends. Zero preserves the production default (64); a tiny value forces
 	// the full-queue path while keeping the client in-flight window capped to
@@ -250,9 +255,19 @@ func sharedPupConfig() *splithttp.Config {
 	return sharedPupConfigMode("1", "packet-up")
 }
 
-// sharedPupConfigFor picks the packet-up config per the endpoint's dseg
-// setting: dsegDisable selects the legacy long-GET downlink for A/B.
+// sharedPupConfigFor picks the client config per the endpoint's dseg setting:
+// dsegDisable selects the legacy long-GET downlink for A/B.
 func sharedPupConfigFor(ep *dsegEndpoints) *splithttp.Config {
+	return sharedPupConfigForSide(ep, false)
+}
+
+// sharedPupConfigForServer independently selects the listener's mode policy.
+// This is distinct from the client wire mode for server:auto compatibility E2E.
+func sharedPupConfigForServer(ep *dsegEndpoints) *splithttp.Config {
+	return sharedPupConfigForSide(ep, true)
+}
+
+func sharedPupConfigForSide(ep *dsegEndpoints, server bool) *splithttp.Config {
 	dseg := "1"
 	if ep != nil && ep.dsegDisable {
 		dseg = "0"
@@ -260,6 +275,14 @@ func sharedPupConfigFor(ep *dsegEndpoints) *splithttp.Config {
 	mode := "packet-up"
 	if ep != nil && ep.mode != "" {
 		mode = ep.mode
+	}
+	if ep != nil {
+		if server && ep.serverMode != "" {
+			mode = ep.serverMode
+		}
+		if !server && ep.clientMode != "" {
+			mode = ep.clientMode
+		}
 	}
 	cfg := sharedPupConfigMode(dseg, mode)
 	if ep != nil && ep.maxBufferedPosts > 0 {
@@ -347,7 +370,7 @@ func startServerOnly(tb testing.TB, ep *dsegEndpoints) {
 
 	ep.userID = protocol.NewID(uuid.New())
 	ensureScenarioTLS(tb, ep)
-	cfg := sharedPupConfigFor(ep)
+	cfg := sharedPupConfigForServer(ep)
 	serverConfig := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&log.Config{ErrorLogLevel: clog.Severity_Debug, ErrorLogType: log.LogType_Console}),

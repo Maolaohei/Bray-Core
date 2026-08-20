@@ -327,7 +327,14 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 
 	switch c.XPaddingMethod {
 	case "":
-		c.XPaddingMethod = "repeat-x"
+		// The non-obfs Bray wire emits tokenish padding, but leave the method
+		// unset so a new server validates both tokenish and legacy repeat-x.
+		// That permits server-first rollout without breaking older clients.
+		// Obfs mode retains its legacy repeat-x default for explicit custom
+		// placement compatibility.
+		if c.XPaddingObfsMode {
+			c.XPaddingMethod = "repeat-x"
+		}
 	case "repeat-x", "tokenish":
 	default:
 		return nil, errors.New("unsupported padding method: " + c.XPaddingMethod)
