@@ -161,13 +161,59 @@ func NewDownSegPuller(ctx context.Context, client *DefaultDialerClient, base *ur
 	return p
 }
 
+// prefetchAheadSegs is how many segments may be reserved (fetched or
+// in-flight) beyond the current consumption watermark. It is the
+// prefetch-consumption alignment bound: enough in-flight segments to hide
+// producer+network latency (so a sustained download stays at full speed
+// even when each segment costs ~1 RTT), yet bounded so we never prefetch
+// into the void or pile gigabytes of un-consumed buffers on a slow reader.
+// 4 × DownSegWindowSize keeps up to a few full windows ahead; the server
+// backpressure bound (downsegAdaptiveSegs=64) is far above this, so a
+// reserved-but-not-yet-produced seq parks cleanly at 404 without stressing
+// the cache bound. Without this bound every worker races ahead to
+// brand-new seqs while the consumer stalls on an exact mid-window seq that
+// no worker currently has in flight (single-segment serialization under
+// high RTT). With it, reservation tracks the consumption watermark and the
+// working set stays tight.
+const prefetchAheadSegs = DownSegWindowSize * 4
+
 // worker reserves the next segment and pulls it until it resolves, or stops
 // once the stream end (EOF marker) is passed.
 func (p *DownSegPuller) worker() {
 	defer p.wg.Done()
 	for {
-		// Stop when closed or when reserved seq is past the EOF marker.
-		seq := p.nextIssue.Add(1) - 1
+		// Reserve the next segment to pull, bounded by the prefetch budget:
+		// stop reserving once we are prefetchAheadSegs ahead of the
+		// consumption watermark (the reader has plenty buffered; pulling
+		// more would only prefetch into the void). Read() advances
+		// consumedSeq and notifies via wake, so reservation re-arms.
+		var seq uint64
+		for {
+			select {
+			case <-p.ctx.Done():
+				return
+			default:
+			}
+			p.mu.Lock()
+			if p.closed || (p.eofAt != 0 && p.nextIssue.Load() > p.eofAt) {
+				p.mu.Unlock()
+				return
+			}
+			if p.nextIssue.Load() <= p.consumedSeq+prefetchAheadSegs {
+				seq = p.nextIssue.Add(1) - 1
+				p.mu.Unlock()
+				break
+			}
+			p.mu.Unlock()
+			// We are ahead of the budget; wait for Read to consume.
+			select {
+			case <-p.wake:
+			case <-p.ctx.Done():
+				return
+			case <-time.After(downSegRetryInterval):
+			}
+		}
+
 		p.mu.Lock()
 		if p.closed || (p.eofAt != 0 && seq > p.eofAt) {
 			p.mu.Unlock()
@@ -275,6 +321,7 @@ func (p *DownSegPuller) Read(b []byte) (int, error) {
 				p.mu.Lock()
 				p.consumedSeq = c + 1
 				p.mu.Unlock()
+				p.notify() // consumption freed prefetch budget: re-arm workers
 			}
 			return n, nil
 		}
@@ -282,6 +329,7 @@ func (p *DownSegPuller) Read(b []byte) (int, error) {
 			delete(p.skip, c)
 			p.consumedSeq = c + 1
 			p.mu.Unlock()
+			p.notify() // consumption freed prefetch budget
 			continue
 		}
 		if p.fatal != nil {
