@@ -51,7 +51,7 @@ benchstat "$TMP/old.txt" "$TMP/new.txt" | tee "$TMP/report.txt"
 # header line and only flag the bad direction.
 REGRESSIONS=$(awk '
   /sec\/op|B\/op|allocs\/op/ { unit="latency"; next }
-  /MiB\/s|MB\/s|GiB\/s|GB\/s/ { unit="throughput"; next }
+  /B\/s|MiB\/s|MB\/s|GiB\/s|GB\/s/ { unit="throughput"; next }
   /\(p=/ {
     delta="";
     for (i=1; i<=NF; i++) if ($i ~ /^[+-][0-9]+\.[0-9]+%$/) delta=$i;
