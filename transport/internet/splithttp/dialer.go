@@ -1080,8 +1080,15 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					// segment mode) — and (b) a sequentially pulled
 					// segment reader. Only the native dialer supports it;
 					// the browser dialer falls back to legacy.
+					// dseg segment pulls require HTTP/2 or HTTP/3 (multiplexed
+					// connection): under HTTP/1.1 every segment pull would open a
+					// fresh TCP+TLS handshake — a performance catastrophe AND a
+					// glaring traffic shape (N short connections per download vs
+					// one multiplexed session). Only the native dialer + H2/H3
+					// may use it; H1/plaintext falls back to the legacy long-GET
+					// download leg. This is the "H2/H3 gate" for segment mode.
 					if transportConfiguration.downsegEnabled() {
-						if dc, ok := httpClient2.(*DefaultDialerClient); ok {
+						if dc, ok := httpClient2.(*DefaultDialerClient); ok && (dc.httpVersion == "2" || dc.httpVersion == "3") {
 							// First a segment pull to enter the session into
 							// segment mode (result irrelevant: empty/404 fine).
 							_, _ = dc.PullSegment(ctx, &requestURL2, sessionId, "0")
