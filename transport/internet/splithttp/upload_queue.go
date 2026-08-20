@@ -5,6 +5,7 @@ package splithttp
 // interface{} boxing/unboxing overhead from container/heap.
 
 import (
+	"context"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,20 @@ type Packet struct {
 	// (Push on failure, Read after consumption / on duplicate / on abort)
 	// returns it via freePostBody; non-pooled payloads are GC'd as before.
 	Pooled bool
+}
+
+// discardQueuedPacket releases a packet abandoned during queue/session
+// teardown. Unlike freePacketPayload it also closes a queued stream-up reader
+// so a half-open HTTP body cannot outlive the session.
+func discardQueuedPacket(p *Packet) {
+	if p == nil {
+		return
+	}
+	freePacketPayload(p)
+	if p.Reader != nil {
+		_ = p.Reader.Close()
+		p.Reader = nil
+	}
 }
 
 // freePacketPayload returns a consumed/aborted packet's pooled payload.
@@ -41,14 +56,27 @@ func freePacketPayload(p *Packet) {
 const maxSeqGapWait = 5 * time.Second
 
 type uploadQueue struct {
-	reader          atomic.Pointer[io.ReadCloser]
-	nomore          bool
-	pushedPackets   chan Packet
+	reader        atomic.Pointer[io.ReadCloser]
+	nomore        bool
+	pushedPackets chan Packet
+	// room is a coalesced notification sent by Read after it removes a
+	// packet from pushedPackets. Full Push waiters listen on it instead of
+	// dropping their packet as a 404 immediately.
+	room chan struct{}
+	// done closes exactly once in Close, waking a full Push that is waiting
+	// for room while the logical session is torn down. It is deliberately
+	// separate from pushedPackets: Push sends only while writeCloseMutex is
+	// held, but waits after releasing it; done makes that wait close-safe.
+	done            chan struct{}
 	writeCloseMutex sync.Mutex
-	heap            packetHeap
-	nextSeq         uint64
-	closed          atomic.Bool
-	maxPackets      int
+	// waiters counts full-queue Push calls waiting on room. It is guarded by
+	// writeCloseMutex and caps extra retained POST bodies/handler goroutines
+	// under a malicious or terminally-stuck consumer.
+	waiters    int
+	heap       packetHeap
+	nextSeq    uint64
+	closed     atomic.Bool
+	maxPackets int
 	// gapSince is wall time when we first observed a hole at nextSeq.
 	// Zero means no outstanding gap.
 	gapSince time.Time
@@ -56,70 +84,184 @@ type uploadQueue struct {
 
 func NewUploadQueue(maxPackets int) *uploadQueue {
 	return &uploadQueue{
-		// L1: channel and heap backing are allocated lazily on first
+		// L1: channels and heap backing are allocated lazily on first
 		// Push — pure download / stream-only sessions never pay the
-		// ~7.2KB eager chan+heap (64×56B chan + 64×56B heap).
+		// channel/heap or backpressure-notification overhead.
 		maxPackets: maxPackets,
 	}
 }
 
-// ensureQueue lazily allocates the channel and heap backing. Caller must
-// hold writeCloseMutex (Push does; Read only touches the fields after the
-// channel is non-nil, which implies a Push happened).
+// uploadQueueBackpressureWait is the bounded grace period for an upload POST
+// that arrives exactly while the queue is full. It deliberately matches
+// maxSeqGapWait: a real high-RTT/slow-target burst can need hundreds of ms
+// (or several RTTs) for the VLESS consumer to drain, and returning a 404
+// sooner causes the client to retry the SAME packet, compounding load and
+// creating the observed 20Mbps -> 1Mbps oscillation. Leave a 500ms margin
+// before maxSeqGapWait so the newly admitted missing sequence can reach
+// uploadQueue.Read before its strict gap timer tears the session down.
+const uploadQueueBackpressureWait = maxSeqGapWait - 500*time.Millisecond
+
+// uploadQueueMaxWaiters bounds full-queue HTTP handlers per session. Each
+// waiter can retain one decoded POST body (up to ScMaxEachPostBytes), so this
+// is a memory/goroutine security bound as well as a fairness guard. Twelve
+// matches packetUploadDefaultWindow: a healthy client may legally have that
+// many POSTs in flight, so accepting fewer creates an artificial 404 burst
+// exactly when server-side backpressure is needed.
+const uploadQueueMaxWaiters = packetUploadDefaultWindow
+
+// ensureQueue lazily allocates the channel, backpressure notification and
+// heap. Caller must hold writeCloseMutex. Assign pushedPackets LAST so a
+// Read that observes it non-nil is guaranteed room/done have been initialized.
 func (h *uploadQueue) ensureQueue() {
 	if h.pushedPackets == nil {
 		// L2: heap backing capped at 16 (deep enough for reordering:
 		// packet-up window maxes at 24 in-flight, heap rarely exceeds a
 		// handful of misordered packets); channel keeps maxPackets.
-		h.pushedPackets = make(chan Packet, h.maxPackets)
+		h.room = make(chan struct{}, 1)
+		h.done = make(chan struct{})
 		h.heap = make(packetHeap, 0, min(h.maxPackets, 16))
+		h.pushedPackets = make(chan Packet, h.maxPackets)
+	}
+}
+
+// notifyRoom coalesces a freed channel slot notification. room is never
+// closed, so this remains safe while Close races with a reader draining the
+// already-buffered channel.
+func (h *uploadQueue) notifyRoom() {
+	select {
+	case h.room <- struct{}{}:
+	default:
 	}
 }
 
 // queuePollInterval is how often Read re-checks for a lazily-created queue
-// while waiting for the first Push. Bounded by the 2s gap timeout.
+// while waiting for the first Push. Bounded by the five-second gap timeout.
 const queuePollInterval = 200 * time.Microsecond
 
+// Push retains the historical context-free API for unit tests and internal
+// callers. HTTP handlers must use PushContext(request.Context(), ...) so a
+// client disconnect cancels a full-queue backpressure wait immediately.
 func (h *uploadQueue) Push(p Packet) error {
-	// Serialize all channel sends with Close(). An unlocked try-send races
-	// with close(pushedPackets) and trips the race detector under concurrent
-	// upload/session teardown, even when a recover would swallow the panic.
-	// Kept as a plain Mutex on purpose: RWMutex's RLock atomically writes a
-	// shared reader count on every push, which is slower than Mutex.Lock on
-	// this hot path where Close() is rare and readers are the only users
-	// (measured: Parallel_H2C ~21µs median with Mutex vs 26-33µs with RWMutex).
-	h.writeCloseMutex.Lock()
-	defer h.writeCloseMutex.Unlock()
+	return h.PushContext(context.Background(), p)
+}
 
-	if h.closed.Load() {
-		freePacketPayload(&p)
-		return errors.New("packet queue closed")
+// PushContext inserts an upload packet in sequence order. On a momentarily
+// full queue it applies bounded, cancel-aware backpressure instead of
+// immediately returning "packet queue full" (which hub maps to HTTP 404 and
+// causes the packet-up client to retry/thrash). The per-session waiter cap
+// prevents waiting handlers/body buffers from becoming an unbounded DoS sink.
+func (h *uploadQueue) PushContext(ctx context.Context, p Packet) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if h.nomore {
-		freePacketPayload(&p)
-		return errors.New("h.reader already exists")
+	var deadline time.Time // lazy: uncontended hot path has no clock read
+	for {
+		h.writeCloseMutex.Lock()
+		if h.closed.Load() {
+			h.writeCloseMutex.Unlock()
+			freePacketPayload(&p)
+			return errors.New("packet queue closed")
+		}
+		if h.nomore {
+			h.writeCloseMutex.Unlock()
+			freePacketPayload(&p)
+			return errors.New("h.reader already exists")
+		}
+		h.ensureQueue()
+		select {
+		case h.pushedPackets <- p:
+			// A stream-up reader is exclusive, but do not mark it until
+			// the packet actually enters the channel: a full-queue retry
+			// must not reject its own still-unenqueued reader as duplicate.
+			if p.Reader != nil {
+				h.nomore = true
+			}
+			h.writeCloseMutex.Unlock()
+			return nil // queue owns p (and any pooled payload)
+		default:
+		}
+
+		// Queue is full. Admit only a small, bounded number of waiting
+		// handlers; every waiter retains one already-decoded POST body.
+		// Do NOT cap this by h.maxPackets: a deliberately small server queue
+		// must still absorb the client's normal 12-post launch window instead
+		// of converting its own backpressure into a synthetic 404 storm.
+		if h.waiters >= uploadQueueMaxWaiters {
+			h.writeCloseMutex.Unlock()
+			freePacketPayload(&p)
+			return errors.New("packet queue full")
+		}
+		h.waiters++
+		room, done := h.room, h.done
+		h.writeCloseMutex.Unlock()
+
+		if deadline.IsZero() {
+			deadline = time.Now().Add(uploadQueueBackpressureWait)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			h.leaveWaiter()
+			freePacketPayload(&p)
+			return errors.New("packet queue full")
+		}
+		timer := time.NewTimer(remaining)
+		var waitErr error
+		select {
+		case <-room:
+			// A reader freed a slot. Re-check state and safely send under
+			// the mutex in the next loop iteration.
+		case <-done:
+			waitErr = errors.New("packet queue closed")
+		case <-ctx.Done():
+			waitErr = ctx.Err()
+		case <-timer.C:
+			waitErr = errors.New("packet queue full")
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		h.leaveWaiter()
+		if waitErr != nil {
+			freePacketPayload(&p)
+			return waitErr
+		}
 	}
-	if p.Reader != nil {
-		h.nomore = true
+}
+
+// leaveWaiter decrements the per-session pending full-queue waiter count.
+func (h *uploadQueue) leaveWaiter() {
+	h.writeCloseMutex.Lock()
+	if h.waiters > 0 {
+		h.waiters--
 	}
-	h.ensureQueue()
-	// Bray-only: never block the HTTP handler on a full queue (DoS pin).
-	// Caller maps this error to a uniform 404; client retries on a new session.
-	select {
-	case h.pushedPackets <- p:
-		return nil
-	default:
-		freePacketPayload(&p)
-		return errors.New("packet queue full")
-	}
+	h.writeCloseMutex.Unlock()
 }
 
 func (h *uploadQueue) Close() error {
 	h.writeCloseMutex.Lock()
 	defer h.writeCloseMutex.Unlock()
 
-	if !h.closed.Swap(true) && h.pushedPackets != nil {
-		close(h.pushedPackets)
+	if !h.closed.Swap(true) {
+		// Wake a Push backpressured on a full queue before closing the
+		// packet channel. Sends always hold this same mutex, so no sender can
+		// race the close; waiters select on done after the mutex is released.
+		if h.done != nil {
+			close(h.done)
+		}
+		if h.pushedPackets != nil {
+			close(h.pushedPackets)
+			// Read returns EOF immediately once closed, so it may never
+			// consume packets still buffered in the channel. Drain them here
+			// while sends are excluded by writeCloseMutex; otherwise pooled
+			// bodies fall back to GC and queued stream-up readers leak until
+			// their transport times out.
+			for p := range h.pushedPackets {
+				discardQueuedPacket(&p)
+			}
+		}
 	}
 	if r := h.reader.Load(); r != nil {
 		return (*r).Close()
@@ -156,6 +298,10 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 			if !more {
 				return 0, io.EOF
 			}
+			// A channel slot is free now; wake one or more bounded Push
+			// waiters so transient full-queue stalls become flow control,
+			// not HTTP 404 upload drops.
+			h.notifyRoom()
 			if packet.Reader != nil {
 				r := packet.Reader
 				h.reader.Store(&r)
@@ -215,6 +361,7 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 						h.drainAndFree()
 						return 0, io.EOF
 					}
+					h.notifyRoom()
 					h.heap.push(packet2)
 				case <-timer.C:
 					h.drainAndFree()
@@ -235,7 +382,7 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 func (h *uploadQueue) drainAndFree() {
 	for h.heap.Len() > 0 {
 		p := h.heap.pop()
-		freePacketPayload(&p)
+		discardQueuedPacket(&p)
 	}
 }
 

@@ -725,7 +725,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				reader:         request.Body,
 				ResponseWriter: writer,
 			}
-			err = currentSession.uploadQueue.Push(Packet{
+			err = currentSession.uploadQueue.PushContext(request.Context(), Packet{
 				Reader: httpSC,
 			})
 			if err != nil {
@@ -929,14 +929,17 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		// payload is already uniquely owned (fresh decode / single body alloc /
 		// PlacementAuto assemble). Do not clone again before enqueue.
-		err = currentSession.uploadQueue.Push(Packet{
+		err = currentSession.uploadQueue.PushContext(request.Context(), Packet{
 			Payload: payload,
 			Seq:     seq,
 			Pooled:  payloadPooled,
 		})
 		if err != nil {
 			errors.LogDebug(context.Background(), "failed to upload (PushPayload)")
-			// Bray-only: queue-full / closed -> 404, not 500 (no liveness oracle).
+			// Queue full/closed only reaches 404 after bounded, cancel-aware
+			// backpressure (or waiter-cap exhaustion), not on a transient
+			// one-slot stall. Keep the uniform 404 externally to avoid a
+			// session/queue liveness oracle.
 			if dbgDownSeg {
 				sess := currentSession
 				println("[DBGPUPS] packet-up Push 404 seq=", seq, "closed=", sess.uploadQueue.closed.Load(),

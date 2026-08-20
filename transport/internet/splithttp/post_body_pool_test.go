@@ -222,3 +222,48 @@ func TestUploadQueue_PooledDrainReturnsAll(t *testing.T) {
 		t.Fatalf("%d orphaned payloads not returned", len(orphans))
 	}
 }
+
+// TestUploadQueue_CloseDrainsBufferedPooledPackets guards the normal session
+// teardown path: Close used to close the channel then make Read return EOF,
+// leaving already-buffered Pooled payloads for GC instead of returning them
+// to postBodyPool. Close must now drain those channel entries immediately.
+func TestUploadQueue_CloseDrainsBufferedPooledPackets(t *testing.T) {
+	q := NewUploadQueue(10)
+	var orphans []uintptr
+	for i := 0; i < 3; i++ {
+		p := allocPostBody(4096)
+		orphans = append(orphans, uintptr(unsafe.Pointer(&p[0])))
+		if err := q.Push(Packet{Payload: p, Seq: uint64(i), Pooled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if raceEnabled {
+		return // detector clears the pool; identity cannot be observed
+	}
+	var bufs [][]byte
+	for range orphans {
+		again := allocPostBody(4096)
+		bufs = append(bufs, again)
+		addr := uintptr(unsafe.Pointer(&again[0]))
+		found := false
+		for i, o := range orphans {
+			if o == addr {
+				orphans = append(orphans[:i], orphans[i+1:]...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("Close-buffered payload %x not returned to pool", addr)
+		}
+	}
+	for _, b := range bufs {
+		freePostBody(b)
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("%d Close-buffered payloads not returned", len(orphans))
+	}
+}

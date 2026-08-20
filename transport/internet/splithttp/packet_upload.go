@@ -17,7 +17,7 @@ import (
 
 // packetUploadMaxAttempts is the max tries for a single packet-up POST
 // (1 initial + retries). 4 covers one outer-path blip (25/50/100ms backoff
-// stays inside the server 2s gap timeout) while bounding HoL delay.
+// stays inside the server five-second gap timeout) while bounding HoL delay.
 const packetUploadMaxAttempts = 4
 
 // packetUploadRetryBase is the first backoff step after a failed POST.
@@ -143,7 +143,7 @@ func packetUploadWindow(scMaxBufferedPosts int, rtt time.Duration) int {
 	switch {
 	case rtt >= 200*time.Millisecond:
 		// Was 24 (packetUploadMaxWindow): on high-RTT/jittery links a lost
-		// seq's retry backoff can exceed the server 2s gap timeout and abort
+		// seq's retry backoff can exceed the server five-second gap timeout and abort
 		// the whole session. Cap lower to keep retries inside the gap window.
 		// 8 (ToT L2): fewer in-flight POSTs also shrink amplification when
 		// the outer path reorders heavily.
