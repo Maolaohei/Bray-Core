@@ -121,17 +121,13 @@ func BenchmarkLegacyLongGETDownlink(b *testing.B) {
 // real dual-end downlink throughput (see the legacy variant just above for
 // the A/B contrast).
 func BenchmarkDsegRealDownlink(b *testing.B) {
-	// 64 MiB per iteration: big enough to be a meaningful single download
-	// and to keep the run fast for CI regression. NOTE on measurement
-	// validity: at this size a large fraction of wall time is connection
-	// setup + H2 window warm-up, so the reported rate (~30 MB/s) is NOT
-	// the steady-state ceiling. 512 MiB measures the real stable
-	// throughput (~173 MB/s loopback, matching the synthetic path); use
-	// the large size when you need the actual link rate, the small size
-	// for a fast integrity/smoke regression. The 410 tear-down bug this
-	// benchmark guards against (TestDsegLargeSustainedDownload regression)
-	// reproduces at BOTH sizes, so 64MiB is a valid regression signal.
-	const totalBytes = int64(64 << 20)
+	// 512 MiB per iteration: the steady-state ceiling (connection setup +
+	// H2 window warm-up are amortized away; a 64MiB run reports only ~30
+	// MB/s and is NOT the link rate). Same payload as the legacy variant
+	// so the A/B is apples-to-apples. The 410 tear-down regression this
+	// guards is covered at both sizes by TestDsegLargeSustainedDownload
+	// (32MiB, fast CI signal).
+	const totalBytes = int64(512 << 20)
 
 	pushDest, cleanup := startPushServer(totalBytes)
 	b.Cleanup(cleanup)
