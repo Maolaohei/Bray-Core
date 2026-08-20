@@ -36,7 +36,9 @@ func RunXrayProtobuf(config []byte) *exec.Cmd {
 	proc := exec.Command(testBinaryPath, "-config=stdin:", "-format=pb", "-test.run", "TestRunMainForCoverage", "-test.coverprofile", profile, "-test.outputdir", covDir)
 	proc.Stdin = bytes.NewBuffer(config)
 	proc.Stderr = os.Stderr
-	proc.Stdout = os.Stdout
+	// Keep child stdout off the benchmark stream (same rationale as
+	// common_regular.go): the xray banner would pollute go test -bench.
+	proc.Stdout = os.Stderr
 
 	return proc
 }
