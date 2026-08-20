@@ -119,28 +119,38 @@ type dsegEndpoints struct {
 	// x-bray-dseg:0) so the legacy long-GET download leg is exercised — the
 	// clean A/B baseline for "new packet-up (dseg) vs legacy packet-up".
 	dsegDisable bool
+	// mode overrides the XHTTP wire mode on BOTH ends (default "packet-up"
+	// when empty). Stream-one / stream-up / packet-up are exercised via the
+	// same real dual-end push link for cross-mode downlink comparison.
+	mode string
 }
 
 func sharedPupConfig() *splithttp.Config {
-	return sharedPupConfigMode("1")
+	return sharedPupConfigMode("1", "packet-up")
 }
 
 // sharedPupConfigFor picks the packet-up config per the endpoint's dseg
 // setting: dsegDisable selects the legacy long-GET downlink for A/B.
 func sharedPupConfigFor(ep *dsegEndpoints) *splithttp.Config {
+	dseg := "1"
 	if ep != nil && ep.dsegDisable {
-		return sharedPupConfigMode("0")
+		dseg = "0"
 	}
-	return sharedPupConfigMode("1")
+	mode := "packet-up"
+	if ep != nil && ep.mode != "" {
+		mode = ep.mode
+	}
+	return sharedPupConfigMode(dseg, mode)
 }
 
-// sharedPupConfigMode returns the packet-up config with the given dseg value
-// ("1" = downlink segmentation ON, "0"/"false" = legacy long-GET downlink).
-// The harness defaults to dseg-on; dsegDisable on dsegEndpoints switches to
-// the legacy downlink for A/B benchmarking.
-func sharedPupConfigMode(dseg string) *splithttp.Config {
+// sharedPupConfigMode returns the XHTTP config for the given dseg value
+// ("1" = downlink segmentation ON, "0"/"false" = legacy long-GET downlink
+// under packet-up) and wire mode (packet-up / stream-up / stream-one).
+// The harness defaults to dseg-on packet-up; dsegDisable/mode on
+// dsegEndpoints switch for A/B and cross-mode benchmarking.
+func sharedPupConfigMode(dseg, mode string) *splithttp.Config {
 	return &splithttp.Config{
-		Path: "/xh-pup", Mode: "packet-up",
+		Path: "/xh-pup", Mode: mode,
 		Headers: map[string]string{
 			splithttp.BraySessionSecretHeader: pupSecret,
 			"x-bray-dseg":                     dseg,

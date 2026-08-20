@@ -79,6 +79,52 @@ func startPushServer(totalBytes int64) (net.Destination, func()) {
 	return dest, cleanup
 }
 
+// BenchmarkXHTTPModes_Downlink drives the real dual-end push-server downlink
+// (512 MiB) in three XHTTP wire modes in one process (shared server/client
+// framing, same payload), so the steady-state downlink throughput is directly
+// comparable across stream-one / packet-up(legacy long-GET) / packet-up(dseg).
+func BenchmarkXHTTPModes_Downlink(b *testing.B) {
+	const totalBytes = int64(512 << 20)
+
+	cases := []struct {
+		name string
+		mode string
+		dseg bool
+	}{
+		{name: "stream-one", mode: "stream-one", dseg: false},
+		{name: "packet-up-legacy", mode: "packet-up", dseg: false},
+		{name: "packet-up-dseg", mode: "packet-up", dseg: true},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			pushDest, cleanup := startPushServer(totalBytes)
+			b.Cleanup(cleanup)
+			ep := &dsegEndpoints{serverPort: tcp.PickPort(), destOverride: pushDest,
+				mode: tc.mode, dsegDisable: !tc.dseg}
+			startServerOnly(b, ep)
+			startClientOnly(b, ep, "127.0.0.1", ep.serverPort)
+			addr := "127.0.0.1:" + strconv.Itoa(int(ep.clientPort))
+			b.SetBytes(totalBytes)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				conn, err := stdnet.Dial("tcp", addr)
+				if err != nil {
+					b.Fatal(err)
+				}
+				n, err := io.Copy(io.Discard, conn)
+				_ = conn.Close()
+				if err != nil {
+					b.Fatal(err)
+				}
+				if n != totalBytes {
+					b.Fatalf("got %d bytes, want %d", n, totalBytes)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkLegacyLongGETDownlink measures the legacy long-GET downlink
 // throughput over the same real dual-end push-server link. Segment pulls
 // require H2/H3; benchmark on the same push-server real dual-end with dseg
