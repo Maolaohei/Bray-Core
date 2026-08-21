@@ -66,6 +66,18 @@ const DownSegWindowSize = 6
 // 20 ms row across clients (fingerprint clustering risk).
 const downSegRetryInterval = 20 * time.Millisecond
 
+// downSegCurrentRetryInterval is used only by the segment the reader is
+// blocked on. It shortens page/API first-byte recovery without increasing the
+// five future prefetch workers' 404 cadence or changing any wire shape.
+const downSegCurrentRetryInterval = 5 * time.Millisecond
+
+func downSegRetryBase(seq, consumedSeq uint64) time.Duration {
+	if seq == consumedSeq {
+		return downSegCurrentRetryInterval
+	}
+	return downSegRetryInterval
+}
+
 // PullSegment fetches one finalized downlink segment (200 body) or a
 // 200-empty (EOF marker), distinguishing it from transient 404 and slipped 410.
 func (c *DefaultDialerClient) PullSegment(ctx context.Context, base *url.URL, sessionId, seqStr string) ([]byte, error) {
@@ -296,9 +308,12 @@ func (p *DownSegPuller) worker() {
 				}
 			case err == errSegNotFound:
 				// Not produced yet: retry after jittered backoff, keeping
-				// seq (jittered so retries don't form a fixed cadence).
+				// seq. Only the segment Read is blocked on uses the shorter
+				// base; future prefetches retain the normal jittered cadence.
+				// This stays entirely client-local: no held server H2 stream.
+				base := downSegRetryBase(seq, p.consumedSeq)
 				p.mu.Unlock()
-				wait := downSegRetryInterval + time.Duration(biasedRangeRand(-int32(downSegRetryInterval/time.Millisecond), int32(downSegRetryInterval/time.Millisecond)))*time.Millisecond
+				wait := base + time.Duration(biasedRangeRand(-int32(base/time.Millisecond), int32(base/time.Millisecond)))*time.Millisecond
 				if wait < 1*time.Millisecond {
 					wait = 1 * time.Millisecond
 				}

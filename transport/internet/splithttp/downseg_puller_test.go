@@ -74,6 +74,15 @@ func TestDownSegPullerProductionFailurePreemptsBufferedSegments(t *testing.T) {
 	}
 }
 
+func TestDownSegCurrentRetryUsesShorterBaseThanPrefetch(t *testing.T) {
+	if got := downSegRetryBase(7, 7); got >= downSegRetryInterval {
+		t.Fatalf("current retry base = %v, want less than future base %v", got, downSegRetryInterval)
+	}
+	if got := downSegRetryBase(8, 7); got != downSegRetryInterval {
+		t.Fatalf("future retry base = %v, want %v", got, downSegRetryInterval)
+	}
+}
+
 // codeRecorder captures the final status code written by the handler.
 type codeRecorder struct {
 	http.ResponseWriter
