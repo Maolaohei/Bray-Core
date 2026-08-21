@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,17 +105,31 @@ type weakLinkProfile struct {
 	bytesPerSecond int64
 }
 
+// weakLinkStats proves the scenario actually crosses the test relay; a
+// byte-exact echo alone could otherwise pass after an accidental direct dial.
+type weakLinkStats struct {
+	connections   atomic.Int64
+	forwarded     atomic.Int64
+	throttleWaits atomic.Int64
+}
+
+type weakLinkProxy struct {
+	port  net.Port
+	stats *weakLinkStats
+}
+
 // startWeakLinkProxy starts a raw TCP forwarder to upstreamPort. It returns
 // its listening port and registers cleanup on tb. The server MUST already be
 // listening before this is called; the client starts only after this proxy is
 // ready, so no bind/order race exists.
-func startWeakLinkProxy(tb testing.TB, upstreamPort net.Port, profile weakLinkProfile) net.Port {
+func startWeakLinkProxy(tb testing.TB, upstreamPort net.Port, profile weakLinkProfile) *weakLinkProxy {
 	tb.Helper()
 	ln, err := stdnet.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		tb.Fatal(err)
 	}
 	var wg sync.WaitGroup
+	stats := &weakLinkStats{}
 	var conns sync.Map // stdnet.Conn -> struct{}, active client+upstream sockets
 	acceptDone := make(chan struct{})
 	upstream := "127.0.0.1:" + strconv.Itoa(int(upstreamPort))
@@ -129,7 +144,7 @@ func startWeakLinkProxy(tb testing.TB, upstreamPort net.Port, profile weakLinkPr
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				serveWeakLink(client, upstream, profile, &conns)
+				serveWeakLink(client, upstream, profile, &conns, stats)
 			}()
 		}
 	}()
@@ -148,10 +163,10 @@ func startWeakLinkProxy(tb testing.TB, upstreamPort net.Port, profile weakLinkPr
 		})
 		wg.Wait()
 	})
-	return net.Port(ln.Addr().(*stdnet.TCPAddr).Port)
+	return &weakLinkProxy{port: net.Port(ln.Addr().(*stdnet.TCPAddr).Port), stats: stats}
 }
 
-func serveWeakLink(client stdnet.Conn, upstreamAddr string, profile weakLinkProfile, conns *sync.Map) {
+func serveWeakLink(client stdnet.Conn, upstreamAddr string, profile weakLinkProfile, conns *sync.Map, stats *weakLinkStats) {
 	defer conns.Delete(client)
 	upstream, err := stdnet.Dial("tcp", upstreamAddr)
 	if err != nil {
@@ -159,13 +174,14 @@ func serveWeakLink(client stdnet.Conn, upstreamAddr string, profile weakLinkProf
 		return
 	}
 	conns.Store(upstream, struct{}{})
+	stats.connections.Add(1)
 	defer conns.Delete(upstream)
 	defer client.Close()
 	defer upstream.Close()
 
 	done := make(chan struct{}, 2)
-	go func() { weakLinkPump(upstream, client, profile); done <- struct{}{} }()
-	go func() { weakLinkPump(client, upstream, profile); done <- struct{}{} }()
+	go func() { weakLinkPump(upstream, client, profile, stats); done <- struct{}{} }()
+	go func() { weakLinkPump(client, upstream, profile, stats); done <- struct{}{} }()
 	// First direction ending means the logical link ends; closing both wakes
 	// the counterpart out of Read without leaking a proxy goroutine.
 	<-done
@@ -174,7 +190,7 @@ func serveWeakLink(client stdnet.Conn, upstreamAddr string, profile weakLinkProf
 	<-done
 }
 
-func weakLinkPump(dst, src stdnet.Conn, profile weakLinkProfile) {
+func weakLinkPump(dst, src stdnet.Conn, profile weakLinkProfile, stats *weakLinkStats) {
 	buf := make([]byte, 32<<10)
 	first := true
 	for {
@@ -185,6 +201,7 @@ func weakLinkPump(dst, src stdnet.Conn, profile weakLinkProfile) {
 			}
 			first = false
 			if profile.bytesPerSecond > 0 {
+				stats.throttleWaits.Add(1)
 				time.Sleep(time.Duration(int64(n) * int64(time.Second) / profile.bytesPerSecond))
 			}
 			for off := 0; off < n; {
@@ -194,6 +211,7 @@ func weakLinkPump(dst, src stdnet.Conn, profile weakLinkProfile) {
 					return
 				}
 			}
+			stats.forwarded.Add(int64(n))
 		}
 		if err != nil {
 			return
@@ -464,10 +482,16 @@ func runWeakLinkScenario(t *testing.T, profile weakLinkProfile, fn func(*testing
 	t.Helper()
 	ep := &dsegEndpoints{serverPort: tcp.PickPort()}
 	startServerOnly(t, ep)
-	proxyPort := startWeakLinkProxy(t, ep.serverPort, profile)
-	startClientOnly(t, ep, "127.0.0.1", proxyPort)
+	proxy := startWeakLinkProxy(t, ep.serverPort, profile)
+	startClientOnly(t, ep, "127.0.0.1", proxy.port)
 	if err := fn(t, ep.clientPort); err != nil {
 		t.Fatalf("weak-link scenario failed: %v", err)
+	}
+	if proxy.stats.connections.Load() == 0 || proxy.stats.forwarded.Load() == 0 {
+		t.Fatal("weak-link scenario bypassed the client-server relay")
+	}
+	if profile.bytesPerSecond > 0 && proxy.stats.throttleWaits.Load() == 0 {
+		t.Fatal("weak-link scenario did not exercise bandwidth throttling")
 	}
 }
 

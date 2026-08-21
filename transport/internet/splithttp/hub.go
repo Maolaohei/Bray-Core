@@ -184,7 +184,15 @@ func (h *requestHandler) sessionSweeper() {
 }
 
 func (s *httpSession) close() {
-	s.closeOnce.Do(func() { s.uploadQueue.Close() })
+	s.closeOnce.Do(func() {
+		// A dseg producer can be blocked at the cache bound after the client
+		// vanishes. Wake it before closing the upload side so target and cache
+		// resources cannot remain pinned indefinitely.
+		if c := s.downseg.Load(); c != nil {
+			c.shutdown()
+		}
+		s.uploadQueue.Close()
+	})
 }
 
 const maxSessionsPerHandler = 65536

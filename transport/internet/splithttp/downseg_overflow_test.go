@@ -112,3 +112,29 @@ func TestDownSegShutdownUnblocksProducer(t *testing.T) {
 		t.Fatal("shutdown did not unblock the backpressured producer")
 	}
 }
+
+func TestDownSegSessionCloseUnblocksProducer(t *testing.T) {
+	withZeroDownsegJitter(t)
+	s := &httpSession{uploadQueue: NewUploadQueue(1)}
+	if !s.enterDownsegMode() {
+		t.Fatal("failed to enter downseg mode")
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < downsegAdaptiveSegs+32; i++ {
+			s.downsegAppend(bytes.Repeat([]byte{byte(i % 251)}, downsegSize))
+		}
+	}()
+	select {
+	case <-done:
+		t.Fatal("producer finished without a segment consumer")
+	case <-time.After(300 * time.Millisecond):
+	}
+	s.close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session close did not unblock the backpressured dseg producer")
+	}
+}

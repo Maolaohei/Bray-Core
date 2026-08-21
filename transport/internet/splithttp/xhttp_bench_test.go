@@ -122,6 +122,69 @@ func BenchmarkXHTTP_H2_Throughput(b *testing.B) {
 	}
 }
 
+// BenchmarkXHTTP_H2_DsegModes is the real TLS/H2 packet-up comparison that
+// distinguishes the Bray dseg path from the legacy long-GET path. Keep the
+// payload and echo workload identical between sub-benchmarks so any delta is
+// attributable to dseg rather than the H1/H2 or TLS difference.
+func BenchmarkXHTTP_H2_DsegModes(b *testing.B) {
+	if runtime.GOARCH == "arm64" {
+		b.Skip("arm64")
+	}
+
+	for _, tc := range []struct {
+		name string
+		dseg bool
+	}{
+		{name: "dseg_on", dseg: true},
+		{name: "dseg_off", dseg: false},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			p := tcp.PickPort()
+			headers := map[string]string{BraySessionSecretHeader: "bench-test-secret"}
+			if !tc.dseg {
+				headers["x-bray-dseg"] = "0"
+			}
+			ct, ctHash := cert.MustGenerate(nil, cert.CommonName("localhost"))
+			settings := &internet.MemoryStreamConfig{
+				ProtocolName:     "splithttp",
+				ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: headers},
+				SecurityType:     "tls",
+				SecuritySettings: &tls.Config{
+					Certificate:          []*tls.Certificate{tls.ParseCertificate(ct)},
+					PinnedPeerCertSha256: [][]byte{ctHash[:]},
+				},
+			}
+
+			listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
+				go func(c stat.Connection) {
+					defer c.Close()
+					buf.Copy(buf.NewReader(c), buf.NewWriter(c))
+				}(conn)
+			})
+			common.Must(err)
+			defer listen.Close()
+
+			conn, err := Dial(context.Background(), net.TCPDestination(net.DomainAddress("localhost"), p), settings)
+			common.Must(err)
+			defer conn.Close()
+
+			payload := make([]byte, 32*1024)
+			rand.Read(payload)
+			readBuf := make([]byte, len(payload))
+			b.SetBytes(int64(len(payload)) * 2)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := conn.Write(payload); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := io.ReadFull(conn, readBuf); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkXHTTP_StreamUp_Throughput(b *testing.B) {
 	if runtime.GOARCH == "arm64" {
 		b.Skip("arm64")

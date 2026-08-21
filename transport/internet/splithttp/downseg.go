@@ -65,6 +65,9 @@ const (
 	// downsegSizeMin floors segments so the pull overhead amortizes even
 	// with jitter drawn low.
 	downsegSizeMin = downsegSize / 2
+	// downsegInitialAllocFloor avoids allocating a full 1MiB backing array
+	// for a short web/API response while retaining room for normal write bursts.
+	downsegInitialAllocFloor = 64 << 10
 	// downsegCommitInterval bounds how long a segment may keep receiving
 	// bytes before it is committed (made readable), even when far below
 	// downsegSize. This is what makes a sub-1MiB stream (VLESS handshake,
@@ -218,13 +221,17 @@ func (c *downSegCache) append(b []byte) {
 			// deliver-on-get + backpressure are the memory policy (see
 			// spaceCond doc); a produced-but-undelivered segment is never
 			// dropped while a straggler might still need it.
-			// Pre-allocate the segment's full payload once. Growing from
-			// nil via repeated append() reallocates/copies ~5x the segment
-			// size (14 allocs vs 1, ~6x CPU on 1 MiB segments — see POC).
-			// The final small segment overallocates its cap by at most
-			// downsegSizeMin, a bounded one-off per session; the win is on
-			// the fast path where full segments are the norm.
-			cur = make([]byte, 0, size)
+			// Full preallocation is ideal for media segments but turns every
+			// short web/API response into a 1MiB allocation. Reserve for the
+			// available write with a modest floor; larger segments grow normally.
+			initialCap := len(b) - off
+			if initialCap < downsegInitialAllocFloor {
+				initialCap = downsegInitialAllocFloor
+			}
+			if initialCap > size {
+				initialCap = size
+			}
+			cur = make([]byte, 0, initialCap)
 			c.segs[idx] = cur
 			c.segStartedAt = time.Now().UnixNano()
 		}
