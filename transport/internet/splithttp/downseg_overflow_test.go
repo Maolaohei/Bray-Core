@@ -138,3 +138,27 @@ func TestDownSegSessionCloseUnblocksProducer(t *testing.T) {
 		t.Fatal("session close did not unblock the backpressured dseg producer")
 	}
 }
+
+func TestDownSegOutOfOrderPullCannotBypassRetainedBound(t *testing.T) {
+	withZeroDownsegJitter(t)
+	c := newDownSegCache()
+
+	// Seed a full retained window. Delivering only a high sequence must not
+	// make the producer believe the lower retained segments were consumed.
+	c.mu.Lock()
+	for seq := uint64(0); seq < downsegAdaptiveSegs; seq++ {
+		c.segs[seq] = []byte{byte(seq)}
+	}
+	c.produced = downsegAdaptiveSegs
+	c.mu.Unlock()
+
+	if p, ok, gone := c.get(downsegAdaptiveSegs - 1); !ok || gone || len(p) != 1 {
+		t.Fatalf("high out-of-order pull: p=%v ok=%v gone=%v", p, ok, gone)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if got := c.undeliveredCountLocked(); got != downsegAdaptiveSegs-1 {
+		t.Fatalf("retained count after high pull = %d, want %d", got, downsegAdaptiveSegs-1)
+	}
+}

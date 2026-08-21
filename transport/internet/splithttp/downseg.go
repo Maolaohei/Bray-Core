@@ -253,15 +253,12 @@ func (c *downSegCache) append(b []byte) {
 	}
 }
 
-// undeliveredCountLocked returns the number of produced-but-not-yet-
-// delivered segments (produced minus delivered watermark). Caller holds
-// c.mu. The in-flight segment at index produced is not yet finalized, so it
-// is not counted by this formula until it commits (produced++).
+// undeliveredCountLocked returns the actual number of retained segments.
+// Caller holds c.mu. lastPulled is a high watermark and can jump ahead when
+// H2 pull workers finish out of order; using produced-lastPulled would then
+// incorrectly report spare capacity while lower segments are still retained.
 func (c *downSegCache) undeliveredCountLocked() uint64 {
-	if c.produced > c.lastPulled {
-		return c.produced - c.lastPulled
-	}
-	return 0
+	return uint64(len(c.segs))
 }
 
 // get returns the payload of a FINALIZED segment seq, and whether it is

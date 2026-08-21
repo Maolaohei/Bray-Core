@@ -19,11 +19,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Update REALITY submodule to latest
-        run: |
-          git -C REALITY fetch origin main
-          git -C REALITY checkout main
-          git -C REALITY reset --hard origin/main
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -64,11 +59,11 @@ jobs:
           # Product-facing Advantage suite (scenario-bound). Avoid ConnectionStorm here
           # (slow/noisy); keep Modes/TTFB/Burst/Memory + packet-up header/seq micros.
           go test -run=^$ \
-            -bench='Benchmark(XHTTP_TTFB|XHTTP_Burst_|XHTTP_MemoryAllocations|XHTTP_Modes|GetRequestHeader|FormatSeqInt64)' \
+            -bench='Benchmark(XHTTP_TTFB|XHTTP_Burst_|XHTTP_MemoryAllocations|XHTTP_Modes|XHTTP_H2_DsegModes|GetRequestHeader|FormatSeqInt64)' \
             -benchmem -count=3 -timeout=420s \
             ./transport/internet/splithttp/ \
             2> bench_results/new_xhttp_core.err | tee bench_results/new_xhttp_core.raw | \
-            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            grep -E '^[[:space:]]*(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' | sed -E 's/^[[:space:]]+//' \
             > bench_results/new_xhttp_core.txt || true
           if ! grep -q '^Benchmark' bench_results/new_xhttp_core.txt; then
             echo "XHTTP core benchmark produced no Benchmark lines" | tee bench_results/new_xhttp_core.txt
@@ -82,7 +77,7 @@ jobs:
           go test -run=^$ -bench=BenchmarkXMUX -benchmem -count=3 -timeout=180s \
             ./transport/internet/splithttp/ \
             2> bench_results/new_xmux.err | tee bench_results/new_xmux.raw | \
-            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            grep -E '^[[:space:]]*(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' | sed -E 's/^[[:space:]]+//' \
             > bench_results/new_xmux.txt || true
           if ! grep -q '^Benchmark' bench_results/new_xmux.txt; then
             echo "XMUX benchmark produced no Benchmark lines" | tee bench_results/new_xmux.txt
@@ -96,7 +91,7 @@ jobs:
           go test -run=^$ -bench='Benchmark(Score|ClampRTT)' -benchmem -count=3 -timeout=180s \
             ./transport/internet/ \
             2> bench_results/new_happy.err | tee bench_results/new_happy.raw | \
-            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            grep -E '^[[:space:]]*(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' | sed -E 's/^[[:space:]]+//' \
             > bench_results/new_happy.txt || true
           if ! grep -q '^Benchmark' bench_results/new_happy.txt; then
             echo "Happy Eyeballs benchmark produced no Benchmark lines" | tee bench_results/new_happy.txt
@@ -112,7 +107,7 @@ jobs:
           go test -run=^$ -bench='Benchmark(Warmup|Metrics|XMUXMetrics)' -benchmem -count=3 -timeout=180s \
             ./transport/internet/ ./transport/internet/splithttp/ \
             2> bench_results/new_warmup.err | tee bench_results/new_warmup.raw | \
-            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            grep -E '^[[:space:]]*(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' | sed -E 's/^[[:space:]]+//' \
             > bench_results/new_warmup.txt || true
           if ! grep -q '^Benchmark' bench_results/new_warmup.txt; then
             echo "Warmup/Metrics benchmark produced no Benchmark lines" | tee bench_results/new_warmup.txt
@@ -126,7 +121,7 @@ jobs:
           go test -run=^$ -bench='Benchmark(DecodeHeader|MarshalAddons)' -benchmem -count=3 -timeout=180s \
             ./proxy/vless/encoding/ \
             2> bench_results/new_vless.err | tee bench_results/new_vless.raw | \
-            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            grep -E '^[[:space:]]*(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' | sed -E 's/^[[:space:]]+//' \
             > bench_results/new_vless.txt || true
           if ! grep -q '^Benchmark' bench_results/new_vless.txt; then
             echo "VLESS benchmark produced no Benchmark lines" | tee bench_results/new_vless.txt
@@ -140,7 +135,7 @@ jobs:
           go test -run=^$ -bench='Benchmark(NewBuffer|Copy|SplitBytes)' -benchmem -count=3 -timeout=180s \
             ./common/buf/ \
             2> bench_results/new_buf.err | tee bench_results/new_buf.raw | \
-            grep -E '^(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' \
+            grep -E '^[[:space:]]*(Benchmark|PASS|FAIL|ok|pkg:|goos:|goarch:|cpu:)' | sed -E 's/^[[:space:]]+//' \
             > bench_results/new_buf.txt || true
           if ! grep -q '^Benchmark' bench_results/new_buf.txt; then
             echo "Buffer benchmark produced no Benchmark lines" | tee bench_results/new_buf.txt
