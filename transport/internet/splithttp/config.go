@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -377,6 +378,7 @@ var knownBrayControlKeys = map[string]struct{}{
 	"x-bray-sse":                 {},
 	"x-bray-x-accel":             {},
 	"x-bray-dseg":                {},
+	"x-bray-stream-one-hard-cap": {},
 }
 
 func validateBrayControlHeaders(headers map[string]string) {
@@ -554,6 +556,34 @@ func (c *Config) downsegEnabled() bool {
 		}
 	}
 	return true
+}
+
+// GetStreamOneHardCap returns the local server-only hard lifetime for
+// unauthenticated stream-one connections. The default remains 4h; trusted
+// operators can raise it in whole seconds without removing the DoS backstop.
+// Values outside [10m, 24h] fall back to the safe default.
+func (c *Config) GetStreamOneHardCap() time.Duration {
+	const (
+		defaultCap = 4 * time.Hour
+		minCap     = 10 * time.Minute
+		maxCap     = 24 * time.Hour
+	)
+	if c == nil || c.Headers == nil {
+		return defaultCap
+	}
+	v, ok := c.Headers["x-bray-stream-one-hard-cap"]
+	if !ok {
+		return defaultCap
+	}
+	seconds, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return defaultCap
+	}
+	d := time.Duration(seconds) * time.Second
+	if d < minCap || d > maxCap {
+		return defaultCap
+	}
+	return d
 }
 
 func (c *Config) GetNormalizedUplinkHTTPMethod() string {

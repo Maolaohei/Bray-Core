@@ -1057,7 +1057,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			// A hard absolute cap (streamOneHardCapLifetime) still bounds
 			// hostile long-lived connections regardless of activity.
 			httpSC.lastActive.Store(time.Now().UnixNano())
-			httpSC.hardCapTimer = time.AfterFunc(streamOneHardCapLifetime, func() {
+			httpSC.hardCapTimer = time.AfterFunc(h.config.GetStreamOneHardCap(), func() {
 				_ = httpSC.Close()
 			})
 			httpSC.idleTimer = time.AfterFunc(streamOneIdleLifetime, func() {
