@@ -22,6 +22,7 @@ package splithttp
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -124,7 +125,10 @@ type DownSegPuller struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	// prod is the optional dseg production leg closed on Close (EOF server-side).
+	// prod is the optional dseg production leg. Its response body has no
+	// downlink payload (bytes are carried by segment pulls), so it is watched
+	// solely for a peer-side close that would otherwise strand packet-up POSTs
+	// on a deleted server session.
 	prod io.Closer
 
 	mu          sync.Mutex
@@ -158,7 +162,46 @@ func NewDownSegPuller(ctx context.Context, client *DefaultDialerClient, base *ur
 		p.wg.Add(1)
 		go p.worker()
 	}
+	if prodReader, ok := p.prod.(io.Reader); ok {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			monitorProductionLeg(p.ctx, prodReader, p.failProductionLeg)
+		}()
+	}
 	return p
+}
+
+// monitorProductionLeg blocks until the production GET ends. A production
+// GET carries no application bytes in segment mode; segment pulls carry the
+// downlink. Therefore any peer-side EOF/error while the puller is active
+// means the server has torn down its uploadQueue and this logical packet-up
+// connection must fail instead of continuing POSTs with a stale sessionId.
+func monitorProductionLeg(ctx context.Context, prod io.Reader, fail func(error)) {
+	var scratch [1]byte
+	for {
+		_, err := prod.Read(scratch[:])
+		if err == nil {
+			if ctx.Err() != nil {
+				return
+			}
+			continue
+		}
+		if ctx.Err() == nil {
+			fail(fmt.Errorf("XHTTP dseg production leg closed: %w", err))
+		}
+		return
+	}
+}
+
+func (p *DownSegPuller) failProductionLeg(err error) {
+	p.mu.Lock()
+	if !p.closed && p.fatal == nil {
+		p.fatal = err
+	}
+	p.mu.Unlock()
+	p.notify()
+	p.cancel()
 }
 
 // prefetchAheadSegs is how many segments may be reserved (fetched or
@@ -308,6 +351,16 @@ func (p *DownSegPuller) Read(b []byte) (int, error) {
 	for {
 		p.mu.Lock()
 		c := p.consumedSeq
+		// A dead production GET means the server has already discarded this
+		// packet-up session. Do not drain prefetched bytes first: doing so lets
+		// the upload side keep POSTing on the stale session for arbitrarily
+		// longer under a slow reader.
+		if p.fatal != nil {
+			err := p.fatal
+			p.fatal = nil
+			p.mu.Unlock()
+			return 0, err
+		}
 		if seg, ok := p.buf[c]; ok {
 			delete(p.buf, c)
 			p.mu.Unlock()
@@ -332,12 +385,6 @@ func (p *DownSegPuller) Read(b []byte) (int, error) {
 			p.notify() // consumption freed prefetch budget
 			continue
 		}
-		if p.fatal != nil {
-			err := p.fatal
-			p.fatal = nil
-			p.mu.Unlock()
-			return 0, err
-		}
 		if p.eofAt != 0 && c >= p.eofAt {
 			p.mu.Unlock()
 			return 0, io.EOF
@@ -360,9 +407,12 @@ func (p *DownSegPuller) Close() error {
 	p.mu.Unlock()
 	p.notify()
 	p.cancel()
-	p.wg.Wait()
+	var err error
 	if p.prod != nil {
-		return p.prod.Close()
+		// The production-leg monitor is blocked in Read. Close before waiting
+		// so local shutdown cannot deadlock behind that monitor.
+		err = p.prod.Close()
 	}
-	return nil
+	p.wg.Wait()
+	return err
 }

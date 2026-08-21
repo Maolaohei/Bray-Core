@@ -7,6 +7,7 @@ package splithttp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,61 @@ import (
 
 	"github.com/xtls/xray-core/common/signal/done"
 )
+
+type productionLegReader struct {
+	err error
+}
+
+func (r *productionLegReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestMonitorProductionLegReportsUnexpectedEOF(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	got := make(chan error, 1)
+	go monitorProductionLeg(ctx, &productionLegReader{err: io.ErrUnexpectedEOF}, func(err error) {
+		got <- err
+	})
+
+	select {
+	case err := <-got:
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("monitor error = %v, want unexpected EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("production-leg EOF was not reported")
+	}
+}
+
+func TestMonitorProductionLegIgnoresLocalClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got := make(chan error, 1)
+	go monitorProductionLeg(ctx, &productionLegReader{err: io.EOF}, func(err error) {
+		got <- err
+	})
+
+	select {
+	case err := <-got:
+		t.Fatalf("monitor reported local shutdown as production failure: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestDownSegPullerProductionFailurePreemptsBufferedSegments(t *testing.T) {
+	want := errors.New("production GET closed")
+	p := &DownSegPuller{
+		buf:   map[uint64][]byte{0: []byte("stale")},
+		fatal: want,
+		wake:  make(chan struct{}, 1),
+	}
+
+	_, err := p.Read(make([]byte, 16))
+	if !errors.Is(err, want) {
+		t.Fatalf("Read error = %v, want production failure %v", err, want)
+	}
+}
 
 // codeRecorder captures the final status code written by the handler.
 type codeRecorder struct {
