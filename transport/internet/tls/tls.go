@@ -137,13 +137,56 @@ func (c *UConn) NegotiatedProtocol() string {
 	return state.NegotiatedProtocol
 }
 
+// enableUTLSResumption re-expresses a fingerprinted ClientHelloID as an
+// equivalent custom spec plus a trailing placeholder PSK extension. Browser
+// presets like HelloChrome_133 ship &SessionTicketExtension{} but NO
+// PreSharedKeyExtension, yet TLS 1.3 resumption requires one: uLoadSession ->
+// initPskExt finds pskExtension == nil and silently skips loading the cached
+// session (skipResumptionOnNilExtension defaults to true for preset IDs), so
+// every dial paid a full handshake even with a ClientSessionCache configured.
+//
+// The injection must happen at the SPEC level: uconn.Extensions is rebuilt
+// from the spec on every BuildHandshakeState (ApplyPreset copies p.Extensions),
+// so appending to it before the handshake is wiped. With HelloCustom + the
+// patched spec the marshaled ClientHello is identical to the stock fingerprint
+// for full handshakes — an uninitialized UtlsPreSharedKeyExtension has
+// Len()==0 and emits no bytes — while resumed handshakes carry PSK
+// identity+binder exactly like a real browser.
+func enableUTLSResumption(id *utls.ClientHelloID) (*utls.ClientHelloSpec, bool) {
+	if id == nil {
+		return nil, false
+	}
+	spec, err := utls.UTLSIdToSpec(*id)
+	if err != nil {
+		return nil, false
+	}
+	// A utls invariant requires the PSK extension to be the LAST entry.
+	spec.Extensions = append(spec.Extensions, &utls.UtlsPreSharedKeyExtension{})
+	return &spec, true
+}
+
+func newUConn(c net.Conn, config *tls.Config, fingerprint *utls.ClientHelloID) *utls.UConn {
+	cfg := copyConfig(config)
+	if cfg.ClientSessionCache == nil || fingerprint == nil {
+		return utls.UClient(c, cfg, *fingerprint)
+	}
+	spec, ok := enableUTLSResumption(fingerprint)
+	if !ok {
+		return utls.UClient(c, cfg, *fingerprint)
+	}
+	uconn := utls.UClient(c, cfg, utls.HelloCustom)
+	// ApplyPreset errors only if the spec itself is malformed; we built it
+	// from a valid fingerprint, so ignore the error and keep the conn.
+	_ = uconn.ApplyPreset(spec)
+	return uconn
+}
+
 func UClient(c net.Conn, config *tls.Config, fingerprint *utls.ClientHelloID) net.Conn {
-	utlsConn := utls.UClient(c, copyConfig(config), *fingerprint)
-	return &UConn{UConn: utlsConn}
+	return &UConn{UConn: newUConn(c, config, fingerprint)}
 }
 
 func GeneraticUClient(c net.Conn, config *tls.Config) *utls.UConn {
-	return utls.UClient(c, copyConfig(config), utls.HelloChrome_Auto)
+	return newUConn(c, config, &utls.HelloChrome_Auto)
 }
 
 func convertCurvePreferences(curves []tls.CurveID) []utls.CurveID {
@@ -156,6 +199,17 @@ func convertCurvePreferences(curves []tls.CurveID) []utls.CurveID {
 	}
 	return out
 }
+
+// uGlobalSessionCache backs TLS session resumption for uTLS (fingerprinted)
+// connections. The stdlib path already resumes via globalSessionCache in
+// tls/config.go; without an equivalent here, every uTLS dial paid a full
+// handshake — both a latency cost (extra RTT + cert-chain work on XMUX pool
+// rotation / pre-connect dials) and a fingerprint anomaly: real browsers
+// resume sessions aggressively, so never-resuming uTLS conns deviate from
+// the Chrome baseline they imitate. VerifyPeerCertificate is still invoked
+// by utls on resumed connections (with the session's peer certificates), so
+// pinned-CA / verifyPeerCertByName checks keep working.
+var uGlobalSessionCache = utls.NewLRUClientSessionCache(1024)
 
 func copyConfig(c *tls.Config) *utls.Config {
 	config := &utls.Config{
@@ -170,10 +224,17 @@ func copyConfig(c *tls.Config) *utls.Config {
 		NextProtos:                     c.NextProtos,
 		MinVersion:                     c.MinVersion,
 		MaxVersion:                     c.MaxVersion,
+		SessionTicketsDisabled:         c.SessionTicketsDisabled,
+		// Conceal the (still-empty) placeholder PSK extension on full
+		// handshakes; utls rejects an empty PSK outright without this.
+		OmitEmptyPsk: true,
 		// CipherSuites: used by HelloGolang / custom specs; TLS 1.3 suites remain non-configurable in utls.
 		// Enables anti-NIN / restricted cipher lists when fingerprint is not pure browser presets.
 		CipherSuites:     append([]uint16(nil), c.CipherSuites...),
 		CurvePreferences: convertCurvePreferences(c.CurvePreferences),
+	}
+	if c.ClientSessionCache != nil {
+		config.ClientSessionCache = uGlobalSessionCache
 	}
 	return config
 }
