@@ -68,6 +68,24 @@ const (
 	// downsegInitialAllocFloor avoids allocating a full 1MiB backing array
 	// for a short web/API response while retaining room for normal write bursts.
 	downsegInitialAllocFloor = 64 << 10
+	// downsegRepullGrace retains a DELIVERED segment for this long after its
+	// successful get(), so the client can re-pull it if the GET response was
+	// lost on the way back (client pull deadline exceeded, H2 stream reset
+	// after the server handed over the payload). Without the grace window,
+	// deliver-on-get deletes the segment immediately and the client's retry
+	// observes 410 Gone for a segment it never received — which the puller
+	// treats as a fatal protocol error and tears the whole download down
+	// (observed as curl(18) under concurrent-load WAN contention).
+	downsegRepullGrace = 30 * time.Second
+
+	// downsegRepullMaxBytes caps the total payload bytes retained across
+	// the repull grace window per session (oldest delivered entries are
+	// dropped first when exceeded). Without this cap a fast download would
+	// retain grace-periods' worth of payload (e.g. 10 MB/s x 30 s = 300 MB
+	// per session); retries under contention arrive within a few seconds,
+	// so a modest byte budget preserves the re-pull semantics where they
+	// matter while bounding worst-case memory.
+	downsegRepullMaxBytesDefault = 16 << 20 // 16 MiB
 	// downsegCommitInterval bounds how long a segment may keep receiving
 	// bytes before it is committed (made readable), even when far below
 	// downsegSize. This is what makes a sub-1MiB stream (VLESS handshake,
@@ -78,6 +96,9 @@ const (
 	// Bounded: a busy connection commits at most once per interval.
 	downsegCommitInterval = 10 * time.Millisecond
 )
+
+// downsegRepullMaxBytes is a var so tests can shrink the byte cap.
+var downsegRepullMaxBytes = downsegRepullMaxBytesDefault
 
 // downSegCache holds produced downlink segments for one session.
 type downSegCache struct {
@@ -118,6 +139,23 @@ type downSegCache struct {
 	// packet) becomes pullable without waiting to fill 1 MiB — otherwise
 	// any sub-1MiB transaction deadlocks.
 	segStartedAt int64
+	// deliveredAtNs remembers when each delivered segment was handed out
+	// (unix nanos). Delivered segments are kept for downsegRepullGrace so
+	// the client can re-pull them if the GET response was lost in transit;
+	// after the grace they are dropped. Bounded: a delivered segment costs
+	// memory for at most the grace period, and the append() backpressure
+	// gate counts undelivered entries only.
+	deliveredAtNs map[uint64]int64
+	// deliveredSegs holds the payload copies backing the repull grace
+	// window above; entries are dropped together with deliveredAtNs.
+	deliveredSegs map[uint64][]byte
+	// deliveredBytes is the sum of payload bytes currently retained in
+	// deliveredSegs (tracked to enforce downsegRepullMaxBytes).
+	deliveredBytes int
+	// deliveredSeq / deliveredOrder give a monotonic delivery order for
+	// oldest-first eviction under the byte cap (nanosecond timestamps tie).
+	deliveredSeq   uint64
+	deliveredOrder map[uint64]uint64
 	// final is true once finalize() ran (stream complete; no more
 	// segments will be produced).
 	final bool
@@ -140,8 +178,11 @@ type downSegCache struct {
 func newDownSegCache() *downSegCache {
 	now := time.Now().UnixNano()
 	c := &downSegCache{
-		segs:         make(map[uint64][]byte, downsegMaxSegs),
-		segSizeBySeq: make(map[uint64]int, downsegMaxSegs),
+		segs:           make(map[uint64][]byte, downsegMaxSegs),
+		segSizeBySeq:   make(map[uint64]int, downsegMaxSegs),
+		deliveredAtNs:  make(map[uint64]int64, downsegMaxSegs),
+		deliveredSegs:  make(map[uint64][]byte, downsegMaxSegs),
+		deliveredOrder: make(map[uint64]uint64, downsegMaxSegs),
 	}
 	c.spaceCond = sync.NewCond(&c.mu)
 	c.pullAtNs.Store(now)
@@ -303,6 +344,24 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	// Gone and killing the download).
 	p, ok := c.segs[seq]
 	if !ok {
+		// Repull grace: the segment may have been delivered moments ago
+		// with the response lost on the way back (client pull deadline /
+		// H2 reset). Within downsegRepullGrace we still hold a copy —
+		// re-deliver it instead of reporting Gone (a false 410 here is
+		// fatal for the client's puller). After the grace the copy is
+		// dropped and Gone is genuinely correct.
+		if at, was := c.deliveredAtNs[seq]; was {
+			if time.Now().UnixNano()-at < int64(downsegRepullGrace) {
+				if kept, have := c.deliveredSegs[seq]; have {
+					if seq+1 > c.lastPulled {
+						c.lastPulled = seq + 1
+					}
+					return kept, true, false
+				}
+			}
+			delete(c.deliveredAtNs, seq)
+			delete(c.deliveredSegs, seq)
+		}
 		return nil, false, true // already delivered or overflow-evicted
 	}
 	// Advance the consumption watermark so the overflow accounting tracks
@@ -310,14 +369,67 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	if seq+1 > c.lastPulled {
 		c.lastPulled = seq + 1
 	}
-	// Deliver-on-get: the payload is handed to the client; drop it from the
-	// cache so retained entries equal undelivered segments only.
+	// Deliver-on-get with repull grace: hand the payload to the client but
+	// retain a copy for downsegRepullGrace so a lost-response retry can be
+	// served. The retained copy does not count against the append()
+	// backpressure bound (that gate tracks undelivered entries only), but
+	// total retained bytes are capped by downsegRepullMaxBytes (oldest
+	// entries dropped first) and each entry expires after the grace.
+	c.retainDeliveredLocked(seq, p)
 	delete(c.segs, seq)
 	// Clean up the size bookkeeping now that the segment is gone.
 	delete(c.segSizeBySeq, seq)
 	// Wake a backpressured producer: a slot freed, so append() may resume.
 	c.spaceCond.Broadcast()
 	return p, true, false
+}
+
+// retainDeliveredLocked records a delivered payload in the repull grace
+// window: expire stale entries, enforce the byte cap by dropping the oldest
+// delivered entries first, then remember this one. Caller holds c.mu.
+func (c *downSegCache) retainDeliveredLocked(seq uint64, p []byte) {
+	now := time.Now().UnixNano()
+	for s, at := range c.deliveredAtNs {
+		if now-at >= int64(downsegRepullGrace) {
+			c.dropDeliveredLocked(s)
+		}
+	}
+	// If re-delivering an entry already retained (shouldn't normally
+	// happen — a retained seq is served from deliveredSegs, not segs),
+	// drop the old copy first so accounting stays exact.
+	if _, dup := c.deliveredAtNs[seq]; dup {
+		c.dropDeliveredLocked(seq)
+	}
+	c.deliveredAtNs[seq] = now
+	// deliveredSeq is a monotonic delivery counter used as the eviction
+	// order (raw timestamps can tie within the same nanosecond).
+	c.deliveredSeq++
+	c.deliveredOrder[seq] = c.deliveredSeq
+	c.deliveredSegs[seq] = p
+	c.deliveredBytes += len(p)
+	for c.deliveredBytes > downsegRepullMaxBytes {
+		oldest, oldestOrd := uint64(0), uint64(1<<63-1)
+		found := false
+		for s, ord := range c.deliveredOrder {
+			if ord < oldestOrd {
+				oldest, oldestOrd, found = s, ord, true
+			}
+		}
+		if !found {
+			break
+		}
+		c.dropDeliveredLocked(oldest)
+	}
+}
+
+// dropDeliveredLocked removes one retained delivered segment. Caller holds c.mu.
+func (c *downSegCache) dropDeliveredLocked(seq uint64) {
+	if p, ok := c.deliveredSegs[seq]; ok {
+		c.deliveredBytes -= len(p)
+		delete(c.deliveredSegs, seq)
+	}
+	delete(c.deliveredAtNs, seq)
+	delete(c.deliveredOrder, seq)
 }
 
 // commitIfStaleLazy commits the in-flight segment if it has been receiving
@@ -383,6 +495,12 @@ func (c *downSegCache) shutdown() {
 	c.mu.Lock()
 	c.stopped = true
 	c.final = true
+	// Free the repull grace window immediately: the session is gone, no
+	// client can re-pull anything anymore.
+	clear(c.deliveredAtNs)
+	clear(c.deliveredSegs)
+	clear(c.deliveredOrder)
+	c.deliveredBytes = 0
 	c.spaceCond.Broadcast()
 	c.mu.Unlock()
 }
