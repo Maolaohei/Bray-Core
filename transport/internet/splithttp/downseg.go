@@ -19,10 +19,13 @@ package splithttp
 //     is expected to keep up; a far-ahead producer would leak memory).
 
 import (
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/xtls/xray-core/common/randpool"
 )
 
 const (
@@ -63,8 +66,12 @@ const (
 	// media-style segments instead of a perfectly uniform 1 MiB cadence.
 	downsegSizeJitterMax = downsegSize / 10
 	// downsegSizeMin floors segments so the pull overhead amortizes even
-	// with jitter drawn low.
-	downsegSizeMin = downsegSize / 2
+	// with jitter drawn low. Below the old 512KiB floor: the heavy-tail
+	// size distribution occasionally produces small segments (real HLS
+	// does too — scene changes / discontinuities), and 256KiB still
+	// amortizes per-segment HTTP overhead acceptably while letting the
+	// distribution's left side breathe.
+	downsegSizeMin = downsegSize / 4
 	// downsegInitialAllocFloor avoids allocating a full 1MiB backing array
 	// for a short web/API response while retaining room for normal write bursts.
 	downsegInitialAllocFloor = 64 << 10
@@ -209,11 +216,38 @@ func (c *downSegCache) downsegSizeFor(seq uint64) int {
 	return s
 }
 
-// downsegSizeJitterFn yields the per-segment jitter delta. It is a package
-// variable so tests can substitute a fixed value for deterministic segment
-// sizes; the production source is right-skewed around zero.
+// downsegSizeJitterFn yields the per-segment size delta (bytes added to
+// downsegSize). It is a package variable so tests can substitute a fixed
+// value for deterministic segment sizes.
+//
+// The production source draws from a lognormal-style heavy-tailed
+// distribution (median ≈ -0.1 MiB below nominal, mean ≈ 0): most segments
+// land moderately below the 1 MiB nominal, with occasional much larger and
+// occasional small segments — mirroring how real HLS/DASH segment sizes
+// vary with encoded bitrate rather than forming a tight uniform band.
+// Methodology follows XMC finalmask padding presets: preserve the
+// statistical shape of genuine traffic; never replay exact captured values.
 var downsegSizeJitterFn = func() int32 {
-	return biasedRangeRand(-downsegSizeJitterMax/2, downsegSizeJitterMax)
+	// Box-Muller: two uniform draws -> one standard normal.
+	u1 := float64(randpool.Global.Uint32()) / (1 << 32)
+	u2 := float64(randpool.Global.Uint32()) / (1 << 32)
+	if u1 <= 0 { // guard log(0)
+		u1 = 1.0 / (1 << 32)
+	}
+	z := math.Sqrt(-2*math.Log(u1)) * math.Cos(2*math.Pi*u2)
+	// ln(size) = ln(median) + sigma*z with median=0.9MiB, sigma=0.45:
+	// mean ≈ 1.0MiB, P(>2MiB) ≈ 4%, tiny segments rare (<0.3%).
+	const medianBytes = 0.9 * 1024 * 1024
+	const sigma = 0.45
+	size := medianBytes * math.Exp(sigma*z)
+	delta := int(size) - downsegSize
+	if delta > math.MaxInt32 {
+		delta = math.MaxInt32
+	}
+	if delta < -math.MaxInt32 {
+		delta = -math.MaxInt32 + 1
+	}
+	return int32(delta)
 }
 
 // NOTE: there is deliberately NO sliding-window/loIndex eviction in this
