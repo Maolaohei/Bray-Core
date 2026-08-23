@@ -271,11 +271,17 @@ var downsegSizeJitterFn = func() int32 {
 // to spurious 410s: the producer stalls like TCP flow control instead of the
 // cache evicting the very segment the client is about to pull.
 func (c *downSegCache) append(b []byte) {
-	if len(b) == 0 || c.stopped {
+	if len(b) == 0 {
 		return
 	}
+	// stopped is written under mu by finalize/shutdown; read it under mu too.
+	// The lock-free pre-check below was a data race with session teardown
+	// (race detector: append vs shutdown, downseg.go:274 vs :530).
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
 	c.writeAtNs.Store(time.Now().UnixNano())
 	off := 0
 	for off < len(b) {
