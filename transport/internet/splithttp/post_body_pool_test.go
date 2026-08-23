@@ -2,6 +2,7 @@ package splithttp
 
 import (
 	"bytes"
+	"runtime/debug"
 	"testing"
 	"time"
 	"unsafe"
@@ -128,6 +129,13 @@ func TestUploadQueue_PooledReturnOnDuplicate(t *testing.T) {
 
 // Push failure (queue full) must return the pooled payload.
 func TestUploadQueue_PooledReturnOnPushFail(t *testing.T) {
+	// The identity assertion below assumes sync.Pool LIFO reuse on this
+	// goroutine. A GC between freePostBody and the next alloc drops the
+	// pooled buffer (victim cache), making the next alloc return a different
+	// address — a CI-load flake, not a product bug. Pin the GC off for the
+	// critical section.
+	oldGC := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(oldGC)
 	q := NewUploadQueue(2)
 	// Fill the channel: the first two pushes land in the channel buffer.
 	if err := q.Push(Packet{Payload: allocPostBody(4096), Seq: 0, Pooled: true}); err != nil {
