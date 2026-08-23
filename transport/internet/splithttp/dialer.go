@@ -1293,6 +1293,37 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			waitInflight := func() { inflight.Wait() }
 			defer waitInflight()
 
+			// L4 failure granularity: rescue closure for postPacketReliable.
+			// When the retry budget on the current outer connection is
+			// exhausted, dial a FRESH XMUX client (same dest/config) and let
+			// the seq replay there. Only if that also fails does the upload
+			// session die — one bad H2/TCP connection no longer resets every
+			// inner stream on the session.
+			rescueClient := func(rctx context.Context) (DialerClient, error) {
+				newHTTP, newXmux, err := getHTTPClient(rctx, dest, streamSettings)
+				if err != nil {
+					return nil, err
+				}
+				if newXmux == nil {
+					return newHTTP, nil // non-XMUX transport: HTTP client alone is the fresh leg
+				}
+				if !newXmux.Borrow() {
+					return nil, errors.New("XMUX: rescue borrow failed")
+				}
+				clientMu.Lock()
+				prev := ownedUploadXmux
+				ownedUploadXmux = newXmux
+				clientMu.Unlock()
+				if prev != nil {
+					prev.Release()
+				}
+				if newHTTP != nil {
+					dynamicHTTPClient = newHTTP
+				}
+				dynamicXmuxClient = newXmux
+				return newHTTP, nil
+			}
+
 			for {
 				if uploadFailed.Load() || ctx.Err() != nil {
 					break
@@ -1413,7 +1444,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 						defer inflight.Done()
 						defer func() { <-slots }()
 						// postPacketReliable takes ownership of chunk (snapshot + release).
-						if err := postPacketReliable(ctx, client, requestURLStr, sessionId, seqStr, chunk); err != nil {
+						if err := postPacketReliable(ctx, client, requestURLStr, sessionId, seqStr, chunk, rescueClient); err != nil {
 							failUpload(err, seqStr)
 						}
 					}(client, seqStr, chunk)

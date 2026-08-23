@@ -83,7 +83,7 @@ func TestPostPacketReliable_RetriesSameSeq(t *testing.T) {
 	s := &stubDialerClient{}
 	s.failN.Store(2) // first two fail, third succeeds
 	mb := buf.MergeBytes(nil, []byte("hello-packet"))
-	err := postPacketReliable(context.Background(), s, "https://x/p", "sid", "7", mb)
+	err := postPacketReliable(context.Background(), s, "https://x/p", "sid", "7", mb, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestPostPacketReliable_Exhausts(t *testing.T) {
 	s.failN.Store(100)
 	mb := buf.MergeBytes(nil, []byte("x"))
 	start := time.Now()
-	err := postPacketReliable(context.Background(), s, "u", "s", "0", mb)
+	err := postPacketReliable(context.Background(), s, "u", "s", "0", mb, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -118,13 +118,70 @@ func TestPostPacketReliable_Exhausts(t *testing.T) {
 	}
 }
 
+// TestPostPacketReliable_RescueOnFreshConn covers L4 failure granularity:
+// after the retry budget is exhausted on the original client, the rescue
+// closure supplies a FRESH outer connection and the same seq replay
+// succeeds there — no whole-session teardown.
+func TestPostPacketReliable_RescueOnFreshConn(t *testing.T) {
+	bad := &stubDialerClient{}
+	bad.failN.Store(100) // original outer connection: permanently failing
+	good := &stubDialerClient{}
+	rescued := false
+	rescue := func(ctx context.Context) (DialerClient, error) {
+		rescued = true
+		return good, nil
+	}
+	mb := buf.MergeBytes(nil, []byte("rescue-me"))
+	err := postPacketReliable(context.Background(), bad, "u", "s", "42", mb, rescue)
+	if err != nil {
+		t.Fatalf("rescue should succeed: %v", err)
+	}
+	if !rescued {
+		t.Fatal("rescue closure was not called")
+	}
+	if good.posts.Load() != 1 {
+		t.Fatalf("fresh conn posts=%d want 1", good.posts.Load())
+	}
+	if bad.posts.Load() != int32(packetUploadMaxAttempts) {
+		t.Fatalf("original conn posts=%d want %d", bad.posts.Load(), packetUploadMaxAttempts)
+	}
+	good.mu.Lock()
+	seq := good.lastSeq
+	good.mu.Unlock()
+	if seq != "42" {
+		t.Fatalf("rescued seq=%s want 42 (same seq replay)", seq)
+	}
+}
+
+// TestPostPacketReliable_RescueFailsStillErrors verifies that when the
+// rescue leg also fails, the error surfaces and the session tears down.
+func TestPostPacketReliable_RescueFailsStillErrors(t *testing.T) {
+	bad := &stubDialerClient{}
+	bad.failN.Store(100)
+	worse := &stubDialerClient{}
+	worse.failN.Store(100)
+	calls := 0
+	rescue := func(ctx context.Context) (DialerClient, error) {
+		calls++
+		return worse, nil
+	}
+	mb := buf.MergeBytes(nil, []byte("x"))
+	err := postPacketReliable(context.Background(), bad, "u", "s", "0", mb, rescue)
+	if err == nil {
+		t.Fatal("expected error when both legs fail")
+	}
+	if calls != 1 {
+		t.Fatalf("rescue called %d times, want exactly 1", calls)
+	}
+}
+
 func TestPostPacketReliable_RespectsCancel(t *testing.T) {
 	s := &stubDialerClient{}
 	s.failN.Store(100)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	mb := buf.MergeBytes(nil, []byte("x"))
-	err := postPacketReliable(ctx, s, "u", "s", "0", mb)
+	err := postPacketReliable(ctx, s, "u", "s", "0", mb, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}
@@ -232,7 +289,7 @@ func TestPostPacketReliable_ConcurrentSlots(t *testing.T) {
 		go func(seq int) {
 			defer wg.Done()
 			mb := buf.MergeBytes(nil, []byte("p"))
-			_ = postPacketReliable(context.Background(), s, "u", "s", strconv.Itoa(seq), mb)
+			_ = postPacketReliable(context.Background(), s, "u", "s", strconv.Itoa(seq), mb, nil)
 		}(i)
 	}
 	// Wait until all N have entered PostPacket.

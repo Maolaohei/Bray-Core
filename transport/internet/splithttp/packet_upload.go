@@ -276,6 +276,14 @@ type packetBytesPoster interface {
 // Same seqStr is reused across attempts so the server never sees a hole
 // from a failed mid-flight POST.
 //
+// L4 failure-granularity: when the retry budget on `client` is exhausted,
+// `rescue` (if non-nil) is called ONCE to obtain a fresh outer connection
+// (new TCP/TLS/H2 stream, same XMUX session id + seqStr — protocol-legal
+// replay) and the full attempt budget runs again there. Only if the
+// rescued attempt also fails is the error returned and the whole upload
+// session torn down. This keeps a single bad outer connection from
+// resetting every inner stream multiplexed on the session.
+//
 // Ownership: takes payload. On entry a single durable byte snapshot is made
 // (retry source); payload is released immediately after the snapshot.
 // Prefer PostPacketBytes when available (no MultiBuffer/FromBytes per attempt).
@@ -287,6 +295,7 @@ func postPacketReliable(
 	sessionId string,
 	seqStr string,
 	payload buf.MultiBuffer,
+	rescue func(context.Context) (DialerClient, error),
 ) error {
 	if client == nil {
 		if !payload.IsEmpty() {
@@ -307,6 +316,35 @@ func postPacketReliable(
 	// free durable after all attempts (success or failure)
 	defer freeDurable(durable, durableKind, durableLocalRef)
 
+	lastErr := postPacketReliableOnce(ctx, client, url, sessionId, seqStr, durable)
+	if lastErr == nil {
+		return nil
+	}
+	if rescue != nil && ctx.Err() == nil {
+		if newClient, rerr := rescue(ctx); rerr == nil && newClient != nil {
+			errors.LogInfoInner(ctx, lastErr, "XHTTP packet-up POST exhausted on outer conn; rescuing seq=", seqStr)
+			err := postPacketReliableOnce(ctx, newClient, url, sessionId, seqStr, durable)
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+		} else if rerr != nil {
+			errors.LogInfoInner(ctx, rerr, "XHTTP packet-up rescue dial failed seq=", seqStr)
+		}
+	}
+	return lastErr
+}
+
+// postPacketReliableOnce runs the bounded same-client retry budget
+// (packetUploadMaxAttempts) against a single dialer client.
+func postPacketReliableOnce(
+	ctx context.Context,
+	client DialerClient,
+	url string,
+	sessionId string,
+	seqStr string,
+	durable []byte,
+) error {
 	bytesPoster, hasBytes := client.(packetBytesPoster)
 
 	var lastErr error

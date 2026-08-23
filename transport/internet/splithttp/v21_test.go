@@ -198,22 +198,49 @@ func TestV21_DynamicConnectionScaling_OscillationPrevention(t *testing.T) {
 		t.Error("should switch to LowLatency after 3 observations")
 	}
 
-	// Single observation of Lossy should NOT switch (debounce)
+	// Single observation of an IMPROVEMENT should NOT switch (debounce).
+	// Reach Saturated instantly (worsening bypasses debounce), then offer
+	// a slightly better Lossy once.
+	m.UpdatePoolBehavior(quality.BehaviorSaturated)
+	if m.GetPoolBehavior() != quality.BehaviorSaturated {
+		t.Fatalf("worsening should take effect immediately, got %v", m.GetPoolBehavior())
+	}
 	m.UpdatePoolBehavior(quality.BehaviorLossy)
-	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
-		t.Error("should NOT switch after 1 observation (debounce)")
+	if m.GetPoolBehavior() != quality.BehaviorSaturated {
+		t.Error("improvement should NOT switch after 1 observation (debounce)")
 	}
 
-	// Another single observation should NOT switch
+	// A second improving observation still must not switch.
 	m.UpdatePoolBehavior(quality.BehaviorLossy)
-	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
-		t.Error("should NOT switch after 2 observations (debounce)")
+	if m.GetPoolBehavior() != quality.BehaviorSaturated {
+		t.Error("improvement should NOT switch after 2 observations (debounce)")
 	}
 
-	// Third observation should switch
+	// Third observation completes the debounce.
 	m.UpdatePoolBehavior(quality.BehaviorLossy)
 	if m.GetPoolBehavior() != quality.BehaviorLossy {
-		t.Error("should switch to Lossy after 3 observations")
+		t.Error("should switch to Lossy after 3 improving observations")
+	}
+}
+
+// TestV21_AIMD_WorseningImmediate verifies degradation bypasses debounce.
+func TestV21_AIMD_WorseningImmediate(t *testing.T) {
+	m := NewXmuxManager(&XmuxConfig{
+		MaxConnections: &RangeConfig{From: 4, To: 4},
+	}, func() XmuxConn { return &mockConn{} })
+	defer m.Close()
+
+	for i := 0; i < 3; i++ {
+		m.UpdatePoolBehavior(quality.BehaviorNormal)
+	}
+	if m.GetPoolBehavior() != quality.BehaviorNormal {
+		t.Fatal("should start at Normal")
+	}
+
+	// ONE Lossy observation must switch immediately.
+	m.UpdatePoolBehavior(quality.BehaviorLossy)
+	if m.GetPoolBehavior() != quality.BehaviorLossy {
+		t.Errorf("worsening should take effect immediately, got %v", m.GetPoolBehavior())
 	}
 }
 
@@ -231,19 +258,19 @@ func TestV21_DynamicConnectionScaling_AIMD_Decrease(t *testing.T) {
 	lowConns := m.effectiveConnections()
 	t.Logf("LowLatency connections: %d", lowConns)
 
-	// Switch to Lossy (worsening) — MD halves immediately, then the pool
-	// converges back up toward the Lossy target (reverse AIMD: more outer
-	// connections for HoL isolation under loss).
-	for i := 0; i < 3; i++ {
+	// Switch to Lossy (worsening, immediate) — pool lands directly on the
+	// Lossy target (reverse AIMD: MORE outer connections for HoL isolation
+	// under loss), NOT a blind halve.
+	for i := 0; i < 1; i++ {
 		m.UpdatePoolBehavior(quality.BehaviorLossy)
 	}
 	lossyConns := m.effectiveConnections()
-	t.Logf("Lossy connections: %d (after AIMD decrease)", lossyConns)
+	t.Logf("Lossy connections: %d (after worsening AIMD)", lossyConns)
 
-	// The instantaneous multiplicative decrease must still happen, so a
-	// freshly-worsened pool is smaller than the LowLatency steady state.
-	if lossyConns >= lowConns {
-		t.Errorf("Lossy connections (%d) should be < LowLatency connections (%d) right after MD", lossyConns, lowConns)
+	// Reverse AIMD: under loss the pool must GROW toward base*2 (clamped),
+	// never shrink below base.
+	if lossyConns < 8 {
+		t.Errorf("Lossy connections (%d) must be >= base 8 (reverse AIMD), not halved", lossyConns)
 	}
 }
 

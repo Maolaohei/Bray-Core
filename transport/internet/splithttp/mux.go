@@ -1069,11 +1069,25 @@ const (
 	aimdStep = 1
 )
 
-// UpdatePoolBehavior updates the pool's dominant behavior with debouncing.
-// Requires debounceThreshold consecutive observations of the same behavior before switching.
+// UpdatePoolBehavior updates the pool's dominant behavior.
+// Improvements require debounceThreshold consecutive observations before
+// switching (oscillation prevention). Worsening takes effect IMMEDIATELY:
+// the ~15s debounce is acceptable when the path improves, but waiting it
+// out while the link is already lossy/saturated keeps the pool mis-sized
+// exactly when isolation matters most.
 func (m *XmuxManager) UpdatePoolBehavior(b quality.Behavior) {
 	m.poolBehaviorMu.Lock()
 	defer m.poolBehaviorMu.Unlock()
+
+	// Immediate reaction on degradation (including from Unknown).
+	if isBehaviorWorsening(b, m.poolBehavior) {
+		prevBehavior := m.poolBehavior
+		m.streakBehavior = b
+		m.behaviorStreak = 0
+		m.poolBehavior = b
+		m.applyAIMD(b, prevBehavior)
+		return
+	}
 
 	if b == m.streakBehavior {
 		m.behaviorStreak++
@@ -1126,9 +1140,14 @@ func (m *XmuxManager) applyAIMD(b, prevBehavior quality.Behavior) {
 			m._dynamicConc.Store(cur - aimdStep)
 		}
 	} else if isBehaviorWorsening(b, prevBehavior) {
-		// Multiplicative Decrease: halve immediately
-		m._dynamicConns.Store(m._dynamicConns.Load() / 2)
-		m._dynamicConc.Store(m._dynamicConc.Load() / 2)
+		// Multiplicative Decrease — but toward the NEW behavior's targets,
+		// not a blind halve of both dimensions. Reverse AIMD wants MORE
+		// outer connections under loss/saturation (connection-level HoL
+		// isolation + total cwnd) while CUTTING per-connection
+		// concurrency; the old unconditional halve shrank the pool
+		// exactly on the paths that need isolation most.
+		m._dynamicConns.Store(m.computeTargetConns(b, baseConns))
+		m._dynamicConc.Store(m.computeTargetConc(b, baseConc))
 	}
 
 	// Clamp to sane bounds
