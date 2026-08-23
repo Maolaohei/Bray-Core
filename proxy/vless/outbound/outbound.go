@@ -59,6 +59,11 @@ type Handler struct {
 	testpre  uint32
 	initpre  sync.Once
 	preConns chan *ConnExpire
+	// preConnsStop signals the pre-connect producer goroutines to exit.
+	// Closing preConns itself would turn every subsequent send in the
+	// infinite producer loop into a panic; after recover() the loop
+	// re-panics immediately, spinning at full speed while leaking conns.
+	preConnsStop chan struct{}
 }
 
 type ConnExpire struct {
@@ -135,8 +140,8 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 
 // Close implements common.Closable.Close().
 func (h *Handler) Close() error {
-	if h.preConns != nil {
-		close(h.preConns)
+	if h.preConnsStop != nil {
+		close(h.preConnsStop) // producers exit; preConns stays open for the consumer
 	}
 	if h.reverse != nil {
 		return h.reverse.Close()
@@ -159,6 +164,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	if h.testpre > 0 && h.reverse == nil {
 		h.initpre.Do(func() {
 			h.preConns = make(chan *ConnExpire)
+			h.preConnsStop = make(chan struct{})
 			for range h.testpre {
 				go func() {
 					var conn stat.Connection
@@ -170,6 +176,14 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 					ctx := xctx.ContextWithID(context.Background(), session.NewID())
 					failCount := 0
 					for {
+						select {
+						case <-h.preConnsStop:
+							if conn != nil {
+								conn.Close()
+							}
+							return
+						default:
+						}
 						var err error
 						conn, err = dialer.Dial(ctx, rec.Destination)
 						if err != nil {
@@ -177,29 +191,49 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 							errors.LogWarningInner(ctx, err, "pre-connect failed")
 							// Exponential backoff: 200ms → 400ms → 800ms …, capped at 10s.
 							backoff := time.Duration(200<<min(failCount-1, 6)) * time.Millisecond
-							time.Sleep(backoff)
+							select {
+							case <-time.After(backoff):
+							case <-h.preConnsStop:
+								return
+							}
 							continue
 						}
 						failCount = 0
 						ttl := time.Minute*2 - time.Minute/2 + time.Duration(rand.Int64N(int64(time.Minute)))
-						h.preConns <- &ConnExpire{Conn: conn, Expire: time.Now().Add(ttl)}
+						select {
+						case h.preConns <- &ConnExpire{Conn: conn, Expire: time.Now().Add(ttl)}:
+						case <-h.preConnsStop:
+							conn.Close()
+							return
+						}
 						// ±50% jitter around 200ms → 100–300ms.
 						jitter := time.Duration(rand.Int64N(int64(time.Millisecond * 200)))
-						time.Sleep(time.Millisecond*100 + jitter)
+						select {
+						case <-time.After(time.Millisecond*100 + jitter):
+						case <-h.preConnsStop:
+							return
+						}
 					}
 				}()
 			}
 		})
 		for {
-			connTime := <-h.preConns
-			if connTime == nil {
+			select {
+			case <-h.preConnsStop:
 				return errors.New("closed handler").AtWarning()
+			case connTime := <-h.preConns:
+				if connTime == nil {
+					return errors.New("closed handler").AtWarning()
+				}
+				if time.Now().Before(connTime.Expire) {
+					conn = connTime.Conn
+					break
+				}
+				connTime.Conn.Close()
 			}
-			if time.Now().Before(connTime.Expire) {
-				conn = connTime.Conn
+			if conn != nil {
 				break
 			}
-			connTime.Conn.Close()
 		}
 	}
 

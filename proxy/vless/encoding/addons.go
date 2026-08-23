@@ -361,6 +361,9 @@ func (w *MultiLengthPacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	defer buf.ReleaseMulti(mb)
 	// Fresh MultiBuffer ownership transfer: do not recycle a pooled slice after
 	// WriteMultiBuffer, or a retaining writer/pipe can observe corrupted frames.
+	// (make with exact capacity; Go's allocator size classes make the
+	// per-call alloc cheap, and a pooled slice header risks the same
+	// retention corruption noted above.)
 	mb2Write := make(buf.MultiBuffer, 0, len(mb))
 	for _, b := range mb {
 		length := b.Len()
@@ -411,6 +414,10 @@ func (r *LengthPacketReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		return nil, errors.New("failed to read packet length").Base(err)
 	}
 	length := int32(r.cache[0])<<8 | int32(r.cache[1])
+	// Exact-capacity make: the returned MultiBuffer is handed to the caller
+	// (ownership transfer), so a pooled/reused slice header would risk the
+	// same retention corruption as the writer side. The single small alloc
+	// per datagram is not worth that risk.
 	mb := make(buf.MultiBuffer, 0, length/buf.Size+1)
 	for length > 0 {
 		size := length

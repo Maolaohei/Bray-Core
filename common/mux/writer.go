@@ -108,7 +108,11 @@ func (w *Writer) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	for !mb.IsEmpty() {
 		var chunk buf.MultiBuffer
 		if w.transferType == protocol.TransferTypeStream {
-			mb, chunk = buf.SplitSize(mb, 8*1024)
+			// Bray: larger stream frames (32KiB) cut the per-MiB frame count
+			// 4x (128 → 32 frames), amortizing header serialization and
+			// WriteMultiBuffer dispatch. The 2-byte length prefix is uint16,
+			// so 32KiB is well within the wire format's limit.
+			mb, chunk = buf.SplitSize(mb, 32*1024)
 		} else {
 			mb2, b := buf.SplitFirst(mb)
 			mb = mb2
