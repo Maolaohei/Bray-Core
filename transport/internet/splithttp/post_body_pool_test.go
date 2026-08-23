@@ -59,26 +59,33 @@ func TestPostBodyPool_FreeArbitrary(t *testing.T) {
 // and the same backing array (pointer equality). Content checks are avoided:
 // the pool is shared across tests, so an unrelated pooled buffer may come
 // back first. Under -race the detector clears sync.Pool between Get/Put, so
-// only len sanity is checked there.
+// only len sanity is checked there. Exact-address reuse additionally relies
+// on staying on the same P (sync.Pool per-P private slot); goroutine
+// migration or a steal from another P's shared pool can return a different
+// buffer even though ours WAS returned — so retry a bounded number of times
+// before declaring failure.
 func assertPooledReuse(t *testing.T, payload []byte) {
 	t.Helper()
 	if len(payload) == 0 {
 		return
 	}
-	again := allocPostBody(len(payload))
-	defer freePostBody(again)
-	if len(again) != len(payload) {
-		t.Fatalf("realloc len=%d want %d", len(again), len(payload))
-	}
 	if raceEnabled {
+		again := allocPostBody(len(payload))
+		defer freePostBody(again)
+		if len(again) != len(payload) {
+			t.Fatalf("realloc len=%d want %d", len(again), len(payload))
+		}
 		return
 	}
-	if cap(again) != cap(payload) {
-		t.Fatalf("payload not returned to pool: cap=%d want %d", cap(again), cap(payload))
+	for try := 0; try < 64; try++ {
+		again := allocPostBody(len(payload))
+		ok := cap(again) == cap(payload) && &again[0] == &payload[0]
+		freePostBody(again)
+		if ok {
+			return
+		}
 	}
-	if &again[0] != &payload[0] {
-		t.Fatal("pool returned a different buffer (payload not returned)")
-	}
+	t.Fatalf("payload never resurfaced from pool in 64 allocs (cap=%d)", cap(payload))
 }
 
 // Consumed packets must return their pooled payload; the queue must not touch
