@@ -2,8 +2,6 @@ package splithttp
 
 import (
 	"bytes"
-	"encoding/binary"
-	"runtime/debug"
 	"testing"
 	"time"
 	"unsafe"
@@ -137,43 +135,24 @@ func TestUploadQueue_PooledReturnOnDuplicate(t *testing.T) {
 
 // Push failure (queue full) must return the pooled payload.
 func TestUploadQueue_PooledReturnOnPushFail(t *testing.T) {
-	// The identity assertion below assumes sync.Pool LIFO reuse on this
-	// goroutine. A GC between freePostBody and the next alloc drops the
-	// pooled buffer (victim cache), making the next alloc return a different
-	// address — a CI-load flake, not a product bug. Pin the GC off for the
-	// critical section.
-	oldGC := debug.SetGCPercent(-1)
-	defer debug.SetGCPercent(oldGC)
 	q := NewUploadQueue(2)
-	// Mark this payload with a unique sentinel: pool Get/Put never zero or
-	// rewrite buffer content, so a later alloc returning our bytes proves
-	// THIS payload resurfaced — regardless of which P hands it back.
-	marker := time.Now().UnixNano()
-	checkSentinel := func(p []byte) bool {
-		return len(p) >= 8 && binary.LittleEndian.Uint64(p[:8]) == uint64(marker)
-	}
 	// Fill the channel: the first two pushes land in the channel buffer.
 	if err := q.Push(Packet{Payload: allocPostBody(4096), Seq: 0, Pooled: true}); err != nil {
 		t.Fatal(err)
 	}
-	// The heap hold does not consume channel capacity; push until full.
+	// Push until full. The failing push is the only pooled free in this
+	// window, so the pool put-counter must advance by exactly one — a
+	// deterministic proof that Push's failure path returned the payload
+	// (exact-address sync.Pool resurfacing is not observable: private slots
+	// are never stolen after a P migration, which flaked CI on windows and
+	// macos).
 	for i := 1; ; i++ {
 		payload := allocPostBody(4096)
-		binary.LittleEndian.PutUint64(payload[:8], uint64(marker))
+		before := postBodyPoolPuts.Load()
 		err := q.Push(Packet{Payload: payload, Seq: uint64(i), Pooled: true})
 		if err != nil {
-			// Push failed: payload must already be back in the pool. Scan
-			// the class pool for our sentinel — exact-address identity is
-			// not reliable across P migration / GC, but content is never
-			// rewritten by Put/Get.
-			found := false
-			for try := 0; try < 256 && !found; try++ {
-				again := allocPostBody(4096)
-				found = checkSentinel(again)
-				freePostBody(again)
-			}
-			if !found {
-				t.Fatal("payload not returned to pool (sentinel never resurfaced)")
+			if got := postBodyPoolPuts.Load() - before; got != 1 {
+				t.Fatalf("failed push freed %d pooled payloads, want 1", got)
 			}
 			break
 		}

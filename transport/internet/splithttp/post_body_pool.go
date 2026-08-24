@@ -1,6 +1,9 @@
 package splithttp
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // post_body_pool recycles server-side POST body payloads on the packet-up
 // hot path. Without it every upload POST allocates a fresh make([]byte) of
@@ -33,6 +36,13 @@ var postBodyPoolSizes = [...]int{
 }
 
 var postBodyPools [len(postBodyPoolSizes)]sync.Pool
+
+// postBodyPoolPuts counts freePostBody calls that actually returned a buffer
+// to a class pool. Test hook: lets the upload-queue pooled-return test verify
+// deterministically that Push's failure path freed its payload (exact-address
+// resurfacing is not observable — sync.Pool private slots never get stolen
+// across P migration).
+var postBodyPoolPuts atomic.Int64
 
 func init() {
 	for i := range postBodyPools {
@@ -84,6 +94,7 @@ func freePostBody(b []byte) {
 		if capb >= postBodyPoolSizes[i] {
 			b = b[:postBodyPoolSizes[i]]
 			postBodyPools[i].Put(&b)
+			postBodyPoolPuts.Add(1)
 			return
 		}
 	}
