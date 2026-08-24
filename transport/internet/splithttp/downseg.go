@@ -20,7 +20,6 @@ package splithttp
 
 import (
 	"math"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -520,7 +519,7 @@ func (c *downSegCache) finalize() {
 	if dbgDownSeg {
 		pc := c.produced
 		c.mu.Unlock()
-		println("[DBGFIN] finalize produced:", pc)
+		dbgLog("[DBGFIN] finalize produced:", pc)
 		return
 	}
 	c.mu.Unlock()
@@ -579,9 +578,5 @@ func (c *downSegCache) idleFor() time.Duration {
 // by "sessioned GET with a seq in the meta token" (dead-path reuse), so no
 // extra header/label is ever placed on the wire.
 
-// dbgDownSeg enables temporary per-session downlink-segmentation diagnostics
-// (trace of finalize / production-leg exits). Enabled via the BRAY_DSEG_DEBUG
-// environment variable (any non-empty value) so the dual-end e2e tests can
-// opt in without shipping an API. Kept off otherwise; not compiled into
-// production logs.
-var dbgDownSeg = os.Getenv("BRAY_DSEG_DEBUG") != ""
+// dbgDownSeg and dbgLog live in downseg_debug.go: the BRAY_DSEG_DEBUG gate
+// plus the single stderr trace helper every [DBG*] point funnels through.

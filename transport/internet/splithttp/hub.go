@@ -698,19 +698,19 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				select {
 				case <-request.Context().Done():
 					if dbgDownSeg {
-						println("[DBGPROD] prodLeg exit: ctx done, sid=", sessionId)
+						dbgLog("[DBGPROD] prodLeg exit: ctx done, sid=", sessionId)
 					}
 					return
 				case <-httpSC.Wait():
 					if dbgDownSeg {
-						println("[DBGPROD] prodLeg exit: httpSC.Wait, sid=", sessionId)
+						dbgLog("[DBGPROD] prodLeg exit: httpSC.Wait, sid=", sessionId)
 					}
 					return
 				case <-reaper.C:
 					if c := currentSession.downseg.Load(); c != nil && !c.over() &&
 						c.idleFor() > downsegProdIdleLimit {
 						if dbgDownSeg {
-							println("[DBGPROD] prodLeg exit: idle reaper, sid=", sessionId)
+							dbgLog("[DBGPROD] prodLeg exit: idle reaper, sid=", sessionId)
 						}
 						return
 					}
@@ -949,9 +949,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			// one-slot stall. Keep the uniform 404 externally to avoid a
 			// session/queue liveness oracle.
 			if dbgDownSeg {
-				sess := currentSession
-				println("[DBGPUPS] packet-up Push 404 seq=", seq, "closed=", sess.uploadQueue.closed.Load(),
-					"sid=", sessionId, "dllegs=", sess.downloadLegs.Load(), "err=", err.Error())
+				dbgLog("[DBGPUPS] packet-up Push 404 seq=", seq, "closed=", currentSession.uploadQueue.closed.Load(),
+					"sid=", sessionId, "dllegs=", currentSession.downloadLegs.Load(), "err=", err.Error())
 			}
 			writer.WriteHeader(http.StatusNotFound)
 			return
@@ -980,7 +979,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			if n := h.streamOneActive.Add(1); n > streamOneMaxActive {
 				h.streamOneActive.Add(-1)
 				if dbgDownSeg {
-					println("[DBGGET404] stream-one concurrency cap hit, sid empty")
+					dbgLog("[DBGGET404] stream-one concurrency cap hit, sid empty")
 				}
 				writer.WriteHeader(http.StatusTooManyRequests)
 				return

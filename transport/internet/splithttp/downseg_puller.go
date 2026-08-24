@@ -287,13 +287,13 @@ func (p *DownSegPuller) worker() {
 			case err == nil && len(seg) > 0:
 				p.buf[seq] = seg
 				if pctxd := p.ctx.Err(); pctxd != nil && dbgDownSeg {
-					println("[DBGPULL] seg", seq, "ok len", len(seg), "BUT ctx err", pctxd.Error())
+					dbgLog("[DBGPULL] seg", seq, "ok len", len(seg), "BUT ctx err", pctxd.Error())
 				}
 			case err == nil: // empty 200 -> EOF marker at seq (first wins)
 				if p.eofAt == 0 || seq < p.eofAt {
 					p.eofAt = seq
 					if dbgDownSeg {
-						println("[DBGPULL] EOF marker at seq", seq, "sid=", p.sessionId)
+						dbgLog("[DBGPULL] EOF marker at seq", seq, "sid=", p.sessionId)
 					}
 				}
 			case err == errSegGone:
@@ -303,7 +303,7 @@ func (p *DownSegPuller) worker() {
 				if p.fatal == nil {
 					p.fatal = errSegGone
 					if dbgDownSeg {
-						println("[DBGPULL] FATAL gone seq", seq, "sid=", p.sessionId)
+						dbgLog("[DBGPULL] FATAL gone seq", seq, "sid=", p.sessionId)
 					}
 				}
 			case err == errSegNotFound:
@@ -330,7 +330,7 @@ func (p *DownSegPuller) worker() {
 				// hit these intermittently; treating them as fatal caused
 				// the "偶发中断" file-download drops.
 				if dbgDownSeg {
-					println("[DBGPULL] transient err seq", seq, ":", err.Error())
+					dbgLog("[DBGPULL] transient err seq", seq, ":", err.Error())
 				}
 				p.mu.Unlock()
 				select {
@@ -343,7 +343,7 @@ func (p *DownSegPuller) worker() {
 				if p.fatal == nil {
 					p.fatal = err
 					if dbgDownSeg {
-						println("[DBGPULL] FATAL err seq", seq, ":", err.Error(), "sid=", p.sessionId)
+						dbgLog("[DBGPULL] FATAL err seq", seq, ":", err.Error(), "sid=", p.sessionId)
 					}
 				}
 			}
