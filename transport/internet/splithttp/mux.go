@@ -98,6 +98,12 @@ const (
 
 	// openTimeoutEvictAfter consecutive header-open timeouts mark the client dead.
 	openTimeoutEvictAfter = 2
+
+	// idleBeaconEvictAfter consecutive idle-activity (beacon) failures mark
+	// the client dead. Two because a single beacon can fail on transient
+	// jitter, but two in a row on an otherwise-idle connection almost
+	// always means the path is gone (CDN idle kill / NAT rebinding).
+	idleBeaconEvictAfter = 2
 )
 
 // XmuxClientPool is a read-write separated connection pool.
@@ -207,6 +213,13 @@ type XmuxClient struct {
 	// After openTimeoutEvictAfter, MarkDead so the next Dial rotates off a wedged H2.
 	openHeaderTimeouts atomic.Int32
 
+	// beaconFailures counts consecutive idle-activity (beacon) request
+	// failures. A CDN edge that silently dropped the TCP flow (idle kill,
+	// no RST) leaves IsClosed() false locally; beacons are the only probe
+	// that notices. After idleBeaconEvictAfter consecutive failures the
+	// client is MarkDead so the pool rotates instead of lending a dead H2.
+	beaconFailures atomic.Int32
+
 	// V2.1: behavior learning for adaptive scheduling
 	learner *quality.NetworkLearner // tracks link behavior patterns
 
@@ -295,6 +308,30 @@ func (c *XmuxClient) NoteOpenSuccess() {
 		return
 	}
 	c.openHeaderTimeouts.Store(0)
+}
+
+// NoteBeaconSuccess clears the consecutive beacon-failure counter after a
+// successful idle-activity request.
+func (c *XmuxClient) NoteBeaconSuccess() {
+	if c == nil {
+		return
+	}
+	c.beaconFailures.Store(0)
+}
+
+// NoteBeaconFailure records one failed idle-activity request. After
+// idleBeaconEvictAfter consecutive failures, MarkDead: the connection is
+// almost certainly gone (CDN idle kill without RST, NAT rebinding), and
+// lending it to the next Dial would cost a full stream-open timeout.
+func (c *XmuxClient) NoteBeaconFailure() {
+	if c == nil || c.state.Load() != StateActive {
+		return
+	}
+	n := c.beaconFailures.Add(1)
+	if n >= idleBeaconEvictAfter {
+		errors.LogInfo(context.Background(), "XMUX: idle-beacon failure x", n, ", marking client dead")
+		c.MarkDead()
+	}
 }
 
 // MarkDead immediately transitions to Closed state.
@@ -853,9 +890,15 @@ func (m *XmuxManager) sendIdleActivity(c *XmuxClient) {
 		bdc.transportConfig.FillStreamRequest(req, "", "")
 	}
 	resp, err := bdc.client.Do(req)
-	if err == nil {
-		resp.Body.Close()
+	if err != nil {
+		// The beacon doubles as the liveness probe for connections a CDN
+		// edge silently dropped (no RST reaches us): feed the outcome back
+		// so the pool rotates instead of lending a dead H2 session.
+		c.NoteBeaconFailure()
+		return
 	}
+	resp.Body.Close()
+	c.NoteBeaconSuccess()
 }
 
 // healthCheckLoop periodically checks connection health and removes unhealthy ones.
