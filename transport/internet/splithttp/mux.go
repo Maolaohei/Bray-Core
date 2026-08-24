@@ -529,6 +529,15 @@ type XmuxManager struct {
 	probeCoolUntil   time.Time
 	probeLastFailLog time.Time
 
+	// Lazy CDN keep-warm: probe response headers reveal a CDN edge
+	// (cf-ray etc.). When such a path idles out of the pool, one jittered
+	// background reconnect pre-pays the cold-start so the next user request
+	// finds a warm session. Sticky once detected; never retries on failure.
+	isCDN           atomic.Bool
+	warmReconnectMu sync.Mutex
+	warmTimer       *time.Timer
+	warmInFlight    atomic.Bool
+
 	// Metrics for quantifiable validation
 	metrics struct {
 		// Connection reuse vs new
@@ -990,6 +999,12 @@ func (m *XmuxManager) healthCheckTick() {
 				errors.LogDebug(context.Background(), "XMUX: health-check removing idle xmuxClient, lastUsed=", time.Unix(0, lastUsed).Format(time.RFC3339))
 				c.maybeDrain()
 				m.pool.RemoveAt(i)
+				// Lazy CDN keep-warm: the last connection just idled out of
+				// an empty pool. Pre-pay one reconnect so the next user
+				// request does not eat a full CDN cold start.
+				if len(m.pool.clients) == 0 {
+					m.scheduleWarmReconnect()
+				}
 				continue
 			}
 		}
@@ -1087,6 +1102,16 @@ func (m *XmuxManager) healthCheckTick() {
 // Close stops the background goroutines and waits for them to finish.
 func (m *XmuxManager) Close() {
 	m.closeOnce.Do(func() {
+		// Cancel any pending lazy CDN keep-warm reconnect first: the timer
+		// callback checks stopCh too, but stopping the timer avoids firing
+		// a goroutine at all during teardown.
+		m.warmReconnectMu.Lock()
+		if m.warmTimer != nil {
+			m.warmTimer.Stop()
+			m.warmTimer = nil
+		}
+		m.warmReconnectMu.Unlock()
+
 		close(m.stopCh)
 
 		// Wait for background goroutines with timeout
@@ -1464,6 +1489,109 @@ func (m *XmuxManager) probeConnection(conn XmuxConn, xmuxClient *XmuxClient) {
 	}
 	m.noteProbeSuccess()
 	resp.Body.Close()
+	m.detectCDN(resp.Header)
+}
+
+// cdnHeaderMatchers lists conservative response-header signatures of major
+// CDN edges. Every pattern requires a value shape that is hard to forge by
+// accident (cf-ray = 16-hex + airport code) so a misdirected probe against
+// some origin server cannot flip the sticky CDN bit.
+var cdnHeaderMatchers = []struct {
+	name   string
+	header string
+	match  func(value string) bool
+}{
+	{"cloudflare", "Cf-Ray", func(v string) bool {
+		// Format: <16 hex chars>-<airport code>, e.g. 8a2b...-SIN.
+		i := strings.IndexByte(v, '-')
+		if i != 16 || len(v) <= i+1 {
+			return false
+		}
+		for _, c := range v[:16] {
+			if !isHexDigit(c) {
+				return false
+			}
+		}
+		return true
+	}},
+	{"cloudfront", "X-Amz-Cf-Pop", func(v string) bool { return v != "" }},
+	{"fastly", "X-Served-By", func(v string) bool {
+		return strings.HasPrefix(v, "cache-")
+	}},
+}
+
+func isHexDigit(c rune) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// detectCDN inspects one probe response for CDN edge signatures and latches
+// the manager-wide sticky bit on a hit. Called after every successful probe;
+// cheap no-op once latched (single atomic load).
+func (m *XmuxManager) detectCDN(h http.Header) {
+	if m.isCDN.Load() {
+		return
+	}
+	for _, sig := range cdnHeaderMatchers {
+		vals := h.Values(sig.header)
+		for _, v := range vals {
+			if sig.match(v) {
+				if m.isCDN.CompareAndSwap(false, true) {
+					errors.LogInfo(context.Background(), "XMUX: CDN edge detected via ", sig.name, " probe header, lazy keep-warm enabled")
+				}
+				return
+			}
+		}
+	}
+}
+
+// scheduleWarmReconnect arranges one jittered background reconnect after the
+// last pooled connection idled out, so a CDN path does not hand the next user
+// request a full cold start. Best effort: never retries on failure (the next
+// business request dials anyway), and a fresh eviction reschedules.
+func (m *XmuxManager) scheduleWarmReconnect() {
+	if !m.isCDN.Load() {
+		return
+	}
+	select {
+	case <-m.stopCh:
+		return
+	default:
+	}
+
+	m.warmReconnectMu.Lock()
+	defer m.warmReconnectMu.Unlock()
+	select {
+	case <-m.stopCh:
+		return
+	default:
+	}
+	if m.warmInFlight.Load() {
+		return // a reconnect is already scheduled or running
+	}
+	m.warmInFlight.Store(true)
+	delay := time.Duration(biasedRangeRand(30, 120)) * time.Second
+	warmTimer := time.AfterFunc(delay, func() {
+		defer m.warmInFlight.Store(false)
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+		// Pool may have refilled meanwhile (user traffic or pre-connect):
+		// only reconnect when it is still empty.
+		m.pool.mu.RLock()
+		empty := len(m.pool.clients) == 0
+		m.pool.mu.RUnlock()
+		if !empty {
+			return
+		}
+		errors.LogDebug(context.Background(), "XMUX: CDN keep-warm reconnecting idle-drained pool")
+		// newXmuxClient appends to the pool and starts its own HEAD probe
+		// when a probeURL is configured — never probe it again here, or
+		// probeConnection would close the ready channel twice.
+		m.newXmuxClient()
+	})
+	m.warmTimer = warmTimer
 }
 
 // probeInCooldown reports whether further HEAD probes should be skipped.
