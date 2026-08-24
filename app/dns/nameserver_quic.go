@@ -252,6 +252,13 @@ func (s *QUICNameServer) getConnection() (*quic.Conn, error) {
 	s.Lock()
 	defer s.Unlock()
 
+	// Double-check under the write lock: concurrent callers can all miss the
+	// RLock fast path and queue here; without the re-check each one would
+	// open (and leak) its own QUIC connection.
+	if conn = s.connection; conn != nil && isActive(conn) {
+		return conn, nil
+	}
+
 	var err error
 	conn, err = s.openConnection()
 	if err != nil {

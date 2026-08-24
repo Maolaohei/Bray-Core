@@ -91,6 +91,9 @@ func (s *ClassicNameServer) RequestsCleanup() error {
 	for id, req := range s.requests {
 		if req.expire.Before(now) {
 			delete(s.requests, id)
+			// Return the abandoned request (and its Message) to the pools;
+			// dropping the map entry alone leaks them to the GC.
+			releaseDnsRequest(&req.dnsRequest)
 		}
 	}
 
@@ -231,7 +234,18 @@ func (s *ClassicNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<
 			dnsRequest: *req,
 			ctx:        ctx,
 		}
-		s.addPendingRequest(udpReq)
+		if err := s.addPendingRequest(udpReq); err != nil {
+			// Table effectively full: fail loudly instead of leaving the
+			// caller waiting on an answer that can never arrive. Release the
+			// copy (its Message is shared with req by value-copy semantics,
+			// so req itself must never be released here).
+			errors.LogErrorInner(ctx, err, "failed to register pending DNS request for ", fqdn)
+			releaseDnsRequest(&udpReq.dnsRequest)
+			if noResponseErrCh != nil {
+				noResponseErrCh <- err
+			}
+			return
+		}
 		b, err := dns.PackMessage(req.msg)
 		if err != nil {
 			errors.LogErrorInner(ctx, err, "failed to pack dns query")
