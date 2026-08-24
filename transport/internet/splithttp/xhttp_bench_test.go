@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -332,9 +333,53 @@ func BenchmarkXHTTP_TTFB(b *testing.B) {
 	}
 }
 
-// =========================================================================
-// Burst Benchmarks
-// =========================================================================
+// BenchmarkXHTTP_ColdStartTTFB measures the user-visible cold-start first
+// byte: Dial (XMUX session setup incl. probe + download-leg open) -> first
+// response byte read back. This is what a fresh connection pays on every
+// CDN edge hop or node switch; steady-state pooled latency is
+// BenchmarkXHTTP_TTFB above. The custom ttfb-us metric excludes Close.
+func BenchmarkXHTTP_ColdStartTTFB(b *testing.B) {
+	p := tcp.PickPort()
+	settings := &internet.MemoryStreamConfig{
+		ProtocolName:     "splithttp",
+		ProtocolSettings: &Config{Path: "/sh", Mode: "packet-up", Headers: testBenchHeaders},
+	}
+
+	listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
+		go func(c stat.Connection) {
+			defer c.Close()
+			io.Copy(c, c)
+		}(conn)
+	})
+	common.Must(err)
+	defer listen.Close()
+
+	payload := make([]byte, 128)
+	rand.Read(payload)
+
+	var totalTTFB time.Duration
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		t0 := time.Now()
+		conn, err := Dial(context.Background(),
+			net.TCPDestination(net.DomainAddress("localhost"), p), settings)
+		if err != nil {
+			b.Fatal(err)
+		}
+		readBuf := make([]byte, len(payload))
+		if _, err := conn.Write(payload); err != nil {
+			conn.Close()
+			b.Fatal(err)
+		}
+		if _, err := io.ReadFull(conn, readBuf); err != nil {
+			conn.Close()
+			b.Fatal(err)
+		}
+		totalTTFB += time.Since(t0)
+		conn.Close()
+	}
+	b.ReportMetric(float64(totalTTFB)/float64(b.N)/1000.0, "ttfb-µs")
+}
 
 func BenchmarkXHTTP_Burst_64KB(b *testing.B) {
 	burstXHTTP(b, 64*1024, 10)
