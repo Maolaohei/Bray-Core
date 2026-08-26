@@ -826,6 +826,18 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		// Pooled body wrapper: Close releases MultiBuffer and returns container.
 		request.Body = acquirePacketBody(payload)
 		request.ContentLength = int64(payloadLen)
+		// h2 can replay the request after GOAWAY (server may send GOAWAY before
+		// the stream is fully processed). packetBody is one-shot — its Close()
+		// releases the pooled buffers — so a replay would otherwise read an
+		// empty body. Expose a re-readable copy; it must be materialised eagerly
+		// because the payload is consumed by the first attempt. This is the
+		// non-hot fallback path; the hot path (FillPacketRequestBytes) is
+		// zero-copy because it already owns a durable snapshot.
+		replay := make([]byte, payloadLen)
+		payload.Copy(replay)
+		request.GetBody = func() (io.ReadCloser, error) {
+			return acquireDurableBody(replay), nil
+		}
 	} else {
 		dataLen := payload.Len()
 		data := bytespool.Alloc(int32(dataLen))
@@ -854,10 +866,19 @@ func (c *Config) FillPacketRequestBytes(request *http.Request, sessionId string,
 	dataPlacement := c.GetNormalizedUplinkDataPlacement()
 	payloadLen := len(data)
 
+	// Zero-copy replay: data is a durable snapshot owned by the caller for the
+	// whole retry window, and durableBody.Close() drops only the view (never
+	// frees data). Each call returns a fresh durableBody so a replay after
+	// GOAWAY re-reads from offset 0.
+	getBody := func() (io.ReadCloser, error) {
+		return acquireDurableBody(data), nil
+	}
+
 	if dataPlacement == PlacementBody || dataPlacement == PlacementAuto {
 		request.Header = c.GetRequestHeader()
 		request.Body = acquireDurableBody(data)
 		request.ContentLength = int64(payloadLen)
+		request.GetBody = getBody
 	} else {
 		switch dataPlacement {
 		case PlacementHeader:
@@ -871,6 +892,7 @@ func (c *Config) FillPacketRequestBytes(request *http.Request, sessionId string,
 			request.Header = c.GetRequestHeader()
 			request.Body = acquireDurableBody(data)
 			request.ContentLength = int64(payloadLen)
+			request.GetBody = getBody
 		}
 	}
 
