@@ -565,6 +565,7 @@ type Masquerade struct {
 
 	Url         string `json:"url"`
 	RewriteHost bool   `json:"rewriteHost"`
+	XForwarded  bool   `json:"xForwarded"`
 	Insecure    bool   `json:"insecure"`
 
 	Content    string            `json:"content"`
@@ -605,6 +606,7 @@ func (c *HysteriaConfig) Build() (proto.Message, error) {
 	config.MasqFile = c.Masquerade.Dir
 	config.MasqUrl = c.Masquerade.Url
 	config.MasqUrlRewriteHost = c.Masquerade.RewriteHost
+	config.MasqUrlXForwarded = c.Masquerade.XForwarded
 	config.MasqUrlInsecure = c.Masquerade.Insecure
 	config.MasqString = c.Masquerade.Content
 	config.MasqStringHeaders = c.Masquerade.Headers
@@ -680,20 +682,24 @@ func (c *TLSCertConfig) Build() (*tls.Certificate, error) {
 }
 
 type QuicParamsConfig struct {
-	Congestion                  string    `json:"congestion"`
-	Debug                       bool      `json:"debug"`
-	BbrProfile                  string    `json:"bbrProfile"`
-	BrutalUp                    Bandwidth `json:"brutalUp"`
-	BrutalDown                  Bandwidth `json:"brutalDown"`
-	UdpHop                      UdpHop    `json:"udpHop"`
-	InitStreamReceiveWindow     uint64    `json:"initStreamReceiveWindow"`
-	MaxStreamReceiveWindow      uint64    `json:"maxStreamReceiveWindow"`
-	InitConnectionReceiveWindow uint64    `json:"initConnectionReceiveWindow"`
-	MaxConnectionReceiveWindow  uint64    `json:"maxConnectionReceiveWindow"`
-	MaxIdleTimeout              int64     `json:"maxIdleTimeout"`
-	KeepAlivePeriod             int64     `json:"keepAlivePeriod"`
-	DisablePathMTUDiscovery     bool      `json:"disablePathMTUDiscovery"`
-	MaxIncomingStreams          int64     `json:"maxIncomingStreams"`
+	Congestion                    string    `json:"congestion"`
+	Debug                         bool      `json:"debug"`
+	BbrProfile                    string    `json:"bbrProfile"`
+	BrutalUp                      Bandwidth `json:"brutalUp"`
+	BrutalDown                    Bandwidth `json:"brutalDown"`
+	BrutalDisableLossCompensation bool      `json:"brutalDisableLossCompensation"`
+	UdpHop                        UdpHop    `json:"udpHop"`
+	InitStreamReceiveWindow       uint64    `json:"initStreamReceiveWindow"`
+	MaxStreamReceiveWindow        uint64    `json:"maxStreamReceiveWindow"`
+	InitConnectionReceiveWindow   uint64    `json:"initConnectionReceiveWindow"`
+	MaxConnectionReceiveWindow    uint64    `json:"maxConnectionReceiveWindow"`
+	MaxIdleTimeout                int64     `json:"maxIdleTimeout"`
+	KeepAlivePeriod               int64     `json:"keepAlivePeriod"`
+	DisablePathMTUDiscovery       bool      `json:"disablePathMTUDiscovery"`
+	DisableChromeParrot           bool      `json:"disableChromeParrot"`
+	DisableGSO                    bool      `json:"disableGSO"`
+	MaxIncomingStreams            int64     `json:"maxIncomingStreams"`
+	DisableStatelessReset         bool      `json:"disableStatelessReset"`
 }
 
 type TLSConfig struct {
@@ -2086,6 +2092,9 @@ type Realm struct {
 	Url         string     `json:"url"`
 	StunServers []string   `json:"stunServers"`
 	TlsConfig   *TLSConfig `json:"tlsConfig"`
+
+	IPMode      string             `json:"ipMode"`
+	PortMapping *realm.PortMapping `json:"portMapping"`
 }
 
 func (c *Realm) Build() (proto.Message, error) {
@@ -2165,6 +2174,8 @@ func (c *Realm) Build() (proto.Message, error) {
 		ID:          id,
 		StunServers: stunServers,
 		TlsConfig:   tlsConfig,
+		IPMode:      strings.ToLower(c.IPMode),
+		PortMapping: c.PortMapping,
 	}, nil
 }
 
@@ -2440,10 +2451,11 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 			}
 
 			config.QuicParams = &internet.QuicParams{
-				Congestion: c.FinalMask.QuicParams.Congestion,
-				BbrProfile: profile,
-				BrutalUp:   up,
-				BrutalDown: down,
+				Congestion:                    c.FinalMask.QuicParams.Congestion,
+				BbrProfile:                    profile,
+				BrutalUp:                      up,
+				BrutalDown:                    down,
+				BrutalDisableLossCompensation: c.FinalMask.QuicParams.BrutalDisableLossCompensation,
 				UdpHop: &internet.UdpHop{
 					Ports:       c.FinalMask.QuicParams.UdpHop.PortList.Build().Ports(),
 					IntervalMin: int64(c.FinalMask.QuicParams.UdpHop.Interval.From),
@@ -2456,7 +2468,10 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 				MaxIdleTimeout:          c.FinalMask.QuicParams.MaxIdleTimeout,
 				KeepAlivePeriod:         c.FinalMask.QuicParams.KeepAlivePeriod,
 				DisablePathMtuDiscovery: c.FinalMask.QuicParams.DisablePathMTUDiscovery,
+				DisableChromeParrot:     c.FinalMask.QuicParams.DisableChromeParrot,
+				DisableGSO:              c.FinalMask.QuicParams.DisableGSO,
 				MaxIncomingStreams:      c.FinalMask.QuicParams.MaxIncomingStreams,
+				DisableStatelessReset:   c.FinalMask.QuicParams.DisableStatelessReset,
 			}
 		}
 	}
