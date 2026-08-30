@@ -13,9 +13,15 @@ import (
 
 func TestInjectBraySessionSeed_OutboundDetourBuild(t *testing.T) {
 	const id = "550e8400-e29b-41d4-a716-446655440000"
+	// NOTE: the address must stay on a private/reserved domain. The outbound
+	// transport-security rule (upstream 65458e91) rejects plaintext VLESS to a
+	// public address, and "example.com" is a real IANA-registered public domain
+	// (it is NOT a subdomain of the reserved "example" TLD). "host.example" is
+	// RFC 2606 reserved, so it is classified private and keeps this test on the
+	// no-security branch where Bray seed injection is what we actually assert.
 	settings := json.RawMessage(`{
 		"vnext": [{
-			"address": "example.com",
+			"address": "host.example",
 			"port": 443,
 			"users": [{"id": "` + id + `", "encryption": "none"}]
 		}]
