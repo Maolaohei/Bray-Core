@@ -264,7 +264,12 @@ func (w *VisionReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		XtlsFilterTls(buffer, w.trafficState, w.ctx)
 	}
 
-	if *switchToDirectCopy {
+	// switchToDirectCopy (CommandPaddingDirect / 0x02) requires the XTLS buffers
+	// (input/rawInput). When they are nil (e.g. xtls-rprx-vision over a plain TLS
+	// conn whose underlying conn is not an XTLS BufferAccessor) we cannot perform
+	// the direct copy. Fall through and return the already-unpadded data instead
+	// of dereferencing the nil input via buf.ReadFrom (nil pointer panic).
+	if *switchToDirectCopy && w.input != nil {
 		// XTLS Vision processes TLS-like conn's input and rawInput
 		if inputBuffer, err := buf.ReadFrom(w.input); err == nil && !inputBuffer.IsEmpty() {
 			buffer, _ = buf.MergeMulti(buffer, inputBuffer)
