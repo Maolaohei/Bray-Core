@@ -186,53 +186,27 @@ func TestUploadQueue_PooledReturnOnGapTimeout(t *testing.T) {
 }
 
 // TestUploadQueue_PooledDrainReturnsAll pins the drainAndFree abort path:
-// every queued pooled payload must come back to the pool (verified by backing
-// array identity, which survives pool reuse in non-race builds).
+// every queued pooled payload must come back to the allocator. We verify this
+// with the allocator's free counter rather than backing-array identity,
+// because postBodyPool is a process-global sync.Pool shared across tests — an
+// exact-address match flakes when other tests have parked their own 4096-byte
+// buffers in the pool. The counter is deterministic and works under -race
+// (where the detector clears the pool but the free path still runs).
 func TestUploadQueue_PooledDrainReturnsAll(t *testing.T) {
 	q := NewUploadQueue(10)
-	var orphans []uintptr
 	for i := 1; i <= 3; i++ {
-		p := allocPostBody(4096)
-		orphans = append(orphans, uintptr(unsafe.Pointer(&p[0])))
-		if err := q.Push(Packet{Payload: p, Seq: uint64(i), Pooled: true}); err != nil {
+		if err := q.Push(Packet{Payload: allocPostBody(4096), Seq: uint64(i), Pooled: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	buf := make([]byte, 32)
-	_, err := q.Read(buf) // seq 0 never arrives -> gap timeout
+	before := postBodyPoolPuts.Load()
+	_, err := q.Read(buf) // seq 0 never arrives -> gap timeout -> drainAndFree returns 3 pooled payloads
 	if err == nil {
 		t.Fatal("expected gap timeout error")
 	}
-	if raceEnabled {
-		return // detector clears the pool; identity cannot be observed
-	}
-	// Collect the reallocations first, then match: freeing inside the loop
-	// would return the same buffer and Get would hand it back repeatedly.
-	var addrs []uintptr
-	var bufs [][]byte
-	for range orphans {
-		again := allocPostBody(4096)
-		bufs = append(bufs, again)
-		addrs = append(addrs, uintptr(unsafe.Pointer(&again[0])))
-	}
-	for _, addr := range addrs {
-		found := false
-		for i, o := range orphans {
-			if o == addr {
-				orphans = append(orphans[:i], orphans[i+1:]...)
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("orphaned payload %x not returned to pool", addr)
-		}
-	}
-	for _, b := range bufs {
-		freePostBody(b)
-	}
-	if len(orphans) != 0 {
-		t.Fatalf("%d orphaned payloads not returned", len(orphans))
+	if got := postBodyPoolPuts.Load() - before; got != 3 {
+		t.Fatalf("drain returned %d pooled payloads, want 3", got)
 	}
 }
 

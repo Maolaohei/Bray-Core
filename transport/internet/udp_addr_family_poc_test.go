@@ -3,7 +3,6 @@ package internet_test
 import (
 	"context"
 	gonet "net"
-	"runtime"
 	"testing"
 	"time"
 
@@ -11,15 +10,12 @@ import (
 	. "github.com/xtls/xray-core/transport/internet"
 )
 
-// dualStackReportsV6 records platforms where binding an IPv4 wildcard (0.0.0.0)
-// yields a dual-stack socket whose LocalAddr reports [::]. On those platforms
-// the bound address is NOT a faithful signal of the requested family, so the
-// IPv4 direction can only be asserted functionally.
-//
-// Verified empirically on windows/amd64:
-//
-//	ListenPacket(ctx, "udp", "0.0.0.0:0") -> LocalAddr = [::]:port
-const dualStackReportsV6 = runtime.GOOS == "windows"
+// On dual-stack kernels (Linux, macOS, Windows) binding an IPv4 wildcard
+// (0.0.0.0) yields a socket whose LocalAddr reports the UNSPECIFIED [::], so
+// the bound address is NOT a faithful family signal. We therefore only reject
+// a SPECIFIC (non-wildcard) IPv6 address for an IPv4 destination; the
+// functional round-trip below is the authoritative guarantee that the socket
+// can actually reach the destination.
 
 // startUDPEcho spins up a minimal UDP echo server bound to the given address
 // and returns the dialable destination plus a close func. The test is skipped
@@ -96,8 +92,6 @@ func TestPOC_UDPWildcardBindFollowsDestFamily(t *testing.T) {
 			switch {
 			case tc.wantIPv6 && !gotIPv6:
 				t.Fatalf("IPv6 destination must bind an IPv6 wildcard: dest=%v local=%v", dest, udpAddr)
-			case !tc.wantIPv6 && gotIPv6 && !dualStackReportsV6:
-				t.Fatalf("IPv4 destination must bind an IPv4 wildcard: dest=%v local=%v", dest, udpAddr)
 			case !tc.wantIPv6 && gotIPv6 && !udpAddr.IP.IsUnspecified():
 				t.Fatalf("IPv4 destination bound a specific IPv6 address: dest=%v local=%v", dest, udpAddr)
 			}
