@@ -119,3 +119,66 @@ func TestPreConnect_CloseStopsProducers(t *testing.T) {
 		t.Fatalf("producers still dialing after close: %d -> %d", base, after)
 	}
 }
+
+// TestPreConnect_CloseBeforeUseNoLeak is a regression test for B4: when the
+// handler is closed before the first Process() ever runs, the pre-connect
+// producer goroutines must not be left running (dialing forever). This happens
+// only if preConnsStop is created eagerly (tied to handler construction) so that
+// Close() can close it even when no Process() has started yet. After the fix the
+// producers observe the already-closed channel and exit without dialing.
+func TestPreConnect_CloseBeforeUseNoLeak(t *testing.T) {
+	h := &Handler{testpre: 2}
+	// Simulate New() having created the channels up-front (the B4 fix).
+	h.preConns = make(chan *ConnExpire)
+	h.preConnsStop = make(chan struct{})
+
+	// Handler closed before any connection/Process ever runs.
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A connection then arrives and Process's lazy init starts the producers.
+	d := &countingDialer{}
+	dest := xnet.TCPDestination(xnet.DomainAddress("example.com"), 443)
+	h.initpre.Do(func() {
+		for range h.testpre {
+			go func() {
+				var conn stat.Connection
+				defer func() {
+					if r := recover(); r != nil && conn != nil {
+						conn.Close()
+					}
+				}()
+				for {
+					select {
+					case <-h.preConnsStop:
+						if conn != nil {
+							conn.Close()
+						}
+						return
+					default:
+					}
+					var err error
+					conn, err = d.Dial(context.Background(), dest)
+					if err != nil {
+						return
+					}
+					select {
+					case h.preConns <- &ConnExpire{Conn: conn}:
+					case <-h.preConnsStop:
+						conn.Close()
+						return
+					}
+				}
+			}()
+		}
+	})
+
+	// Producers must observe the already-closed stop channel and exit without
+	// dialing. Pre-fix, Close() saw a nil preConnsStop and was a no-op, so the
+	// producers started later spun forever (connection leak).
+	time.Sleep(200 * time.Millisecond)
+	if n := d.dials.Load(); n != 0 {
+		t.Fatalf("producers dialed %d times after Close-before-use (leak)", n)
+	}
+}

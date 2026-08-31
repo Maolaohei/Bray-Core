@@ -135,6 +135,19 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 
 	handler.testpre = a.Testpre
 
+	// Eagerly create the pre-connect channels so their lifetime is tied to
+	// handler construction (which happens-before any concurrent Process/Close),
+	// not to the first Process call's sync.Once. Previously they were created
+	// lazily inside Process's initpre, which (a) raced with Close()'s
+	// unsynchronized read of preConnsStop and (b) if Close ran before the first
+	// Process, left the channel nil so Close was a no-op and the producer
+	// goroutines started later by Process were never stopped, leaking
+	// connections (VLESS 专项 B4).
+	if handler.testpre > 0 && handler.reverse == nil {
+		handler.preConns = make(chan *ConnExpire)
+		handler.preConnsStop = make(chan struct{})
+	}
+
 	return handler, nil
 }
 
@@ -149,12 +162,42 @@ func (h *Handler) Close() error {
 	return nil
 }
 
+// validateOutboundTarget rejects an outbound session that has no usable target.
+//
+// A malformed session can arrive with an invalid Destination whose Address is
+// nil. The old inline check
+//
+//	!ob.Target.IsValid() && ob.Target.Address.String() != "v1.rvs.cool"
+//
+// short-circuited into the right operand only when !IsValid(), at which point
+// a nil Address made Address.String() panic with a nil-pointer dereference
+// instead of returning the "target not specified" error (VLESS 专项 B8).
+//
+// Note: the reverse-proxy sentinel target is constructed as
+// net.Destination{Address: net.DomainAddress("v1.rvs.cool")} with Network
+// Network_Unknown, so IsValid() is false for it by design — it must still be
+// allowed through, which is why the address string is compared (guarded
+// against nil) rather than simply requiring IsValid().
+func validateOutboundTarget(ob *session.Outbound) error {
+	if ob.Target.IsValid() {
+		return nil
+	}
+	addr := ""
+	if ob.Target.Address != nil {
+		addr = ob.Target.Address.String()
+	}
+	if addr != "v1.rvs.cool" {
+		return errors.New("target not specified").AtError()
+	}
+	return nil
+}
+
 // Process implements proxy.Outbound.Process().
 func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
-	if !ob.Target.IsValid() && ob.Target.Address.String() != "v1.rvs.cool" {
-		return errors.New("target not specified").AtError()
+	if err := validateOutboundTarget(ob); err != nil {
+		return err
 	}
 	ob.Name = "vless"
 
@@ -163,8 +206,6 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 
 	if h.testpre > 0 && h.reverse == nil {
 		h.initpre.Do(func() {
-			h.preConns = make(chan *ConnExpire)
-			h.preConnsStop = make(chan struct{})
 			for range h.testpre {
 				go func() {
 					var conn stat.Connection
