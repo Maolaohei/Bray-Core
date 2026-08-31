@@ -381,6 +381,7 @@ func (h *Handler) handleIPQuery(id uint16, qType dnsmessage.Type, domain string,
 		errors.LogInfoInner(context.Background(), err, "pack message")
 		b.Release()
 		timer.SetTimeout(0)
+		return
 	}
 	b.Resize(0, int32(len(msgBytes)))
 

@@ -229,6 +229,17 @@ func buildReqMsgs(domain string, option dns_feature.IPOption, reqIDGen func() ui
 		msg.Questions = append(msg.Questions[:0], qA)
 		if reqOpts != nil {
 			msg.Additionals = append(msg.Additionals[:0], *reqOpts)
+			// Deep-copy the OPT body so the message owns its Options slice and does
+			// not share the pooled *OPTResource with a concurrent query that reuses
+			// reqOpts after releaseOptResource. The old shallow copy left
+			// msg.Additionals[0].Body pointing at the same *OPTResource, so PackMessage
+			// (reading Options) raced with the next genEDNS0Options (resetting/
+			// appending Options) on the shared object — DNS 专项 D1.
+			if opt, ok := msg.Additionals[0].Body.(*dnsmessage.OPTResource); ok {
+				optCopy := *opt
+				optCopy.Options = append([]dnsmessage.Option(nil), opt.Options...)
+				msg.Additionals[0].Body = &optCopy
+			}
 		}
 		req := dnsRequestPool.Get().(*dnsRequest)
 		req.reqType = dnsmessage.TypeA
@@ -245,6 +256,17 @@ func buildReqMsgs(domain string, option dns_feature.IPOption, reqIDGen func() ui
 		msg.Questions = append(msg.Questions[:0], qAAAA)
 		if reqOpts != nil {
 			msg.Additionals = append(msg.Additionals[:0], *reqOpts)
+			// Deep-copy the OPT body so the message owns its Options slice and does
+			// not share the pooled *OPTResource with a concurrent query that reuses
+			// reqOpts after releaseOptResource. The old shallow copy left
+			// msg.Additionals[0].Body pointing at the same *OPTResource, so PackMessage
+			// (reading Options) raced with the next genEDNS0Options (resetting/
+			// appending Options) on the shared object — DNS 专项 D1.
+			if opt, ok := msg.Additionals[0].Body.(*dnsmessage.OPTResource); ok {
+				optCopy := *opt
+				optCopy.Options = append([]dnsmessage.Option(nil), opt.Options...)
+				msg.Additionals[0].Body = &optCopy
+			}
 		}
 		req := dnsRequestPool.Get().(*dnsRequest)
 		req.reqType = dnsmessage.TypeAAAA

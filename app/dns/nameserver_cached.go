@@ -186,41 +186,66 @@ func merge(option dns.IPOption, rec4 *IPRecord, rec6 *IPRecord, errs ...error) (
 
 	mergeReq := option.IPv4Enable && option.IPv6Enable
 
+	var err4, err6 error
 	if option.IPv4Enable {
 		ips, ttl, err := rec4.getIPs() // it's safe
-		if !mergeReq || go_errors.Is(err, errRecordNotFound) {
+		if !mergeReq {
 			return ips, ttl, err
 		}
-		if ttl < rTTL {
-			rTTL = ttl
-		}
+		// In dual-stack we must not bail out on one family's failure (e.g. the
+		// AAAA query was lost/timed out, or the domain simply has no AAAA): the
+		// other family's already-resolved IPs are still valid. Only single-stack
+		// may short-circuit here (DNS 专项 D2).
+		err4 = err
 		if len(ips) > 0 {
+			if ttl < rTTL {
+				rTTL = ttl
+			}
 			allIPs = append(allIPs, ips...)
-		} else {
-			errs = append(errs, err)
 		}
 	}
 
 	if option.IPv6Enable {
 		ips, ttl, err := rec6.getIPs() // it's safe
-		if !mergeReq || go_errors.Is(err, errRecordNotFound) {
+		if !mergeReq {
 			return ips, ttl, err
 		}
-		if ttl < rTTL {
-			rTTL = ttl
-		}
+		err6 = err
 		if len(ips) > 0 {
+			if ttl < rTTL {
+				rTTL = ttl
+			}
 			allIPs = append(allIPs, ips...)
-		} else {
-			errs = append(errs, err)
 		}
 	}
 
 	if len(allIPs) > 0 {
 		return allIPs, rTTL, nil
 	}
-	if len(errs) == 2 && go_errors.Is(errs[0], errs[1]) {
-		return nil, rTTL, errs[0]
+
+	// No IPs collected. Prefer the per-family getIPs() errors (e.g. NXDOMAIN's
+	// NameError, or ErrEmptyResponse for a family with no records) over the
+	// transport-level errs, since a successful query can still carry a record
+	// error. Only when no family reported a record error do we fall back to the
+	// transport errs, and finally to a clean nil (DNS 专项 D2).
+	var recErrs []error
+	if err4 != nil {
+		recErrs = append(recErrs, err4)
 	}
-	return nil, rTTL, errors.Combine(errs...)
+	if err6 != nil {
+		recErrs = append(recErrs, err6)
+	}
+	if len(recErrs) > 0 {
+		if len(recErrs) == 2 && go_errors.Is(recErrs[0], recErrs[1]) {
+			return nil, rTTL, recErrs[0]
+		}
+		return nil, rTTL, errors.Combine(recErrs...)
+	}
+	if len(errs) > 0 {
+		if len(errs) == 2 && go_errors.Is(errs[0], errs[1]) {
+			return nil, rTTL, errs[0]
+		}
+		return nil, rTTL, errors.Combine(errs...)
+	}
+	return nil, rTTL, nil
 }
