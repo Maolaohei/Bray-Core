@@ -9,6 +9,42 @@
 
 ---
 
+## [2026.08.30] — 2026-08-30
+
+对应提交：`6bd9e448` 至 `d2bcd2a85`（上游同步 7 提交 + XHTTP dseg 静默截断修复 + POC）。
+
+### ⚠️ 升级注意（安全校验生效）
+
+- `65458e91`（Config: Fix some issues）让原本**完全失效**的"禁止公网明文 VLESS/Trojan"校验**真正生效**（fork 此前读取了恒为 nil 的顶层 `Address` 字段）。
+  **升级后，任何指向公网地址且未启用 TLS 的 VLESS/Trojan 出站将无法启动。**
+
+### 安全
+
+- 出站传输安全校验地址源改为 `Vnext[0].Address` / `Servers[0].Address`，公网明文 VLESS/Trojan 出站被拒绝（域名公私按子域判定：`example.com` 为**公网**、`host.example` 为私有）。
+
+### 上游同步（XTLS/Xray-core，7 个提交）
+
+- `c1958dba` FreeBSD TUN `autoSystemRoutingTable` / `autoOutboundsInterface`。
+- `540b9070` UDP 出站 socket 按目标地址族绑定（修复 IPv6 目标失败）。
+- `dffc7ada` XHTTP packet-up `Request.GetBody()`，h2 GOAWAY 后可重放（已适配 fork 池化实现：非热路径急切拷贝 replay 快照、热路径零拷贝 durable body）。
+- `aa3d6589` macOS TUN `Wait()` 改用 kqueue 阻塞，消除忙等占满一核。
+- `c7e569b0` WireGuard 出站 `remoteDNS` 并尊重 TTL。
+- `ada99a4e` Hysteria 升级至官方 v2.12.2（配置层手工平移回未拆分的 `transport_internet.go`；`apernet/quic-go` 顶到 `v0.61.1-0.20260806010916-184d081eef3e`）。
+
+### 修复（XHTTP 下行分段 dseg）
+
+- **慢速消费者静默截断**：dseg 开启时大文件下载静默丢字节（服务端生产腿 finalize 即拆会话 + 客户端 `Read()` 先判 fatal）。修复：
+  - 服务端 `holdDrainLeg()` 等到 `drained()=final && eofServed && len(segs)==0`（上限 2min，`idleFor()` 判定客户端存活）；
+  - 客户端 `Read()` 改为 `buf → skip → eofAt → fatal → prodErr`，`failProductionLeg` 延后 + 30s 停摆检测取代快速失败。
+- POC（负向对照已做）：`downseg_drain_poc_test.go`（5 例）+ `testing/scenarios/dseg_slow_reader_poc_test.go`（64 MiB 端到端门）。2×2 验证：新/新 PASS@67.1M，移除任一修复即 FAIL。
+
+### 文档
+
+- `docs/xhttp-dseg-truncation-fix-2026-08-30.md`：根因、探针实测、修复、2×2 分量验证、性能影响。
+- `docs/upstream-sync-review-2026-08-30.md` / `upstream-merge-2026-08-30.md`：上游同步审查与合并报告。
+
+---
+
 ## [26.8.3] — 2026-08-05
 
 对应提交：`9de077d9` 至 `b7f24639`（XHTTP 热路径性能批次 + Go 工具链升级）。
