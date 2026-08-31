@@ -15,25 +15,44 @@ import (
 )
 
 // keyLogCache caches key log file handles to avoid leaking file descriptors.
+// Each handle is wrapped in a mutex so concurrent handshakes (which all share
+// the same *os.File for a given path) serialize their writes — os.File is not
+// safe for concurrent use and racing writes corrupt the key log and trip the
+// race detector (REALITY 专项 R2). On Linux/Unix Go's os.File.Write is
+// lock-free, so the shared offset races; on Windows Go serializes internally,
+// but we wrap uniformly for correctness on every platform.
 var keyLogCache = struct {
 	sync.Mutex
-	handles map[string]*os.File
+	handles map[string]*lockedKeyLogWriter
 }{
-	handles: make(map[string]*os.File),
+	handles: make(map[string]*lockedKeyLogWriter),
 }
 
-func getKeyLogWriter(path string) *os.File {
+// lockedKeyLogWriter serializes Write calls onto a shared *os.File.
+type lockedKeyLogWriter struct {
+	mu sync.Mutex
+	f  *os.File
+}
+
+func (w *lockedKeyLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.f.Write(p)
+}
+
+func getKeyLogWriter(path string) *lockedKeyLogWriter {
 	keyLogCache.Lock()
 	defer keyLogCache.Unlock()
-	if f, ok := keyLogCache.handles[path]; ok {
-		return f
+	if w, ok := keyLogCache.handles[path]; ok {
+		return w
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil
 	}
-	keyLogCache.handles[path] = f
-	return f
+	w := &lockedKeyLogWriter{f: f}
+	keyLogCache.handles[path] = w
+	return w
 }
 
 func (c *Config) GetREALITYConfig() (*reality.Config, error) {
