@@ -262,30 +262,53 @@ func (w *ServerWorker) xudpEstablish(ctx context.Context, meta *FrameMetadata, m
 	if x == nil {
 		x = &XUDP{GlobalID: meta.GlobalID}
 		XUDPManager.Map[meta.GlobalID] = x
-		XUDPManager.Unlock()
+		// x.Status is 0 (Initializing) by default; a concurrent caller will
+		// see the else branch below and bail on the conflict check.
 	} else {
-		if x.Status == Initializing { // nearly impossible
+		if x.Status == Initializing { // another goroutine is establishing
 			XUDPManager.Unlock()
 			errors.LogWarningInner(ctx, errors.New("conflict"), "XUDP hit ", meta.GlobalID)
 			// It's not a good idea to return an err here, so just let client wait.
 			// Client will receive an End frame after sending a Keep frame.
 			return nil
 		}
-		x.Status = Initializing
-		XUDPManager.Unlock()
-		x.Mux.Close(false) // detach from previous Mux
-		b := buf.New()
-		b.Write(mb[0].Bytes())
-		b.UDP = mb[0].UDP
-		if werr := x.Mux.output.WriteMultiBuffer(mb); werr != nil {
-			x.Interrupt()
-			mb = buf.MultiBuffer{b}
-		} else {
-			b.Release()
-			mb = nil
-		}
-		errors.LogInfoInner(ctx, nil, "XUDP hit ", meta.GlobalID)
 	}
+	// Mark establishing and capture the previous Mux while holding the lock
+	// that the init() ticker and Session.Close also use for x.Mux/x.Status.
+	x.Status = Initializing
+	var oldMux *Session
+	if x.Mux != nil {
+		oldMux = x.Mux
+	}
+	// Release before detaching the old Mux: Session.Close() (invoked by
+	// oldMux.Close) re-acquires XUDPManager lock, so it must not be held here.
+	XUDPManager.Unlock()
+	if oldMux != nil {
+		oldMux.Close(false) // detach from previous Mux
+	}
+
+	// Forward this datagram onto the previous session's downstream link.
+	b := buf.New()
+	b.Write(mb[0].Bytes())
+	b.UDP = mb[0].UDP
+	var werr error
+	if oldMux != nil {
+		werr = oldMux.output.WriteMultiBuffer(mb)
+	} else {
+		werr = errors.New("no existing mux")
+	}
+	if werr != nil {
+		if oldMux != nil {
+			common.Interrupt(oldMux.input)
+			common.Close(oldMux.output)
+		}
+		mb = buf.MultiBuffer{b}
+	} else {
+		b.Release()
+		mb = nil
+	}
+	errors.LogInfoInner(ctx, nil, "XUDP hit ", meta.GlobalID)
+
 	if mb != nil {
 		ctx = session.ContextWithTimeoutOnly(ctx, true)
 		// Actually, it won't return an error in Xray-core's implementations.
@@ -303,12 +326,19 @@ func (w *ServerWorker) xudpEstablish(ctx context.Context, meta *FrameMetadata, m
 			return nil
 		}
 		link.Writer.WriteMultiBuffer(mb) // it's meaningless to test a new pipe
+		// All x.Mux assignments and the x.Status write must happen under
+		// XUDPManager lock: the init() ticker (session.go:244-245) and
+		// Session.Close (session.go:193-195) read x.Mux/x.Status while
+		// holding that same lock. Writing them unlocked is a data race
+		// (XMUX 专项 M1).
+		XUDPManager.Lock()
 		x.Mux = &Session{
 			input:  link.Reader,
 			output: link.Writer,
 		}
-		errors.LogInfoInner(ctx, err, "XUDP new ", meta.GlobalID)
+		XUDPManager.Unlock()
 	}
+	XUDPManager.Lock()
 	x.Mux = &Session{
 		input:        x.Mux.input,
 		output:       x.Mux.output,
@@ -318,11 +348,16 @@ func (w *ServerWorker) xudpEstablish(ctx context.Context, meta *FrameMetadata, m
 		XUDP:         x,
 	}
 	x.Status = Active
-	if !w.sessionManager.Add(x.Mux) {
-		x.Mux.Close(false)
+	// Capture the final Mux under the lock so the (unlocked) Add/handle calls
+	// below never read x.Mux concurrently with a future re-establishment.
+	mux := x.Mux
+	XUDPManager.Unlock()
+
+	if !w.sessionManager.Add(mux) {
+		mux.Close(false)
 		return errors.New("failed to add new session")
 	}
-	go handle(ctx, x.Mux, w.link.Writer)
+	go handle(ctx, mux, w.link.Writer)
 	return nil
 }
 
