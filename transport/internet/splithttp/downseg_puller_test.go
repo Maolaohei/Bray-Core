@@ -60,16 +60,38 @@ func TestMonitorProductionLegIgnoresLocalClose(t *testing.T) {
 	}
 }
 
-func TestDownSegPullerProductionFailurePreemptsBufferedSegments(t *testing.T) {
+// A hard failure (segment gone / transport error) is terminal, but it must
+// still not discard bytes the client already owns at the current position:
+// those bytes precede the failure and are valid. The error surfaces as soon as
+// the buffered prefix has been handed out.
+//
+// This replaced TestDownSegPullerProductionFailurePreemptsBufferedSegments,
+// which asserted that a terminal condition discards buffered segments — the
+// exact behaviour that silently truncated large downloads (20.6 MiB missing
+// from a 64 MiB transfer). See downseg_drain_poc_test.go.
+func TestDownSegPullerHardFailureSurfacesAfterBufferedPrefix(t *testing.T) {
 	want := errors.New("production GET closed")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	p := &DownSegPuller{
-		buf:   map[uint64][]byte{0: []byte("stale")},
-		fatal: want,
-		wake:  make(chan struct{}, 1),
+		buf:          map[uint64][]byte{0: []byte("stale")},
+		skip:         map[uint64]bool{},
+		fatal:        want,
+		wake:         make(chan struct{}, 1),
+		ctx:          ctx,
+		cancel:       cancel,
+		lastProgress: time.Now(),
 	}
 
-	_, err := p.Read(make([]byte, 16))
-	if !errors.Is(err, want) {
+	// The buffered segment at the current position is valid data: deliver it
+	// instead of throwing it away with the error.
+	b := make([]byte, 16)
+	n, err := p.Read(b)
+	if err != nil || string(b[:n]) != "stale" {
+		t.Fatalf("Read = %q, %v; want %q, nil", b[:n], err, "stale")
+	}
+	// Nothing left at the new position, so the hard failure surfaces now.
+	if _, err := p.Read(b); !errors.Is(err, want) {
 		t.Fatalf("Read error = %v, want production failure %v", err, want)
 	}
 }

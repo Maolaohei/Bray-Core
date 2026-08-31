@@ -246,6 +246,12 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 			// Stream finalized and the segment never appeared: end of data.
 			// Signal EOF with an empty 200 body so the client can distinguish
 			// it from a transient 404 (see PullSegment).
+			// Record it: this is the client's proof of having seen the end of
+			// the stream, and the production leg waits for it before tearing
+			// the session down (see holdDrainLeg).
+			if c := sess.downseg.Load(); c != nil {
+				c.noteEofServed()
+			}
 			return
 		}
 		if time.Now().After(deadline) {
@@ -269,6 +275,63 @@ const (
 	downsegProdIdleCheck = 5 * time.Second
 	downsegProdIdleLimit = 30 * time.Minute
 )
+
+// downsegDrainGrace bounds how long the production leg lingers AFTER the
+// producer finished, waiting for the client to pull the remaining segments
+// and the EOF marker. Exiting the leg tears down the session and its segment
+// cache, so anything the client has not pulled yet is gone for good.
+//
+// A live client always keeps pulling (which resets the idle clock), so this
+// only fires for a client that stopped pulling entirely — vanished, TCP
+// half-open, or abandoned. That is the same population the pre-finalize idle
+// reaper targets, and it is bounded, so the hold cannot pin the session's
+// ~64 MiB cache forever.
+const (
+	downsegDrainGrace = 2 * time.Minute
+	downsegDrainPoll  = 100 * time.Millisecond
+)
+
+// holdDrainLeg keeps the production leg — and with it the session and its
+// segment cache — alive until the client has actually received the whole
+// downlink, or until the client stops making progress entirely.
+//
+// Why this exists: the producer (proxied target) and the consumer (client
+// reader) are decoupled by the segment cache. The cache may legally hold up
+// to downsegAdaptiveSegs (64) segments, so a fast origin reaches EOF while
+// tens of MiB are still undelivered. Without this hold the leg returns the
+// instant the producer closes, the session is deleted, and every remaining
+// segment 404s — a silent truncation that no amount of client-side retry can
+// recover from.
+func holdDrainLeg(ctx context.Context, s *httpSession, sessionId string) {
+	c := s.downseg.Load()
+	if c == nil {
+		return
+	}
+	ticker := time.NewTicker(downsegDrainPoll)
+	defer ticker.Stop()
+	for {
+		if c.drained() {
+			if dbgDownSeg {
+				dbgLog("[DBGPROD] drain complete, sid=", sessionId)
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			if dbgDownSeg {
+				dbgLog("[DBGPROD] drain aborted: ctx done, sid=", sessionId)
+			}
+			return
+		case <-ticker.C:
+			if c.idleFor() > downsegDrainGrace {
+				if dbgDownSeg {
+					dbgLog("[DBGPROD] drain abandoned: client idle > grace, sid=", sessionId)
+				}
+				return
+			}
+		}
+	}
+}
 
 func (h *requestHandler) getSessionTtl() int32 {
 	if h.cfDetected.Load() {
@@ -704,7 +767,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 					return
 				case <-httpSC.Wait():
 					if dbgDownSeg {
-						dbgLog("[DBGPROD] prodLeg exit: httpSC.Wait, sid=", sessionId)
+						dbgLog("[DBGPROD] producer finished, holding leg for client drain, sid=", sessionId)
+					}
+					// The producer is done, but the client may still owe tens
+					// of MiB of pulls. Keep the session (and cache) alive
+					// until it has them; see holdDrainLeg.
+					holdDrainLeg(request.Context(), currentSession, sessionId)
+					if dbgDownSeg {
+						dbgLog("[DBGPROD] prodLeg exit: drained, sid=", sessionId)
 					}
 					return
 				case <-reaper.C:

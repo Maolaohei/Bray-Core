@@ -66,6 +66,19 @@ const DownSegWindowSize = 6
 // 20 ms row across clients (fingerprint clustering risk).
 const downSegRetryInterval = 20 * time.Millisecond
 
+// downsegStallGraceDefault is the production value of downsegStallGrace.
+const downsegStallGraceDefault = 30 * time.Second
+
+// downsegStallGrace is how long the puller keeps working after the production
+// leg has ended without any forward progress (a segment pulled, the EOF marker
+// found, or a segment handed to the reader). A live transfer always makes
+// progress, so this only fires once the server is genuinely gone. It replaces
+// the old "prod-leg EOF is instantly fatal" rule, which threw away up to
+// prefetchAheadSegs of already-pulled data.
+//
+// It is a var so tests can shrink it (a 30s unit test is not acceptable).
+var downsegStallGrace = downsegStallGraceDefault
+
 // downSegCurrentRetryInterval is used only by the segment the reader is
 // blocked on. It shortens page/API first-byte recovery without increasing the
 // five future prefetch workers' 404 cadence or changing any wire shape.
@@ -151,6 +164,16 @@ type DownSegPuller struct {
 	fatal       error
 	closed      bool
 
+	// prodErr is the error the production leg ended with. It is NOT fatal on
+	// its own: the server holds the session until the client has pulled every
+	// produced segment and the EOF marker (see holdDrainLeg), so the tail is
+	// still retrievable. Failing immediately here is what silently discarded
+	// up to prefetchAheadSegs (~24 MiB at the 1 MiB segment size) of data the
+	// client had already pulled. It turns fatal only after the stream stops
+	// making progress for downsegStallGrace.
+	prodErr      error
+	lastProgress time.Time
+
 	nextIssue atomic.Uint64
 	wg        sync.WaitGroup
 	wake      chan struct{}
@@ -160,15 +183,16 @@ type DownSegPuller struct {
 func NewDownSegPuller(ctx context.Context, client *DefaultDialerClient, base *url.URL, sessionId string, prod io.Closer) *DownSegPuller {
 	pctx, cancel := context.WithCancel(ctx)
 	p := &DownSegPuller{
-		client:    client,
-		base:      base,
-		sessionId: sessionId,
-		ctx:       pctx,
-		cancel:    cancel,
-		prod:      prod,
-		buf:       make(map[uint64][]byte),
-		skip:      make(map[uint64]bool),
-		wake:      make(chan struct{}, 1),
+		client:       client,
+		base:         base,
+		sessionId:    sessionId,
+		ctx:          pctx,
+		cancel:       cancel,
+		prod:         prod,
+		buf:          make(map[uint64][]byte),
+		skip:         make(map[uint64]bool),
+		wake:         make(chan struct{}, 1),
+		lastProgress: time.Now(),
 	}
 	for i := 0; i < DownSegWindowSize; i++ {
 		p.wg.Add(1)
@@ -186,9 +210,13 @@ func NewDownSegPuller(ctx context.Context, client *DefaultDialerClient, base *ur
 
 // monitorProductionLeg blocks until the production GET ends. A production
 // GET carries no application bytes in segment mode; segment pulls carry the
-// downlink. Therefore any peer-side EOF/error while the puller is active
-// means the server has torn down its uploadQueue and this logical packet-up
-// connection must fail instead of continuing POSTs with a stale sessionId.
+// downlink, so the leg's only job is to signal the peer's view of the session.
+//
+// Its end is deliberately NOT an immediate failure (see failProductionLeg):
+// in the normal case the server closes it exactly when the producer has
+// reached EOF, which routinely happens while the client still owes tens of
+// MiB of pulls. The server keeps the session alive until the client has them
+// (holdDrainLeg), so the correct reaction is to keep draining, not to bail.
 func monitorProductionLeg(ctx context.Context, prod io.Reader, fail func(error)) {
 	var scratch [1]byte
 	for {
@@ -206,14 +234,38 @@ func monitorProductionLeg(ctx context.Context, prod io.Reader, fail func(error))
 	}
 }
 
+// failProductionLeg records that the production leg ended. Unlike a hard
+// protocol error this is DEFERRED, not fatal.
+//
+// The old behaviour (fail fast, and cancel the puller context right away)
+// was lossy: Read() checks terminal conditions before it looks at p.buf, so
+// every segment the workers had already prefetched but the application had
+// not read yet was dropped on the floor. With a fast origin and a slow reader
+// that is up to prefetchAheadSegs segments — measured 20.6 MiB missing from a
+// 64 MiB download, with no error anywhere but the byte count.
+//
+// What we do instead: keep pulling. Two things bound it.
+//
+//   - The server holds the session until the client has pulled every produced
+//     segment plus the EOF marker, so a live drain always completes and ends
+//     in a clean io.EOF via eofAt.
+//   - If the server really is gone, pulls stop resolving and the stream makes
+//     no progress for downsegStallGrace, at which point we surface prodErr.
+//
+// The upload side is unaffected: while the drain is in progress the session
+// still exists server-side, so packet-up POSTs are not going to a stale
+// sessionId — which was the original reason for failing fast.
 func (p *DownSegPuller) failProductionLeg(err error) {
 	p.mu.Lock()
-	if !p.closed && p.fatal == nil {
-		p.fatal = err
+	if !p.closed && p.prodErr == nil {
+		p.prodErr = err
+		p.lastProgress = time.Now()
+		if dbgDownSeg {
+			dbgLog("[DBGPULL] prod leg ended (deferred, still draining):", err.Error(), "sid=", p.sessionId)
+		}
 	}
 	p.mu.Unlock()
 	p.notify()
-	p.cancel()
 }
 
 // prefetchAheadSegs is how many segments may be reserved (fetched or
@@ -286,10 +338,12 @@ func (p *DownSegPuller) worker() {
 			switch {
 			case err == nil && len(seg) > 0:
 				p.buf[seq] = seg
+				p.lastProgress = time.Now()
 				if pctxd := p.ctx.Err(); pctxd != nil && dbgDownSeg {
 					dbgLog("[DBGPULL] seg", seq, "ok len", len(seg), "BUT ctx err", pctxd.Error())
 				}
 			case err == nil: // empty 200 -> EOF marker at seq (first wins)
+				p.lastProgress = time.Now()
 				if p.eofAt == 0 || seq < p.eofAt {
 					p.eofAt = seq
 					if dbgDownSeg {
@@ -312,7 +366,24 @@ func (p *DownSegPuller) worker() {
 				// base; future prefetches retain the normal jittered cadence.
 				// This stays entirely client-local: no held server H2 stream.
 				base := downSegRetryBase(seq, p.consumedSeq)
+				// Once the production leg is gone the server has stopped
+				// producing, so a 404 means "never coming" far more often
+				// than "not yet": back off harder (no pull storm against a
+				// possibly-deleted session) and give up entirely once the
+				// stream has stalled for downsegStallGrace.
+				var dead error
+				if p.prodErr != nil {
+					if p.fatal == nil && time.Since(p.lastProgress) > downsegStallGrace {
+						dead = p.prodErr
+						p.fatal = dead
+					}
+					base *= 4
+				}
 				p.mu.Unlock()
+				if dead != nil {
+					p.notify()
+					return
+				}
 				wait := base + time.Duration(biasedRangeRand(-int32(base/time.Millisecond), int32(base/time.Millisecond)))*time.Millisecond
 				if wait < 1*time.Millisecond {
 					wait = 1 * time.Millisecond
@@ -366,18 +437,20 @@ func (p *DownSegPuller) Read(b []byte) (int, error) {
 	for {
 		p.mu.Lock()
 		c := p.consumedSeq
-		// A dead production GET means the server has already discarded this
-		// packet-up session. Do not drain prefetched bytes first: doing so lets
-		// the upload side keep POSTing on the stale session for arbitrarily
-		// longer under a slow reader.
-		if p.fatal != nil {
-			err := p.fatal
-			p.fatal = nil
-			p.mu.Unlock()
-			return 0, err
-		}
+		// Data first, terminal conditions second.
+		//
+		// This ordering is deliberate and is the fix for a silent truncation:
+		// the puller checks fatal/prodErr only once p.buf has nothing left for
+		// the current seq. Bytes the client already owns are never discarded
+		// because of something that happened on a different leg. The old order
+		// (fatal first) threw away up to prefetchAheadSegs of prefetched
+		// segments whenever the production leg closed, and it is not needed for
+		// the stale-session concern it was written for: the server keeps the
+		// session alive until the drain completes, so the upload side is not
+		// POSTing into a deleted session while we drain (see holdDrainLeg).
 		if seg, ok := p.buf[c]; ok {
 			delete(p.buf, c)
+			p.lastProgress = time.Now()
 			p.mu.Unlock()
 			n := copy(b, seg)
 			if n < len(seg) {
@@ -396,13 +469,44 @@ func (p *DownSegPuller) Read(b []byte) (int, error) {
 		if p.skip[c] {
 			delete(p.skip, c)
 			p.consumedSeq = c + 1
+			p.lastProgress = time.Now()
 			p.mu.Unlock()
 			p.notify() // consumption freed prefetch budget
 			continue
 		}
+		// A known end of stream outranks any pending error: if the EOF marker
+		// was found, every byte has been delivered and this is a clean finish
+		// even if the production leg has since closed.
 		if p.eofAt != 0 && c >= p.eofAt {
 			p.mu.Unlock()
 			return 0, io.EOF
+		}
+		// Hard protocol/transport error: the missing segment cannot appear by
+		// waiting, so this one really is terminal.
+		if p.fatal != nil {
+			err := p.fatal
+			p.fatal = nil
+			p.mu.Unlock()
+			return 0, err
+		}
+		// Production leg ended: keep draining while the stream still makes
+		// progress, fail once it has stalled for downsegStallGrace.
+		if p.prodErr != nil {
+			if d := time.Until(p.lastProgress.Add(downsegStallGrace)); d > 0 {
+				p.mu.Unlock()
+				select {
+				case <-p.wake:
+				case <-p.ctx.Done():
+					return 0, p.ctx.Err()
+				case <-time.After(d):
+				}
+				continue
+			}
+			err := p.prodErr
+			p.prodErr = nil
+			p.mu.Unlock()
+			p.cancel() // nothing more can arrive; stop the workers
+			return 0, fmt.Errorf("XHTTP dseg stream stalled after production ended: %w", err)
 		}
 		p.mu.Unlock()
 		select {

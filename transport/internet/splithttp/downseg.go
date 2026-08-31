@@ -165,6 +165,13 @@ type downSegCache struct {
 	// final is true once finalize() ran (stream complete; no more
 	// segments will be produced).
 	final bool
+	// eofServed is set once the pull handler has handed the empty-200 EOF
+	// marker to the client. Together with "no undelivered segments left" it
+	// is the server's proof that the CLIENT owns the whole stream — which is
+	// exactly what releasing the production leg must wait for (see
+	// holdDrainLeg). Tearing the session down any earlier silently truncates
+	// a consumer that reads slower than the origin produces.
+	eofServed bool
 
 	// pullAtNs / writeAtNs stamp the last client-segment-pull and last
 	// downlink-production activity (unix nanos). The production-leg
@@ -557,6 +564,29 @@ func (c *downSegCache) over() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.final
+}
+
+// noteEofServed records that the EOF marker (empty 200) was handed to the
+// client, i.e. the client knows where the stream ends.
+func (c *downSegCache) noteEofServed() {
+	c.mu.Lock()
+	c.eofServed = true
+	c.mu.Unlock()
+}
+
+// drained reports whether the client has received the entire downlink: the
+// producer finalized, every produced segment was pulled, and the EOF marker
+// was served. Only then may the production leg release the session.
+//
+// Releasing earlier truncates any consumer whose reader is slower than the
+// origin: the server can hold up to downsegAdaptiveSegs (64 segments, ~64 MiB)
+// ahead of the client, so the producer routinely reaches EOF while tens of
+// MiB are still undelivered. Close-then-discard turns that into silent data
+// loss (measured: 20.6 MiB missing from a 64 MiB download).
+func (c *downSegCache) drained() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.final && c.eofServed && len(c.segs) == 0
 }
 
 // idleFor reports how long neither a segment pull nor downlink production has

@@ -103,6 +103,7 @@ testing/mem_alloc_flame.svg
 # Local scratch / cache dirs (housekeeping)
 .gotmp/
 .gocache/
+.gocache-xhttp/
 .gomodcache/
 .codex-tmp/
 .tmp-perf/
