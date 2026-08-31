@@ -185,7 +185,17 @@ func Test_ListenXHAndDial_TLS(t *testing.T) {
 	}
 
 	end := time.Now()
-	if !end.Before(start.Add(time.Second * 5)) {
+	// The real correctness checks are the payload-equality assertions above,
+	// which are race-independent. The wall-clock budget only guards against a
+	// hung server. Under the race detector the TLS/QUIC handshake and echo
+	// round-trips are several times slower, and the CI ubuntu runner routinely
+	// exceeds 5s (observed ~11s on QUIC), so scale the budget there to avoid
+	// a flake.
+	budget := 5 * time.Second
+	if raceEnabled() {
+		budget = 60 * time.Second
+	}
+	if !end.Before(start.Add(budget)) {
 		t.Error("end: ", end, " start: ", start)
 	}
 }
@@ -310,7 +320,17 @@ func Test_ListenXHAndDial_QUIC(t *testing.T) {
 	}
 
 	end := time.Now()
-	if !end.Before(start.Add(time.Second * 5)) {
+	// The real correctness checks are the payload-equality assertions above,
+	// which are race-independent. The wall-clock budget only guards against a
+	// hung server. Under the race detector the TLS/QUIC handshake and echo
+	// round-trips are several times slower, and the CI ubuntu runner routinely
+	// exceeds 5s (observed ~11s on QUIC), so scale the budget there to avoid
+	// a flake.
+	budget := 5 * time.Second
+	if raceEnabled() {
+		budget = 60 * time.Second
+	}
+	if !end.Before(start.Add(budget)) {
 		t.Error("end: ", end, " start: ", start)
 	}
 }
