@@ -527,8 +527,15 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
 			paddingLen = int32(randpool.Global.IntN(int(testseed[3])))
 		}
 	}
-	if paddingLen > buf.Size-21-contentLen {
-		paddingLen = buf.Size - 21 - contentLen
+	// Clamp padding so the padded buffer fits in buf.Size. If the content alone
+	// already exceeds buf.Size-21 there is no room left for padding; use 0 rather
+	// than a negative value, which would make buf.Buffer.Extend panic with a
+	// slice-bounds-out-of-range error (e.g. a full 8192-byte TLS record during
+	// the XRV/vision padding phase).
+	if room := buf.Size - 21 - contentLen; room < 0 {
+		paddingLen = 0
+	} else if paddingLen > room {
+		paddingLen = room
 	}
 	newbuffer := buf.New()
 	if userUUID != nil {
