@@ -299,9 +299,20 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	errors.LogInfo(ctx, "tunneling request to ", target, " via ", rec.Destination.NetAddr())
 
 	if h.encryption != nil {
+		// REALITY 专项 R1: bound the handshake with a read deadline before
+		// starting it, so a slow/hijacked upstream that stalls the ML-KEM
+		// exchange cannot pin this goroutine. Cleared immediately after,
+		// because the long-lived data stream must not be deadline-bounded.
+		sessionPolicy := h.policyManager.ForLevel(0)
+		if err := conn.SetReadDeadline(time.Now().Add(sessionPolicy.Timeouts.Handshake)); err != nil {
+			return errors.New("unable to set handshake read deadline").Base(err).AtWarning()
+		}
 		var err error
 		if conn, err = h.encryption.Handshake(conn); err != nil {
 			return errors.New("ML-KEM-768 handshake failed").Base(err).AtInfo()
+		}
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
+			return errors.New("unable to clear handshake read deadline").Base(err).AtWarning()
 		}
 	}
 

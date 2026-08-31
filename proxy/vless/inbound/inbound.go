@@ -269,14 +269,25 @@ func (*Handler) Network() []net.Network {
 func (h *Handler) Process(ctx context.Context, network net.Network, connection stat.Connection, dispatch routing.Dispatcher) error {
 	iConn := stat.TryUnwrapStatsConn(connection)
 
+	sessionPolicy := h.policyManager.ForLevel(0)
+
 	if h.decryption != nil {
+		// REALITY 专项 R1: bound the ML-KEM/REALITY handshake with a read
+		// deadline BEFORE starting it. ServerInstance.Handshake performs
+		// several io.ReadFull calls with no internal deadline, so a client
+		// that completes auth then stalls would otherwise pin this goroutine
+		// (and the FD) forever — a Slowloris-style DoS. The deadline is
+		// re-affirmed below for the first request-header read and cleared once
+		// the header is parsed, so it never bounds the long-lived data stream.
+		if err := connection.SetReadDeadline(time.Now().Add(sessionPolicy.Timeouts.Handshake)); err != nil {
+			return errors.New("unable to set handshake read deadline").Base(err).AtWarning()
+		}
 		var err error
 		if connection, err = h.decryption.Handshake(connection, nil); err != nil {
 			return errors.New("ML-KEM-768 handshake failed").Base(err).AtInfo()
 		}
 	}
 
-	sessionPolicy := h.policyManager.ForLevel(0)
 	if err := connection.SetReadDeadline(time.Now().Add(sessionPolicy.Timeouts.Handshake)); err != nil {
 		return errors.New("unable to set read deadline").Base(err).AtWarning()
 	}
