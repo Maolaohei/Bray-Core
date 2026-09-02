@@ -32,15 +32,15 @@ func TestProbeCooldownEngagesAfterStreak(t *testing.T) {
 	defer m.Close()
 
 	// First two dial-dead notes should not yet cool.
-	_ = m.noteProbeDialDead()
+	_ = m.noteProbeFailure()
 	if m.probeInCooldown() {
 		t.Fatal("cooldown should not engage after 1 fail")
 	}
-	_ = m.noteProbeDialDead()
+	_ = m.noteProbeFailure()
 	if m.probeInCooldown() {
 		t.Fatal("cooldown should not engage after 2 fails")
 	}
-	_ = m.noteProbeDialDead()
+	_ = m.noteProbeFailure()
 	if !m.probeInCooldown() {
 		t.Fatal("cooldown should engage after 3 dial-dead fails")
 	}
@@ -61,7 +61,7 @@ func TestProbeCooldownLogRateLimit(t *testing.T) {
 	// Burst of failures: only first should log within the window.
 	logs := 0
 	for i := 0; i < 10; i++ {
-		if m.noteProbeDialDead() {
+		if m.noteProbeFailure() {
 			logs++
 		}
 	}

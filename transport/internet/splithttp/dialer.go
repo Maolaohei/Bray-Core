@@ -838,6 +838,51 @@ func init() {
 	common.Must(internet.RegisterTransportDialer(protocolName, Dial))
 }
 
+// uploadRenewBackoff is the minimum interval between upload-client renewal
+// retries after an attempt that did not yield a usable replacement.
+//
+// The renewal block lives inside the per-chunk packet-up loop. Under a
+// persistent failure (x509 being the reported one) getHTTPClient keeps failing,
+// the old client stays exhausted, and the condition stays true — so every chunk
+// ran a full TCP + TLS handshake through the XMUX pool and emitted an Info-level
+// log line. Chunks are capped below at packetUploadChunkMin (32 KiB), so a
+// saturated upload produced hundreds of doomed handshakes and log lines per
+// second: the upload-side half of the 2026.08.31 断流 report.
+//
+// Only UNSUCCESSFUL attempts arm the backoff. A healthy renewal hands the
+// connection a fresh LeftRequests budget and is not needed again for a long
+// time, so this never delays the normal path.
+const uploadRenewBackoff = time.Second
+
+// uploadRenewLimiter throttles upload-client renewal retries after failures.
+// Single-goroutine use: the caller holds clientMu across the renewal block.
+type uploadRenewLimiter struct {
+	backoff time.Duration
+	now     func() time.Time // injectable so the policy can be tested
+	last    time.Time        // zero when the previous attempt succeeded
+}
+
+// clock returns the current time, defaulting to time.Now when not injected.
+func (l *uploadRenewLimiter) clock() time.Time {
+	if l.now != nil {
+		return l.now()
+	}
+	return time.Now()
+}
+
+// due reports whether another renewal attempt may be made right now.
+func (l *uploadRenewLimiter) due() bool {
+	if l.backoff <= 0 {
+		return true
+	}
+	return l.clock().Sub(l.last) >= l.backoff
+}
+
+// failed records an unsuccessful attempt so the next one waits for the backoff.
+func (l *uploadRenewLimiter) failed() {
+	l.last = l.clock()
+}
+
 func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (stat.Connection, error) {
 	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
@@ -1332,6 +1377,11 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				return newHTTP, nil
 			}
 
+			// Throttles renewal retries after unsuccessful attempts; see
+			// uploadRenewBackoff for why the per-chunk loop must not retry
+			// freely.
+			renewLimiter := &uploadRenewLimiter{backoff: uploadRenewBackoff, now: time.Now}
+
 			for {
 				if uploadFailed.Load() || ctx.Err() != nil {
 					break
@@ -1412,31 +1462,42 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					clientMu.Lock()
 					if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Load() <= 0 ||
 						(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
-						oldClient := dynamicXmuxClient
-						newHTTP, newXmux, err := getHTTPClient(ctx, dest, streamSettings)
-						if err != nil {
-							errors.LogInfo(ctx, "XMUX: failed to renew upload client, keeping old: ", err)
-						} else if newXmux != nil && newXmux != oldClient {
-							if newXmux.Borrow() {
-								dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
-								// Atomically swap ownership so onClose Releases exactly one slot.
-								ownedUploadMu.Lock()
-								prev := ownedUploadXmux
-								if closed.Load() > 0 {
-									// Conn already closed: drop the newly borrowed slot.
-									ownedUploadMu.Unlock()
-									newXmux.Release()
-								} else {
-									ownedUploadXmux = newXmux
-									ownedUploadMu.Unlock()
-									if prev != nil {
-										prev.Release()
+						// Only retry after a failed attempt once per backoff;
+						// otherwise a persistent failure costs a full TLS
+						// handshake and an Info log per chunk.
+						if renewLimiter.due() {
+							oldClient := dynamicXmuxClient
+							newHTTP, newXmux, err := getHTTPClient(ctx, dest, streamSettings)
+							if err != nil {
+								renewLimiter.failed()
+								// Debug: already rate-limited to 1/backoff by renewLimiter;
+								// storm detail, not a state transition worth Info.
+								errors.LogDebug(ctx, "XMUX: failed to renew upload client, keeping old: ", err)
+							} else if newXmux != nil && newXmux != oldClient {
+								if newXmux.Borrow() {
+									dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
+									// Atomically swap ownership so onClose Releases exactly one slot.
+									ownedUploadMu.Lock()
+									prev := ownedUploadXmux
+									if closed.Load() > 0 {
+										// Conn already closed: drop the newly borrowed slot.
+										ownedUploadMu.Unlock()
+										newXmux.Release()
+									} else {
+										ownedUploadXmux = newXmux
+										ownedUploadMu.Unlock()
+										if prev != nil {
+											prev.Release()
+										}
 									}
+								} else {
+									// Borrow failed: keep using oldClient, but
+									// do not re-dial on the very next chunk.
+									renewLimiter.failed()
 								}
+							} else if newHTTP != nil {
+								dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
 							}
-							// Borrow failed: keep using oldClient.
-						} else if newHTTP != nil {
-							dynamicHTTPClient, dynamicXmuxClient = newHTTP, newXmux
 						}
 					}
 					client := dynamicHTTPClient

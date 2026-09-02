@@ -1473,16 +1473,27 @@ func (m *XmuxManager) probeConnection(conn XmuxConn, xmuxClient *XmuxClient) {
 		}
 		// Repeated connect-refused / unreachable while target is gone: MarkDead
 		// this client, rate-limit logs, and cool further HEAD probes.
-		if isProbeDialDead(err) {
-			logIt := m.noteProbeDialDead()
-			if logIt {
+		// Every probe failure must feed the same failure accounting: it advances
+		// the streak (arming the cooldown after coolFailStreak) and rate-limits
+		// the log line. Only the dial-dead branch used to do that, so a
+		// persistent non-dial-dead error — an x509 certificate failure being the
+		// common one — never engaged the cooldown and spun an unthrottled
+		// connect → probe → MarkDead → retry loop: every connection was evicted
+		// as soon as it was created, the pool never held a usable one, and the
+		// outbound failed with "failed to find an available destination"
+		// (2026.08.31 断流 report), along with an unbounded log storm.
+		//
+		// The error class is kept only to annotate the log, so operators can
+		// tell "target gone" (refused/unreachable) from "handshake broken"
+		// (x509) without re-deriving it from the message text.
+		logIt := m.noteProbeFailure()
+		if logIt {
+			if isProbeDialDead(err) {
+				errors.LogDebug(context.Background(), "XMUX: probeConnection Do failed (dial dead): ", err)
+			} else {
 				errors.LogDebug(context.Background(), "XMUX: probeConnection Do failed: ", err)
 			}
-			xmuxClient.probeErr = err
-			xmuxClient.MarkDead()
-			return
 		}
-		errors.LogDebug(context.Background(), "XMUX: probeConnection Do failed: ", err)
 		xmuxClient.probeErr = err
 		xmuxClient.MarkDead() // Fast Eviction: probe failed, mark dead immediately
 		return
@@ -1604,9 +1615,15 @@ func (m *XmuxManager) probeInCooldown() bool {
 	return time.Now().Before(m.probeCoolUntil)
 }
 
-// noteProbeDialDead records a dial-dead probe failure and may start cooldown.
+// noteProbeFailure records a probe failure of any class and may start cooldown.
 // Returns true when the caller should emit a LogDebug (rate-limited).
-func (m *XmuxManager) noteProbeDialDead() (shouldLog bool) {
+//
+// It must be called for every failed probe, not just dial-dead ones: the
+// cooldown it arms is the only thing that throttles the
+// connect → probe → MarkDead → retry cycle. Skipping it for non-dial-dead
+// errors (e.g. x509) left that cycle unthrottled and evicted every connection
+// (2026.08.31 断流 report).
+func (m *XmuxManager) noteProbeFailure() (shouldLog bool) {
 	const coolFailStreak = 3
 	const coolFor = 2 * time.Second
 	const logEvery = 2 * time.Second
@@ -1929,7 +1946,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		// Warm reuse: probeDone is set; avoid WaitForReady call overhead.
 		if best.probeDone.Load() {
 			if err := best.probeErr; err != nil {
-				errors.LogInfo(ctx, "XMUX: probe failed for existing connection, removing: ", err)
+				// Debug: probe storms (e.g. x509) fire this per eviction;
+				// Info here flooded error logs in info mode (~12 lines/request).
+				errors.LogDebug(ctx, "XMUX: probe failed for existing connection, removing: ", err)
 				m.pool.mu.Lock()
 				m.pool.RemoveAndClose(best)
 				m.pool.mu.Unlock()
@@ -1939,7 +1958,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 			return best, nil
 		}
 		if err := best.WaitForReady(ctx); err != nil {
-			errors.LogInfo(ctx, "XMUX: probe failed for existing connection, removing: ", err)
+			errors.LogDebug(ctx, "XMUX: probe failed for existing connection, removing: ", err)
 			m.pool.mu.Lock()
 			m.pool.RemoveAndClose(best)
 			m.pool.mu.Unlock()
@@ -1971,7 +1990,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				least.LastUsed.Store(time.Now().UnixNano())
 				m.RecordReuseHit()
 				if err := least.WaitForReady(ctx); err != nil {
-					errors.LogInfo(ctx, "XMUX: probe failed for burst-cap client, removing: ", err)
+					errors.LogDebug(ctx, "XMUX: probe failed for burst-cap client, removing: ", err)
 					m.pool.mu.Lock()
 					m.pool.RemoveAndClose(least)
 					m.pool.mu.Unlock()
@@ -1990,7 +2009,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		c := m.addToPool(conn)
 		m.lastActivity.Store(time.Now().UnixNano())
 		if err := c.WaitForReady(ctx); err != nil {
-			errors.LogInfo(ctx, "XMUX: probe failed for new connection (attempt ", attempt+1, "), removing: ", err)
+			// Debug: this is the per-attempt detail of the probe storm; the
+			// summarized cooldown/eviction state is what matters at Info+.
+			errors.LogDebug(ctx, "XMUX: probe failed for new connection (attempt ", attempt+1, "), removing: ", err)
 			m.pool.mu.Lock()
 			m.pool.RemoveAndClose(c)
 			m.pool.mu.Unlock()
