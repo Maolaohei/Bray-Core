@@ -322,14 +322,17 @@ func postPacketReliable(
 	}
 	if rescue != nil && ctx.Err() == nil {
 		if newClient, rerr := rescue(ctx); rerr == nil && newClient != nil {
-			errors.LogInfoInner(ctx, lastErr, "XHTTP packet-up POST exhausted on outer conn; rescuing seq=", seqStr)
+			// Debug: rescue legs fire per request under persistent conn
+			// faults; Info here flooded error logs in info mode (~6 lines/
+			// request during the 2026.08.31 x509 storm).
+			errors.LogDebugInner(ctx, lastErr, "XHTTP packet-up POST exhausted on outer conn; rescuing seq=", seqStr)
 			err := postPacketReliableOnce(ctx, newClient, url, sessionId, seqStr, durable)
 			if err == nil {
 				return nil
 			}
 			lastErr = err
 		} else if rerr != nil {
-			errors.LogInfoInner(ctx, rerr, "XHTTP packet-up rescue dial failed seq=", seqStr)
+			errors.LogDebugInner(ctx, rerr, "XHTTP packet-up rescue dial failed seq=", seqStr)
 		}
 	}
 	return lastErr
@@ -378,7 +381,7 @@ func postPacketReliableOnce(
 			return ctx.Err()
 		case <-t.C:
 		}
-		errors.LogInfoInner(ctx, err, "XHTTP packet-up POST retry ", attempt, "/", packetUploadMaxAttempts, " seq=", seqStr)
+		errors.LogDebugInner(ctx, err, "XHTTP packet-up POST retry ", attempt, "/", packetUploadMaxAttempts, " seq=", seqStr)
 	}
 	return lastErr
 }

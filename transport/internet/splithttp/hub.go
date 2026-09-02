@@ -808,7 +808,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				Reader: httpSC,
 			})
 			if err != nil {
-				errors.LogInfoInner(context.Background(), err, "failed to upload (PushReader)")
+				// Debug: per-upload-queue push failure; storms emit one line
+				// per request. The 404 response already signals the client.
+				errors.LogDebugInner(context.Background(), err, "failed to upload (PushReader)")
 				// Bray-only: do not leak stream-up conflict oracle (was 409).
 				writer.WriteHeader(http.StatusNotFound)
 			} else {

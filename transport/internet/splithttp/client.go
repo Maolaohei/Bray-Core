@@ -431,7 +431,9 @@ func (c *DefaultDialerClient) openStreamStart(ctx context.Context, base *url.URL
 			// Log the request-local copy: base is the dialer's URL, which a
 			// mode-cascade retry may mutate concurrently (data race on Path).
 			// Session id/seq are stripped so logs never leak the session MAC tag.
-			errors.LogInfoInner(ctx, doErr, "failed to "+method+" "+redactURLForLog(u))
+			// Debug: per-request failure detail; storms (x509/refused) emit one
+			// line per attempt — the eviction/cooldown summary carries state.
+			errors.LogDebugInner(ctx, doErr, "failed to "+method+" "+redactURLForLog(u))
 			common.Close(body)
 			addrMu.Lock()
 			r, l := gotRemote, gotLocal
@@ -440,7 +442,7 @@ func (c *DefaultDialerClient) openStreamStart(ctx context.Context, base *url.URL
 			return
 		}
 		if resp.StatusCode != 200 {
-			errors.LogInfo(ctx, "unexpected status ", resp.StatusCode)
+			errors.LogDebug(ctx, "unexpected status ", resp.StatusCode)
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			// Non-200: abort request body so the peer is not left half-open.

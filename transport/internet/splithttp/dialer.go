@@ -308,7 +308,11 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 		// Fast Eviction: mark client as dead on fatal connection errors
 		dc.SetOnFatalError(func(err error) {
-			errors.LogInfo(ctx, "XMUX: Fast Eviction triggered, marking client dead: ", err)
+			// Debug: Fast Eviction fires once per fatal conn per request during
+			// storms (x509/GOAWAY) — 8 Info lines/request flooded error logs in
+			// info mode. The eviction itself is already summarized by the probe
+			// cooldown / pool-level Debug notes.
+			errors.LogDebug(ctx, "XMUX: Fast Eviction triggered, marking client dead: ", err)
 			xmuxClient.MarkDead()
 		})
 	}
@@ -615,7 +619,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 				udpHopDialer := func(addr *net.UDPAddr) (net.PacketConn, error) {
 					conn, err := internet.DialSystem(ctx, net.UDPDestination(net.IPAddress(addr.IP), net.Port(addr.Port)), streamSettings.SocketSettings)
 					if err != nil {
-						errors.LogInfoInner(context.Background(), err, "skip hop: failed to dial to dest")
+						errors.LogDebugInner(context.Background(), err, "skip hop: failed to dial to dest")
 						return nil, errors.New("")
 					}
 
@@ -1236,14 +1240,14 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				if newHTTP, newXmux, gerr := getHTTPClient(ctx, dest, streamSettings); gerr == nil {
 					httpClient, xmuxClient = newHTTP, newXmux
 				} else {
-					errors.LogInfoInner(ctx, gerr, "XHTTP cascade: failed to refresh primary XMUX after fatal open")
+					errors.LogDebugInner(ctx, gerr, "XHTTP cascade: failed to refresh primary XMUX after fatal open")
 				}
 				if hasDownload {
 					memory2 := streamSettings.DownloadSettings
 					if newHTTP2, newXmux2, gerr2 := getHTTPClient(ctx, dest2, memory2); gerr2 == nil {
 						httpClient2, xmuxClient2 = newHTTP2, newXmux2
 					} else {
-						errors.LogInfoInner(ctx, gerr2, "XHTTP cascade: failed to refresh download XMUX after fatal open")
+						errors.LogDebugInner(ctx, gerr2, "XHTTP cascade: failed to refresh download XMUX after fatal open")
 					}
 				} else {
 					httpClient2, xmuxClient2 = httpClient, xmuxClient
@@ -1258,7 +1262,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			// Non-fatal CDN mode rejects: keep client; cascade reuses same transport.
 			if hasMoreModes {
 				recordModeCascadeStep()
-				errors.LogInfoInner(ctx, openErr, "XHTTP mode ", mode, " open failed; cascading to ", modeCascade[mi+1])
+				// Debug: cascade steps fire per attempt under storms; the
+				// final terminal failure is what surfaces at higher levels.
+				errors.LogDebugInner(ctx, openErr, "XHTTP mode ", mode, " open failed; cascading to ", modeCascade[mi+1])
 				// Green-zone: small inter-step jitter only on failed cascade path.
 				// Preserve original openErr when cancel/deadline aborts the wait.
 				if werr := WaitCascadeStepJitter(ctx); werr != nil {
@@ -1337,7 +1343,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				failOnce.Do(func() {
 					uploadFailed.Store(true)
 					if err != nil {
-						errors.LogInfoInner(ctx, err, "failed to send upload seq=", seqStr)
+						// Debug: per-request upload failure detail; one line per
+						// failed request in a storm is noise at Info.
+						errors.LogDebugInner(ctx, err, "failed to send upload seq=", seqStr)
 					}
 					uploadPipeReader.Interrupt()
 				})

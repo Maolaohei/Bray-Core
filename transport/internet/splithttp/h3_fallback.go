@@ -172,7 +172,9 @@ func (t *happyEyeballsTransport) race(req *http.Request) (*http.Response, error)
 		}
 		// H3 failed — record the failure and wait for H2.
 		t.setH3Failed()
-		errors.LogInfoInner(context.Background(), r.err, "H3 request failed, falling back to H2")
+		// Debug: H3 fallback fires per request when UDP is throttled/blocked —
+		// upstream logs equivalent fallback paths at Debug.
+		errors.LogDebugInner(context.Background(), r.err, "H3 request failed, falling back to H2")
 		select {
 		case r2 := <-h2Ch:
 			if r2.err == nil {
@@ -226,7 +228,7 @@ func (t *happyEyeballsTransport) failover(req *http.Request) (*http.Response, er
 	// Prefer settled H2 for subsequent requests after an H3 body failure.
 	// For THIS request, only retry when the body is replayable.
 	if req.Body != nil && req.GetBody == nil {
-		errors.LogInfoInner(context.Background(), err,
+		errors.LogDebugInner(context.Background(), err,
 			"H3 request with non-replayable body failed; not falling back to H2")
 		t.settle(t.h2)
 		return nil, err
@@ -235,7 +237,7 @@ func (t *happyEyeballsTransport) failover(req *http.Request) (*http.Response, er
 	if req.GetBody != nil {
 		body, bodyErr := req.GetBody()
 		if bodyErr != nil {
-			errors.LogInfoInner(context.Background(), bodyErr,
+			errors.LogDebugInner(context.Background(), bodyErr,
 				"H3 failed and GetBody could not rebuild request body for H2 fallback")
 			t.settle(t.h2)
 			return nil, err
@@ -244,7 +246,7 @@ func (t *happyEyeballsTransport) failover(req *http.Request) (*http.Response, er
 		req.Body = body
 	}
 
-	errors.LogInfoInner(context.Background(), err, "H3 request with body failed, falling back to H2")
+	errors.LogDebugInner(context.Background(), err, "H3 request with body failed, falling back to H2")
 	t.settle(t.h2)
 	return t.h2.RoundTrip(req)
 }
