@@ -101,6 +101,21 @@ const (
 	// sliding window does not flood with tiny segments on bulk traffic.
 	// Bounded: a busy connection commits at most once per interval.
 	downsegCommitInterval = 10 * time.Millisecond
+
+	// downsegFrontierCommitQuiet is the shortened commit-interval substitute
+	// used ONLY when a pull is actively waiting on the segment at the
+	// production frontier (seq == produced). The default 10ms interval is a
+	// batching heuristic: it exists to keep a busy producer from committing
+	// a stream of tiny segments, NOT to delay a client that is explicitly
+	// blocked on those exact bytes. When the reader is parked on the
+	// frontier segment, the batching benefit has already been spent — the
+	// response bytes are here, the client wants them now — so waiting out
+	// the full interval only adds the interval to every interactive
+	// response's TTFB (measured floor: 10.5ms after the event-wake fix;
+	// the pre-event-poll floor was 20.5ms). 1ms preserves the tiny-segment
+	// flood bound for pathological writers (one commit per 1ms max per
+	// stream) while closing the latency gap to event-speed.
+	downsegFrontierCommitQuiet = 1 * time.Millisecond
 )
 
 // downsegRepullMaxBytes is a var so tests can shrink the byte cap.
@@ -121,6 +136,22 @@ type downSegCache struct {
 	// a vanished client is reaped by the production-leg idle sweeper
 	// (finalize stays false, production-leg handler eventually times out).
 	spaceCond *sync.Cond
+
+	// readyCh is the segment-ready event for pull-side waiters (the
+	// handleDownSegment poll). Appending a byte, committing a segment,
+	// finalizing, or tearing down the session replaces the channel (a
+	// close-and-replace broadcast): every waiter blocked on the OLD channel
+	// wakes, re-locks, re-checks the cache state, and either delivers,
+	// re-arms on the new channel, or hits the downsegPullWait deadline.
+	//
+	// This replaces the old fixed 20ms time.Sleep poll, which put a hard
+	// 20ms latency floor on EVERY in-flight segment pull — measured on
+	// interactive (sub-1MiB) traffic: 20.3ms/op vs 0.6ms/op legacy
+	// (33x throughput gap, read phase 100% > 3ms, 82% in the 10-21ms
+	// band). Delivery now costs one lock round-trip after the commit.
+	// The 10ms safety tick in the pull handler remains as a backstop
+	// (missed-wakeup insurance), never as the primary wake source.
+	readyChReady atomic.Pointer[chan struct{}]
 
 	produced uint64 // next segment index to finalize (first unwritten/full)
 	// lastPulled is the highest segment index the client has successfully
@@ -198,9 +229,36 @@ func newDownSegCache() *downSegCache {
 		deliveredOrder: make(map[uint64]uint64, downsegMaxSegs),
 	}
 	c.spaceCond = sync.NewCond(&c.mu)
+	ch := make(chan struct{})
+	c.readyChReady.Store(&ch)
 	c.pullAtNs.Store(now)
 	c.writeAtNs.Store(now)
 	return c
+}
+
+// broadcastReady wakes all pull-side waiters. Caller must hold c.mu.
+// close-and-replace: the closed channel stays closed forever, so anyone who
+// grabbed it before the commit wakes even if they had not blocked yet; new
+// waiters arm on the fresh channel. One allocation per wake — negligible
+// against a network round-trip, and strictly cheaper than the 20ms sleep it
+// replaces.
+func (c *downSegCache) broadcastReadyLocked() {
+	if chp := c.readyChReady.Load(); chp != nil {
+		close(*chp)
+	}
+	ch := make(chan struct{})
+	c.readyChReady.Store(&ch)
+}
+
+// readyChan returns the current segment-ready channel to block on. Pair
+// with a cache re-check after every wake (classic condition-variable
+// pattern; the close-and-replace broadcast makes any grabbed channel
+// eventually fire, so there is no lost-wakeup window).
+func (c *downSegCache) readyChan() <-chan struct{} {
+	if chp := c.readyChReady.Load(); chp != nil {
+		return *chp
+	}
+	return nil
 }
 
 // downsegSizeFor returns the target payload size for segment seq,
@@ -335,9 +393,17 @@ func (c *downSegCache) append(b []byte) {
 		if filled || stale {
 			c.produced++
 		} else {
+			// Partial segment: wake pull-side waiters anyway — the bytes
+			// are in the cache and the lazy-commit timer may finalize
+			// them before the next poll tick. A pull that arrives while
+			// the segment is in-flight uses the wait loop below, which
+			// now wakes on this broadcast instead of sleeping 20ms.
+			c.broadcastReadyLocked()
 			break
 		}
 	}
+	// A segment was committed (produced advanced): deliver is possible.
+	c.broadcastReadyLocked()
 }
 
 // undeliveredCountLocked returns the actual number of retained segments.
@@ -374,7 +440,7 @@ func (c *downSegCache) get(seq uint64) (payload []byte, ok bool, gone bool) {
 	// downsegCommitInterval, commit it now so this pull can see it —
 	// otherwise a sub-1MiB transaction deadlocks forever (404 on a never
 	// finalized segment).
-	c.commitIfStaleLazy()
+	c.commitIfStaleLazyLocked(downsegCommitInterval)
 	// Only finalized segments (index < produced) are readable.
 	if seq >= c.produced {
 		return nil, false, false
@@ -478,18 +544,23 @@ func (c *downSegCache) dropDeliveredLocked(seq uint64) {
 	delete(c.deliveredOrder, seq)
 }
 
-// commitIfStaleLazy commits the in-flight segment if it has been receiving
-// bytes for at least downsegCommitInterval (regardless of size). Caller must
-// hold c.mu.
-func (c *downSegCache) commitIfStaleLazy() {
+// commitIfStaleLazyLocked commits the in-flight segment if it has been
+// receiving bytes for at least the given quiet interval (regardless of
+// size). Caller must hold c.mu.
+func (c *downSegCache) commitIfStaleLazyLocked(quiet time.Duration) {
 	if c.segStartedAt == 0 {
 		return
 	}
-	if time.Now().UnixNano()-c.segStartedAt < int64(downsegCommitInterval) {
+	if time.Now().UnixNano()-c.segStartedAt < int64(quiet) {
 		return
 	}
 	if cur, ok := c.segs[c.produced]; ok && len(cur) > 0 {
 		c.produced++
+		// The in-flight segment just became finalized: a pull blocked in
+		// the wait loop must find out immediately, not at the next poll
+		// tick (this is the interactive-response path — the pull arrives
+		// while the sub-1MiB segment is still in-flight).
+		c.broadcastReadyLocked()
 	}
 	// No eviction here: memory is bounded by the append() backpressure
 	// gate (spaceCond), and a just-produced segment must stay until
@@ -503,7 +574,23 @@ func (c *downSegCache) commitIfStaleLazy() {
 // handler's fast path.
 func (c *downSegCache) LazyCommitStale() {
 	c.mu.Lock()
-	c.commitIfStaleLazy()
+	c.commitIfStaleLazyLocked(downsegCommitInterval)
+	c.mu.Unlock()
+}
+
+// LazyCommitFrontier commits the in-flight (frontier) segment when a pull is
+// actively blocked on it. Uses the shortened downsegFrontierCommitQuiet: the
+// batching heuristic has nothing left to batch — the client is parked on
+// these exact bytes (see downsegFrontierCommitQuiet).
+func (c *downSegCache) LazyCommitFrontier() {
+	c.mu.Lock()
+	if c.segStartedAt != 0 {
+		if cur, ok := c.segs[c.produced]; ok && len(cur) > 0 &&
+			time.Now().UnixNano()-c.segStartedAt >= int64(downsegFrontierCommitQuiet) {
+			c.produced++
+			c.broadcastReadyLocked()
+		}
+	}
 	c.mu.Unlock()
 }
 
@@ -523,6 +610,7 @@ func (c *downSegCache) finalize() {
 	c.stopped = true
 	// Any producer blocked on backpressure must stop waiting: stream over.
 	c.spaceCond.Broadcast()
+	c.broadcastReadyLocked() // wake pullers: EOF marker is now reachable
 	if dbgDownSeg {
 		pc := c.produced
 		c.mu.Unlock()
@@ -547,8 +635,21 @@ func (c *downSegCache) shutdown() {
 	clear(c.deliveredSegs)
 	clear(c.deliveredOrder)
 	c.deliveredBytes = 0
-	c.spaceCond.Broadcast()
+	c.spaceCond.Broadcast()  // wake any backpressured producer: slots freed
+	c.broadcastReadyLocked() // wake pullers: repull window/EOF may now resolve
 	c.mu.Unlock()
+}
+
+// segmentStarted reports whether the in-flight (partial) segment has
+// received at least one byte — i.e. the response has begun. Used by the
+// pull handler's fast path to distinguish "nothing ever arrived" (404
+// immediately, client retries) from "bytes are in the cache but the
+// segment is not yet finalized" (hold the pull; the commit event will
+// resolve it).
+func (c *downSegCache) segmentStarted() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.segStartedAt != 0
 }
 
 // producedCount returns the highest produced index + 1 (for gap / EOF logic).

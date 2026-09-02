@@ -215,6 +215,14 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 	// stream is not finalized — answer 404 immediately instead of polling
 	// downsegPullWait (the client's trigger pull / first segment GET must
 	// not add a 2s stall to TTFB; the puller retries on 404).
+	//
+	// "Nothing produced" must mean the segment NEVER started receiving —
+	// not merely "not yet finalized". If the in-flight segment has bytes
+	// (segStartedAt != 0), the response has begun and this pull must wait
+	// for the lazy commit: 404ing it sent the client into its retry
+	// cadence (5ms base) purely to burn off downsegCommitInterval, which
+	// put a hard ~10-20ms floor on every interactive response's TTFB
+	// (measured: read phase 100% > 3ms, 82% in the 10-21ms band).
 	if c := sess.downseg.Load(); c != nil && !c.over() {
 		// Lazy-commit the in-flight segment BEFORE checking producedCount:
 		// a producer that wrote a sub-1MiB response (VLESS handshake, first
@@ -222,7 +230,7 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 		// time-based commit, so without this the fast-path would never see
 		// it and the pull would 404 forever (deadlock).
 		c.LazyCommitStale()
-		if c.producedCount() == 0 {
+		if c.producedCount() == 0 && !c.segmentStarted() {
 			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -258,13 +266,41 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		// Event-driven wait: block on the segment-ready broadcast (append
+		// commit / lazy commit / finalize / shutdown all fire it) instead
+		// of sleeping 20ms per iteration. The 1ms tick is only a
+		// missed-wakeup backstop; for the frontier segment it also drives
+		// LazyCommitFrontier, so a quiet producer's bytes become
+		// deliverable after downsegFrontierCommitQuiet instead of the
+		// full downsegCommitInterval — semantics identical to the old
+		// Sleep(20ms) poll, latency no longer quantized to its cadence.
+		if c := sess.downseg.Load(); c != nil {
+			// Waiting on the frontier segment? The client is blocked on
+			// these exact bytes; use the shortened commit quiet.
+			c.LazyCommitFrontier()
+			select {
+			case <-c.readyChan():
+			case <-time.After(downsegPullBackstopTick):
+			}
+		} else {
+			time.Sleep(downsegPullBackstopTick)
+		}
 	}
 }
 
 // downsegPullWait bounds how long a segment pull waits for an in-flight
 // segment to finalize before answering 404.
 const downsegPullWait = 2 * time.Second
+
+// downsegPullBackstopTick is the missed-wakeup insurance of the
+// event-driven segment-pull wait. Under normal operation the pull is
+// woken by the ready broadcast (append commit / lazy commit / finalize /
+// shutdown); this tick only fires if every broadcast was somehow missed,
+// and it drives LazyCommitFrontier for the frontier segment (whose
+// shortened quiet window, downsegFrontierCommitQuiet, matches this tick).
+// It replaces the old 20ms Sleep cadence: same semantics, but delivery
+// latency is no longer quantized to it.
+const downsegPullBackstopTick = 1 * time.Millisecond
 
 // downsegProdIdleCheck is how often the production-leg handler checks for a
 // zombie session; downsegProdIdleLimit is how long it tolerates complete
