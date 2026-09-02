@@ -9,9 +9,9 @@
 
 ---
 
-## [2026.09.01] — 2026-09-01
+## [2026.09.01] — 2026-09-01（2026-09-02 重发：补入 dseg 交付延迟与 EOF 竞争修复）
 
-对应提交：`5b0d9b33` 至 `1735425d`（VLESS/Vision、DNS、XMUX、REALITY 四专项修复 + 8.31 断流风暴止血 + 日志膨胀修复）。
+对应提交：`5b0d9b33` 至 `581d67b0`（VLESS/Vision、DNS、XMUX、REALITY 四专项修复 + 8.31 断流风暴止血 + 日志膨胀修复 + dseg 性能修复）。
 
 ### ⚠️ 升级注意（8.31 断流报告的定性）
 
@@ -47,6 +47,15 @@
 
 - R1：ML-KEM/REALITY 握手无读超时导致 Slowloris DoS。
 - R2：共享 keylog `*os.File` 并发写竞争。
+
+### 性能（XHTTP 下行分段 dseg — `3e85f696`）
+
+- **交付延迟 20ms → 3ms（吞吐 9.2×）**：dseg 开启时（H2/H3 + packet-up/stream-up），下行分段对客户端的交付以固定 ~20ms 轮询节奏到达（读相 100% >3ms、82% 落在 10-21ms 频带，写入相零阻塞——纯交付侧病理）。修复：段就绪事件广播（close-and-replace channel）取代 20ms `Sleep` 轮询 + frontier 1ms 短提交窗 + 快路径 404 收紧到"段从未开始接收"。基准（count=3）：dseg_on 20.3→2.2 ms/op（3.2→29.6 MB/s）；H2_Throughput 20.3→2.2 ms/op（29.2 MB/s）；dseg_off / H2C / stream 模式无回归。纯服务端修复，双端无需同步升级。
+- POC：`downseg_delivery_latency_poc_test.go`（驱动真实 `handleDownSegment`，修复前 20.5ms → 修复后 3.0ms，5/5 稳定；负向对照回退轮询即 RED）。
+
+### 修复（dseg EOF 竞争 — `581d67b0`）
+
+- **静默截断**：拉取方 `get(seq)` 未命中瞬间生产者 `finalize` 提交末段（dump 铁证：段仍在缓存 `segs=[4]`、EOF 标记已服务、客户端停拉 → 丢 262144 字节恰一段）。修复：EOF 判定改 `eofForSeq()` 单锁原子决策（final && 段不在 segs && 不在 repull 窗 && seq≥produced 才发 EOF），否则继续取段。ubuntu -race 抓到、count=30 全绿闭环。
 
 ---
 
