@@ -9,6 +9,47 @@
 
 ---
 
+## [2026.09.01] — 2026-09-01
+
+对应提交：`5b0d9b33` 至 `1735425d`（VLESS/Vision、DNS、XMUX、REALITY 四专项修复 + 8.31 断流风暴止血 + 日志膨胀修复）。
+
+### ⚠️ 升级注意（8.31 断流报告的定性）
+
+- 社区报告"2026.08.31 XMUX 探针与 XHTTP uTLS 未继承 TLS 配置导致 x509 断流"经双端代码取证与 E2E 复现定性为：**探针与业务流量共用同一 Transport/DialTLSContext/TLS 配置，不存在配置丢失**；`XHTTP dial: uTLS failed` 日志仅出现在标准 TLS 拨号路径（REALITY 路径失败会打出 `REALITY failed` 且提前返回），提示客户端 outbound `security`/`tlsSettings` 与服务端 REALITY 不匹配。该配置不匹配触发的是下述探针风暴放大器，本版本已消除放大器；如仍见 x509 请核对双端 streamSettings。
+
+### 修复（XHTTP 断流风暴止血 — `0763c08f`）
+
+- **XMUX 探针冷却全类别生效**：探针失败分类此前只对 dial-dead 类错误（connection refused 等）推进冷却计数，x509/超时等非 dial-dead 失败走无冷却分支直接逐出连接，形成 `connect → probe 失败 → MarkDead → 池空 → 重连` 紧循环，池中永无可用连接 → `all retry attempts failed` 大面积断网。现所有类别探针失败均推进失败计数（连续 3 次 → 2s 冷却），冷却期内探针短路。
+- **上传续借限流**：packet-up 上传客户端续借重试增加 1s backoff，持久失败不再每 32KiB chunk 一次完整 TLS 握手 + 一条日志。
+- POC 回归护栏：x509 注入驱动真实 probeConnection（修复前 6 轮全烧连接、冷却永不激活；修复后第 3 轮起冷却生效）。
+
+### 修复（日志膨胀 — `1735425d`）
+
+- **风暴类诊断日志降级 Debug**：`loglevel: info` 时 x509/探针风暴会以 ~12 行/请求的速率把 Bray 专属诊断（Fast Eviction、probe removing、packet-up retry/rescue、H3 回退、cascade）写满错误日志（实测 15 请求 184 行）。全部降级 Debug 后 info 模式仅剩上游标准每请求 3 行（dispatcher/socks/vless），warning 模式仅启动 1 行，debug 模式诊断能力无损。级别过滤机制本身经 8.27/8.31 原版二进制对照 E2E 证实无回归。
+- **AST 白名单护栏**：splithttp 包内新增 `errors.LogInfo*` 调用若不在 8 条低频白名单（listening/CDN/网络变更/N 连续逐出）内即测试失败，防止风暴日志再被提回 Info。
+
+### 修复（VLESS / Vision 专项）
+
+- B1：`XtlsPadding` 负 paddingLen 触发 `Extend` panic。
+- B2：`VisionReader` 在 `input/rawInput` 为 nil 时 `ReadFrom` 空指针 panic。
+- B4：预连接通道提前创建消除竞态与泄漏；B8：无效目标 nil 指针 panic。
+
+### 修复（DNS 专项）
+
+- D1 nameserver 竞态、D2 双栈合并丢 IP、D4 漏 return（均 POC 复现）。
+
+### 修复（XMUX 专项）
+
+- M1：`xudpEstablish` 锁外读写 `x.Mux/x.Status` 数据竞争。
+- M2：空闲关闭不复用泄漏（POC 已证 FALSE POSITIVE，护栏留档）。
+
+### 修复（REALITY 专项）
+
+- R1：ML-KEM/REALITY 握手无读超时导致 Slowloris DoS。
+- R2：共享 keylog `*os.File` 并发写竞争。
+
+---
+
 ## [2026.08.30] — 2026-08-30
 
 对应提交：`6bd9e448` 至 `d2bcd2a85`（上游同步 7 提交 + XHTTP dseg 静默截断修复 + POC）。
