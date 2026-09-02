@@ -640,6 +640,36 @@ func (c *downSegCache) shutdown() {
 	c.mu.Unlock()
 }
 
+// eofForSeq reports whether the empty-200 EOF marker is the correct answer
+// for a pull of seq: the stream is finalized AND the segment can never be
+// delivered (not finalized, not retained in the repull window). It exists
+// to close a race between get(seq) and over(): get() can miss a segment
+// (seq >= produced) moments before a concurrent finalize commits it; an
+// over()-only check would then serve the EOF marker while the segment is
+// sitting in the cache, and the client would stop pulling — silently
+// truncating the stream. One lock acquisition decides both facts.
+func (c *downSegCache) eofForSeq(seq uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.final {
+		return false
+	}
+	// Finalized but still undelivered: the segment IS reachable.
+	if _, ok := c.segs[seq]; ok {
+		return false
+	}
+	// Repull window may still serve it (lost-response retry).
+	if _, was := c.deliveredAtNs[seq]; was {
+		if _, have := c.deliveredSegs[seq]; have {
+			return false
+		}
+	}
+	// In-flight at the frontier? finalize() commits the frontier segment
+	// before setting final, so a present entry above covers it; anything
+	// at or beyond produced with no entry is genuinely past the end.
+	return seq >= c.produced
+}
+
 // segmentStarted reports whether the in-flight (partial) segment has
 // received at least one byte — i.e. the response has begun. Used by the
 // pull handler's fast path to distinguish "nothing ever arrived" (404

@@ -251,16 +251,31 @@ func (h *requestHandler) handleDownSegment(sess *httpSession, seqStr string, wri
 			return
 		}
 		if sess.downseg.Load().over() {
-			// Stream finalized and the segment never appeared: end of data.
-			// Signal EOF with an empty 200 body so the client can distinguish
-			// it from a transient 404 (see PullSegment).
-			// Record it: this is the client's proof of having seen the end of
-			// the stream, and the production leg waits for it before tearing
-			// the session down (see holdDrainLeg).
-			if c := sess.downseg.Load(); c != nil {
+			// Stream finalized. Two very different cases hide here:
+			//
+			//  a) The segment can never appear (seq beyond produced, not
+			//     retained): end of data. Signal EOF with an empty 200 body
+			//     so the client can distinguish it from a transient 404.
+			//
+			//  b) A racing finalize committed the segment BETWEEN this
+			//     loop's get(seq) miss and this over() check: get() saw
+			//     seq >= produced (not yet committed), finalize then
+			//     advanced produced, and the segment IS reachable. Serving
+			//     the EOF marker here would make the client stop pulling
+			//     with the segment still in the cache — a silent
+			//     truncation (measured: -race lost a 262144-byte tail).
+			//     Loop again and pick it up.
+			//
+			// eofForSeq resolves both under one lock acquisition.
+			if c := sess.downseg.Load(); c != nil && c.eofForSeq(seq) {
+				// Record it: this is the client's proof of having seen the
+				// end of the stream, and the production leg waits for it
+				// before tearing the session down (see holdDrainLeg).
 				c.noteEofServed()
+				return
 			}
-			return
+			// Segment became reachable between the get() miss and now:
+			// fall through and retry get(seq) on the next iteration.
 		}
 		if time.Now().After(deadline) {
 			writer.WriteHeader(http.StatusNotFound)
