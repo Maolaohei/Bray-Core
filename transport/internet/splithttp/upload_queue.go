@@ -53,7 +53,13 @@ func freePacketPayload(p *Packet) {
 // retransmitted seq can arrive late (client backoff + outer network). 2s was
 // too tight and aborted uploads under high-RTT/limited-bandwidth links
 // (V2rayN weak-net drops: "packet sequence gap timeout waiting for seq=N").
-const maxSeqGapWait = 5 * time.Second
+//
+// SEMANTICS: on expiry the session stream is torn down (Read returns an
+// error, the upload leg dies and the client must rebuild); it is NOT a
+// request-retransmission trigger — retransmission is the client's job
+// (postPacketReliable replays the same seq). A var (not const) so tests can
+// shorten the wait; production default stays 5s.
+var maxSeqGapWait = 5 * time.Second
 
 type uploadQueue struct {
 	reader        atomic.Pointer[io.ReadCloser]
@@ -99,7 +105,9 @@ func NewUploadQueue(maxPackets int) *uploadQueue {
 // creating the observed 20Mbps -> 1Mbps oscillation. Leave a 500ms margin
 // before maxSeqGapWait so the newly admitted missing sequence can reach
 // uploadQueue.Read before its strict gap timer tears the session down.
-const uploadQueueBackpressureWait = maxSeqGapWait - 500*time.Millisecond
+// var (not const) to stay derived from maxSeqGapWait — tests that shorten
+// the gap wait must shorten both to preserve the 500ms margin invariant.
+var uploadQueueBackpressureWait = maxSeqGapWait - 500*time.Millisecond
 
 // uploadQueueMaxWaiters bounds full-queue HTTP handlers per session. Each
 // waiter can retain one decoded POST body (up to ScMaxEachPostBytes), so this
@@ -368,7 +376,11 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 					return 0, errors.New("packet sequence gap timeout waiting for seq=", h.nextSeq)
 				}
 			} else {
-				// packet.Seq < h.nextSeq: duplicate — skip and return its payload.
+				// packet.Seq < h.nextSeq: duplicate (client retransmit after a
+				// lost response or a racing retry). Idempotent by design: the
+				// packet is silently dropped (payload freed) and the NEXT
+				// ordered packet is served, never an error and never a
+				// session teardown — the HTTP handler already returned 200.
 				freePacketPayload(&packet)
 			}
 		}
