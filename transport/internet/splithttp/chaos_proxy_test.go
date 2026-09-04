@@ -19,6 +19,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +40,22 @@ type chaosProxy struct {
 	// attribute failures: corruption without faults means the host stack, not
 	// the chaos injection).
 	injectRST bool
+	// firstByteDelay models path RTT: each direction sleeps this long before
+	// its first forwarded byte (not per chunk — that would model bandwidth
+	// delay and pile up over hundreds of chunks).
+	firstByteDelay time.Duration
+}
+
+// delayConn sleeps once before the first successful Read.
+type delayConn struct {
+	net.Conn
+	delay     time.Duration
+	delayOnce sync.Once
+}
+
+func (c *delayConn) Read(p []byte) (int, error) {
+	c.delayOnce.Do(func() { time.Sleep(c.delay) })
+	return c.Conn.Read(p)
 }
 
 // handle forwards one client conn to the server, injecting an RST on every
@@ -50,6 +67,10 @@ func (p *chaosProxy) handle(client net.Conn, serverAddr string) {
 		return
 	}
 	defer upstream.Close()
+	if p.firstByteDelay > 0 {
+		client = &delayConn{Conn: client, delay: p.firstByteDelay}
+		upstream = &delayConn{Conn: upstream, delay: p.firstByteDelay}
+	}
 	n := p.fwdCount.Add(1)
 
 	var rst <-chan time.Time
@@ -95,6 +116,21 @@ func TestFaultInjectE2E_TransparentProxy(t *testing.T) {
 }
 
 func runChaosProxyTest(t *testing.T, transparent bool) {
+	runChaosProxyTestFull(t, transparent, 0)
+}
+
+// TestScenario_HighRTTPlusReset collapses the 性能/稳定性 scenario: ~100ms
+// RTT (50ms per direction) plus the usual every-other-connection reset
+// budget. The session must survive with intact echo — the product's retry,
+// rescue and dup-seq idempotency paths absorb both.
+func TestScenario_HighRTTPlusReset(t *testing.T) {
+	if testing.Short() {
+		t.Skip("high-RTT scenario skipped under -short")
+	}
+	runChaosProxyTestFull(t, false, 50*time.Millisecond)
+}
+
+func runChaosProxyTestFull(t *testing.T, transparent bool, rttHalf time.Duration) {
 	if testing.Short() {
 		t.Skip("fault injection e2e skipped under -short")
 	}
@@ -120,7 +156,7 @@ func runChaosProxyTest(t *testing.T, transparent bool) {
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", int(serverPort))
 
 	proxyPort := tcp.PickPort()
-	proxy := &chaosProxy{injectRST: !transparent}
+	proxy := &chaosProxy{injectRST: !transparent, firstByteDelay: rttHalf}
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", int(proxyPort)))
 	common.Must(err)
 	defer ln.Close()
