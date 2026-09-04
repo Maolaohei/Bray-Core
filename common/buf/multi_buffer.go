@@ -176,7 +176,13 @@ func SplitSize(mb MultiBuffer, size int32) (MultiBuffer, MultiBuffer) {
 	}
 
 	if mb[0].Len() > size {
-		b := New()
+		// The slice-out branch: a single buffer holds more than the
+		// requested split size. The allocation MUST be sized for `size` —
+		// New() (8K pool) panics in Extend for any size > 8K, which every
+		// caller passing a large split size (e.g. HTTP post ceilings of
+		// 100KB-1MB against coalesced write buffers) can reach. NewWithSize
+		// is pooled, so the released buffer still recycles.
+		b := NewWithSize(size)
 		copy(b.Extend(size), mb[0].BytesTo(size))
 		mb[0].Advance(size)
 		return mb, MultiBuffer{b}

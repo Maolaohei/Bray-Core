@@ -64,6 +64,45 @@ func TestMultiBufferSliceBySizeLarge(t *testing.T) {
 	}
 }
 
+// TestMultiBufferSliceBySizeLargerThanFirstBuffer covers the slice-out
+// branch with a split size BOTH larger than one pooled buffer (8K) and
+// smaller than the first buffer's content. SplitSize used to allocate an
+// 8K buffer and Extend(size) → "extending out of bound" panic; it must
+// instead allocate for the split size and keep bytes intact.
+func TestMultiBufferSliceBySizeLargerThanFirstBuffer(t *testing.T) {
+	payload := make([]byte, 256*1024) // a single coalesced 256KB buffer
+	common.Must2(io.ReadFull(rand.Reader, payload))
+
+	mb := MultiBuffer{FromBytes(payload)}
+	const split = 256*1024 - 65 // sub-ceiling split, like a jittered post size
+
+	mb, out := SplitSize(mb, split)
+	if got := out.Len(); got != split {
+		t.Fatalf("split length = %d, want %d", got, split)
+	}
+	if got := mb.Len(); got != int32(len(payload))-split {
+		t.Fatalf("remainder length = %d, want %d", got, int32(len(payload))-split)
+	}
+	if got := ReadAllBytes(t, out); string(got) != string(payload[:split]) {
+		t.Fatal("split prefix bytes corrupted")
+	}
+	if got := ReadAllBytes(t, mb); string(got) != string(payload[split:]) {
+		t.Fatal("remainder bytes corrupted")
+	}
+	ReleaseMulti(out)
+	ReleaseMulti(mb)
+}
+
+// ReadAllBytes drains a MultiBuffer into one byte slice (test helper).
+func ReadAllBytes(t *testing.T, mb MultiBuffer) []byte {
+	t.Helper()
+	var out []byte
+	for _, b := range mb {
+		out = append(out, b.Bytes()...)
+	}
+	return out
+}
+
 func TestMultiBufferSplitFirst(t *testing.T) {
 	b1 := New()
 	b1.WriteString("b1")
