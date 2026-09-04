@@ -1356,9 +1356,13 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				failOnce.Do(func() {
 					uploadFailed.Store(true)
 					if err != nil {
-						// Debug: per-request upload failure detail; one line per
-						// failed request in a storm is noise at Info.
-						errors.LogDebugInner(ctx, err, "failed to send upload seq=", seqStr)
+						// Warning: this fires EXACTLY ONCE per upload session
+						// (failOnce) after every retry/rescue attempt for this
+						// seq failed — the session is about to die. Silent at
+						// Debug meant production "upload dead, no idea why".
+						// Per-attempt noise stays at LogDebugInner below via
+						// postPacketReliable.
+						errors.LogWarningInner(ctx, err, "XHTTP packet-up upload failed, session will be reset: seq=", seqStr)
 					}
 					uploadPipeReader.Interrupt()
 				})
