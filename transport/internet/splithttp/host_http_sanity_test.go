@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,13 @@ import (
 
 func skipIfHostLoopbackHTTPRewrite(t *testing.T) {
 	t.Helper()
+
+	// Escape hatch: BRAY_TRUST_LOOPBACK=1 disables the guard for one-off
+	// debugging on a host whose interceptor has been turned off (or when the
+	// operator has whitelisted the test process in the security product).
+	if os.Getenv("BRAY_TRUST_LOOPBACK") == "1" {
+		return
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
