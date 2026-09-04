@@ -32,6 +32,14 @@
 - dialer 上传循环内联魔数提取命名常量（recentFlow 窗口 50ms、小包阈值 256B，数值不变）；新增 `protocol_profile_test` **中央关系审计**：pacing 带 To>recentFlow 窗口（pacing 可达）、背压窗<gap 等待、chunk 档单调 ≤1MiB、bulk 阈值≤chunk 最小档、dseg 预取窗≤自适应缓存界、重试退避≥1ms 底、H1 管线深 [1,8]——常量改动破坏耦合时 CI 即红。
 - **LAN 回退绑定**（环境自适应测试基建）：守卫升级为 `probeWireFidelity(ip)` + `testBindIP(t)`——loopback 被 HTTP 改写（火绒 callout 仅覆盖 loopback）而 LAN IPv4 干净时，e2e/bulk bench 自动改绑干净 LAN IP 真实运行，不再整轮 skip；四个 e2e + bulk bench 在被改写主机上实测 PASS（bulk 648.7 Mbps、吞吐地板 splithttp/TCP=26.7%）。火绒"网络防护"界面开关不注销 `hrwfpdrv.sys` WFP callout（实测退出+关防护均无效），自我保护也拦 `sc stop`（提权实测 1052/拒绝访问）——本基建是无需动安全产品的正解。
 
+### 抗审查抗干扰（第二批追加）
+
+- **上传 body 反量化抖动**：持续 bulk 流每条 POST 恒定 Content-Length 是与固定 pacing 间隔同类的统计指纹。`PacketUploadChunkJitterFn`（右偏收缩 0-10%，镜像下载侧段抖动，只收缩不越操作者上限，小包流豁免）默认启用；A/B 实测（交替中位数法）代价 **-1.5%**（OFF=2257 vs ON=2223 Mbps）。钉住：收缩带边界、抽样多样性、20MiB 模拟流 body 尺寸多样化。
+
+### 修复（核心 buffer）
+
+- `common/buf.SplitSize` 切片分支越界 panic：单 buffer 内容超过切割尺寸时 8K 池 `Extend(size)` 直接崩——大切割尺寸（HTTP post 上限、抖动后尺寸）均可触发的存量缺陷，改 `NewWithSize(size)` 按需分配。
+
 ---
 
 ## [2026.09.05] — 2026-09-05（XHTTP 稳定性重构第一批：上传队列三件套 + 长测试隔离 + 环境自检门）
