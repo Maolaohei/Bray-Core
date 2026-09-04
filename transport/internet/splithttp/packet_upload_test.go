@@ -287,7 +287,8 @@ func TestDefaultMinPostIntervalJittered(t *testing.T) {
 		t.Fatalf("default interval must be a jitter band, got [%d,%d]", r.From, r.To)
 	}
 	if r.To <= 50 {
-		t.Fatalf("band To must exceed the 50ms recentFlow window so paced sleeps can occur, To=%d", r.To)
+		t.Fatalf("band To must exceed the recentFlow window (%v) so paced sleeps can occur, To=%d",
+			packetUploadRecentFlowWindow, r.To)
 	}
 	seen := map[int32]bool{}
 	for i := 0; i < 64; i++ {

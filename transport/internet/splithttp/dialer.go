@@ -1430,7 +1430,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					// the RTT-adaptive size. Pacing interval is untouched
 					// (camouflage surface preserved).
 					effMax := maxUploadSize
-					if n := chunkAvgPacketSize(remainder); n > 0 && n < 256 {
+					if n := chunkAvgPacketSize(remainder); n > 0 && n < packetUploadSmallPacketAvg {
 						if effMax > packetUploadChunkMin {
 							effMax = packetUploadChunkMin
 						}
@@ -1454,7 +1454,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					bulkChunk := chunk.Len() >= packetUploadBulkPaceBytes
 					// Continuity: if we launched recently, treat as active flow even
 					// for sub-bulk posts (e.g. many 1-4KiB writes in a tunnel burst).
-					recentFlow := !lastWrite.IsZero() && time.Since(lastWrite) < 50*time.Millisecond
+					recentFlow := !lastWrite.IsZero() && time.Since(lastWrite) < packetUploadRecentFlowWindow
 					paceMs := packetUploadLaunchIntervalMs(configuredMs, hasBacklog, fullChunk, bulkChunk, recentFlow)
 					if paceMs > 0 {
 						sleepDur := time.Duration(paceMs)*time.Millisecond - time.Since(lastWrite)

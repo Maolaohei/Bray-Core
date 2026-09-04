@@ -180,6 +180,21 @@ const (
 // at ~30ms/post when scMaxEachPostBytes is much larger than the write size.
 const packetUploadBulkPaceBytes int32 = 8 * 1024
 
+// packetUploadSmallPacketAvg is the average per-buffer payload below which a
+// flow is classified as small-packet (game heartbeats, DNS) and its chunk
+// ceiling drops to packetUploadChunkMin so each POST flushes promptly.
+const packetUploadSmallPacketAvg int32 = 256
+
+// packetUploadRecentFlowWindow is how long after a launch a sub-bulk post is
+// still treated as part of an active flow (pacing skipped). Active small
+// flows (game heartbeats, tunnel bursts) already carry natural app timing —
+// layering our cadence on top would only add latency with no camouflage
+// gain. Reachability invariant: the default pacing band To (60ms) must stay
+// ABOVE this window, or paced sleeps become unreachable again (the
+// pre-2026.09.05 bug where a fixed 30ms band sat entirely inside the window).
+// Pinned in TestDefaultMinPostIntervalJittered.
+const packetUploadRecentFlowWindow = 50 * time.Millisecond
+
 // chunkAvgPacketSize returns the average per-buffer payload size of a
 // MultiBuffer (0 when empty), used by the L3a small-packet flow detector.
 func chunkAvgPacketSize(mb buf.MultiBuffer) int32 {
