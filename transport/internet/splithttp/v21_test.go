@@ -15,7 +15,7 @@ func TestV21_Learner_ClassifiesLowLatency(t *testing.T) {
 		createdAt: time.Now(),
 		learner:   quality.NewNetworkLearner(),
 	}
-	c.LeftRequests.Store(999999)
+	c.remaining.Store(-1)
 
 	// Simulate 20 low-latency observations: RTT=20ms (above Aggressive threshold of 15ms)
 	for i := 0; i < 20; i++ {
@@ -38,7 +38,7 @@ func TestV21_Learner_ClassifiesLossy(t *testing.T) {
 		createdAt: time.Now(),
 		learner:   quality.NewNetworkLearner(),
 	}
-	c.LeftRequests.Store(999999)
+	c.remaining.Store(-1)
 
 	// Simulate 20 lossy observations: high retrans, high loss
 	for i := 0; i < 20; i++ {
@@ -85,7 +85,7 @@ func TestV21_ScoreClient_BehaviorAware(t *testing.T) {
 		createdAt: time.Now(),
 		learner:   quality.NewNetworkLearner(),
 	}
-	c.LeftRequests.Store(999999)
+	c.remaining.Store(-1)
 	c.lastRTT.Store(int64(50 * time.Millisecond))
 	c.lastRetrans.Store(10)
 	c.lastLoss.Store(1000) // 10% loss
@@ -158,182 +158,227 @@ func TestV21_Learner_TransitionRate(t *testing.T) {
 	t.Logf("Stable rate: low, Chaotic rate: %f", c.learner.TransitionRate())
 }
 
-// TestV21_DynamicConnectionScaling_EffectiveConnections verifies pool sizing per behavior with debounce.
-func TestV21_DynamicConnectionScaling_EffectiveConnections(t *testing.T) {
+// withPoolAutoScale runs fn with the pool AIMD gate temporarily enabled —
+// the tests below pin the (retained, gated-off-by-default) controller logic.
+func withPoolAutoScale(t *testing.T, fn func()) {
+	t.Helper()
+	old := xmuxPoolAutoScale
+	xmuxPoolAutoScale = true
+	defer func() { xmuxPoolAutoScale = old }()
+	fn()
+}
+
+// TestV21_PoolAutoScaleGateDisabled pins the shipped default: with the gate
+// off, behavior observations are inert and effective limits equal the base
+// config draw. The AIMD tests below run under withPoolAutoScale.
+func TestV21_PoolAutoScaleGateDisabled(t *testing.T) {
+	if xmuxPoolAutoScale {
+		t.Fatal("xmuxPoolAutoScale must ship disabled; flip the default only with benchmark evidence")
+	}
 	m := NewXmuxManager(&XmuxConfig{
 		MaxConnections: &RangeConfig{From: 4, To: 4},
 	}, func() XmuxConn { return &mockConn{} })
 	defer m.Close()
 
-	// Before any behavior update: returns base config
-	if m.effectiveConnections() != 4 {
-		t.Errorf("before behavior update: expected 4, got %d", m.effectiveConnections())
-	}
-
-	// Need 3 consecutive observations to switch behavior
-	for i := 0; i < debounceThreshold; i++ {
+	for i := 0; i < 5; i++ {
 		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
 	}
-
-	// After debounce: AIMD applies
-	conns := m.effectiveConnections()
-	if conns < 1 || conns > 8 {
-		t.Errorf("LowLatency after debounce: expected 1-8, got %d", conns)
+	if m.GetPoolBehavior() != quality.BehaviorUnknown {
+		t.Errorf("gate off: UpdatePoolBehavior must be inert, got %v", m.GetPoolBehavior())
 	}
-	t.Logf("LowLatency effectiveConnections: %d (base=4)", conns)
+	if m.effectiveConnections() != 4 {
+		t.Errorf("gate off: effectiveConnections must equal base 4, got %d", m.effectiveConnections())
+	}
+}
+
+// TestV21_DynamicConnectionScaling_EffectiveConnections verifies pool sizing per behavior with debounce.
+func TestV21_DynamicConnectionScaling_EffectiveConnections(t *testing.T) {
+	withPoolAutoScale(t, func() {
+		m := NewXmuxManager(&XmuxConfig{
+			MaxConnections: &RangeConfig{From: 4, To: 4},
+		}, func() XmuxConn { return &mockConn{} })
+		defer m.Close()
+
+		// Before any behavior update: returns base config
+		if m.effectiveConnections() != 4 {
+			t.Errorf("before behavior update: expected 4, got %d", m.effectiveConnections())
+		}
+
+		// Need 3 consecutive observations to switch behavior
+		for i := 0; i < debounceThreshold; i++ {
+			m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+		}
+
+		// After debounce: AIMD applies
+		conns := m.effectiveConnections()
+		if conns < 1 || conns > 8 {
+			t.Errorf("LowLatency after debounce: expected 1-8, got %d", conns)
+		}
+		t.Logf("LowLatency effectiveConnections: %d (base=4)", conns)
+	})
 }
 
 // TestV21_DynamicConnectionScaling_OscillationPrevention verifies debounce prevents rapid switching.
 func TestV21_DynamicConnectionScaling_OscillationPrevention(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
-		MaxConnections: &RangeConfig{From: 4, To: 4},
-	}, func() XmuxConn { return &mockConn{} })
-	defer m.Close()
+	withPoolAutoScale(t, func() {
+		m := NewXmuxManager(&XmuxConfig{
+			MaxConnections: &RangeConfig{From: 4, To: 4},
+		}, func() XmuxConn { return &mockConn{} })
+		defer m.Close()
 
-	// Switch to LowLatency (3 observations)
-	for i := 0; i < 3; i++ {
-		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
-	}
-	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
-		t.Error("should switch to LowLatency after 3 observations")
-	}
+		// Switch to LowLatency (3 observations)
+		for i := 0; i < 3; i++ {
+			m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+		}
+		if m.GetPoolBehavior() != quality.BehaviorLowLatency {
+			t.Error("should switch to LowLatency after 3 observations")
+		}
 
-	// Single observation of an IMPROVEMENT should NOT switch (debounce).
-	// Reach Saturated instantly (worsening bypasses debounce), then offer
-	// a slightly better Lossy once.
-	m.UpdatePoolBehavior(quality.BehaviorSaturated)
-	if m.GetPoolBehavior() != quality.BehaviorSaturated {
-		t.Fatalf("worsening should take effect immediately, got %v", m.GetPoolBehavior())
-	}
-	m.UpdatePoolBehavior(quality.BehaviorLossy)
-	if m.GetPoolBehavior() != quality.BehaviorSaturated {
-		t.Error("improvement should NOT switch after 1 observation (debounce)")
-	}
+		// Single observation of an IMPROVEMENT should NOT switch (debounce).
+		// Reach Saturated instantly (worsening bypasses debounce), then offer
+		// a slightly better Lossy once.
+		m.UpdatePoolBehavior(quality.BehaviorSaturated)
+		if m.GetPoolBehavior() != quality.BehaviorSaturated {
+			t.Fatalf("worsening should take effect immediately, got %v", m.GetPoolBehavior())
+		}
+		m.UpdatePoolBehavior(quality.BehaviorLossy)
+		if m.GetPoolBehavior() != quality.BehaviorSaturated {
+			t.Error("improvement should NOT switch after 1 observation (debounce)")
+		}
 
-	// A second improving observation still must not switch.
-	m.UpdatePoolBehavior(quality.BehaviorLossy)
-	if m.GetPoolBehavior() != quality.BehaviorSaturated {
-		t.Error("improvement should NOT switch after 2 observations (debounce)")
-	}
+		// A second improving observation still must not switch.
+		m.UpdatePoolBehavior(quality.BehaviorLossy)
+		if m.GetPoolBehavior() != quality.BehaviorSaturated {
+			t.Error("improvement should NOT switch after 2 observations (debounce)")
+		}
 
-	// Third observation completes the debounce.
-	m.UpdatePoolBehavior(quality.BehaviorLossy)
-	if m.GetPoolBehavior() != quality.BehaviorLossy {
-		t.Error("should switch to Lossy after 3 improving observations")
-	}
+		// Third observation completes the debounce.
+		m.UpdatePoolBehavior(quality.BehaviorLossy)
+		if m.GetPoolBehavior() != quality.BehaviorLossy {
+			t.Error("should switch to Lossy after 3 improving observations")
+		}
+	})
 }
 
 // TestV21_AIMD_WorseningImmediate verifies degradation bypasses debounce.
 func TestV21_AIMD_WorseningImmediate(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
-		MaxConnections: &RangeConfig{From: 4, To: 4},
-	}, func() XmuxConn { return &mockConn{} })
-	defer m.Close()
+	withPoolAutoScale(t, func() {
+		m := NewXmuxManager(&XmuxConfig{
+			MaxConnections: &RangeConfig{From: 4, To: 4},
+		}, func() XmuxConn { return &mockConn{} })
+		defer m.Close()
 
-	for i := 0; i < 3; i++ {
-		m.UpdatePoolBehavior(quality.BehaviorNormal)
-	}
-	if m.GetPoolBehavior() != quality.BehaviorNormal {
-		t.Fatal("should start at Normal")
-	}
+		for i := 0; i < 3; i++ {
+			m.UpdatePoolBehavior(quality.BehaviorNormal)
+		}
+		if m.GetPoolBehavior() != quality.BehaviorNormal {
+			t.Fatal("should start at Normal")
+		}
 
-	// ONE Lossy observation must switch immediately.
-	m.UpdatePoolBehavior(quality.BehaviorLossy)
-	if m.GetPoolBehavior() != quality.BehaviorLossy {
-		t.Errorf("worsening should take effect immediately, got %v", m.GetPoolBehavior())
-	}
+		// ONE Lossy observation must switch immediately.
+		m.UpdatePoolBehavior(quality.BehaviorLossy)
+		if m.GetPoolBehavior() != quality.BehaviorLossy {
+			t.Errorf("worsening should take effect immediately, got %v", m.GetPoolBehavior())
+		}
+	})
 }
 
 // TestV21_DynamicConnectionScaling_AIMD_Decrease verifies multiplicative decrease on worsening.
 func TestV21_DynamicConnectionScaling_AIMD_Decrease(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
-		MaxConnections: &RangeConfig{From: 8, To: 8},
-	}, func() XmuxConn { return &mockConn{} })
-	defer m.Close()
+	withPoolAutoScale(t, func() {
+		m := NewXmuxManager(&XmuxConfig{
+			MaxConnections: &RangeConfig{From: 8, To: 8},
+		}, func() XmuxConn { return &mockConn{} })
+		defer m.Close()
 
-	// Establish LowLatency first
-	for i := 0; i < 3; i++ {
-		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
-	}
-	lowConns := m.effectiveConnections()
-	t.Logf("LowLatency connections: %d", lowConns)
+		// Establish LowLatency first
+		for i := 0; i < 3; i++ {
+			m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+		}
+		lowConns := m.effectiveConnections()
+		t.Logf("LowLatency connections: %d", lowConns)
 
-	// Switch to Lossy (worsening, immediate) — pool lands directly on the
-	// Lossy target (reverse AIMD: MORE outer connections for HoL isolation
-	// under loss), NOT a blind halve.
-	for i := 0; i < 1; i++ {
-		m.UpdatePoolBehavior(quality.BehaviorLossy)
-	}
-	lossyConns := m.effectiveConnections()
-	t.Logf("Lossy connections: %d (after worsening AIMD)", lossyConns)
+		// Switch to Lossy (worsening, immediate) — pool lands directly on the
+		// Lossy target (reverse AIMD: MORE outer connections for HoL isolation
+		// under loss), NOT a blind halve.
+		for i := 0; i < 1; i++ {
+			m.UpdatePoolBehavior(quality.BehaviorLossy)
+		}
+		lossyConns := m.effectiveConnections()
+		t.Logf("Lossy connections: %d (after worsening AIMD)", lossyConns)
 
-	// Reverse AIMD: under loss the pool must GROW toward base*2 (clamped),
-	// never shrink below base.
-	if lossyConns < 8 {
-		t.Errorf("Lossy connections (%d) must be >= base 8 (reverse AIMD), not halved", lossyConns)
-	}
+		// Reverse AIMD: under loss the pool must GROW toward base*2 (clamped),
+		// never shrink below base.
+		if lossyConns < 8 {
+			t.Errorf("Lossy connections (%d) must be >= base 8 (reverse AIMD), not halved", lossyConns)
+		}
+	})
 }
 
 // TestV21_DynamicConnectionScaling_AIMD_Increase verifies additive
 // adjustment toward target on improvement.
 func TestV21_DynamicConnectionScaling_AIMD_Increase(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{
-		MaxConnections: &RangeConfig{From: 8, To: 8},
-	}, func() XmuxConn { return &mockConn{} })
-	defer m.Close()
+	withPoolAutoScale(t, func() {
+		m := NewXmuxManager(&XmuxConfig{
+			MaxConnections: &RangeConfig{From: 8, To: 8},
+		}, func() XmuxConn { return &mockConn{} })
+		defer m.Close()
 
-	// Start at Lossy: reverse AIMD targets base*2 = 16 (clamped), so the
-	// pool grows — the opposite of the old behavior.
-	for i := 0; i < 3; i++ {
-		m.UpdatePoolBehavior(quality.BehaviorLossy)
-	}
-	lossyConns := m.effectiveConnections()
-	if lossyConns <= 8 {
-		t.Fatalf("Lossy should scale connections UP (reverse AIMD), got %d", lossyConns)
-	}
-	t.Logf("Lossy connections: %d (reverse AIMD, > base 8)", lossyConns)
+		// Start at Lossy: reverse AIMD targets base*2 = 16 (clamped), so the
+		// pool grows — the opposite of the old behavior.
+		for i := 0; i < 3; i++ {
+			m.UpdatePoolBehavior(quality.BehaviorLossy)
+		}
+		lossyConns := m.effectiveConnections()
+		if lossyConns <= 8 {
+			t.Fatalf("Lossy should scale connections UP (reverse AIMD), got %d", lossyConns)
+		}
+		t.Logf("Lossy connections: %d (reverse AIMD, > base 8)", lossyConns)
 
-	// Switch to Normal (improvement) — additive adjustment steps DOWN
-	// toward the Normal target (base = 8).
-	for i := 0; i < 3; i++ {
-		m.UpdatePoolBehavior(quality.BehaviorNormal)
-	}
-	normalConns := m.effectiveConnections()
+		// Switch to Normal (improvement) — additive adjustment steps DOWN
+		// toward the Normal target (base = 8).
+		for i := 0; i < 3; i++ {
+			m.UpdatePoolBehavior(quality.BehaviorNormal)
+		}
+		normalConns := m.effectiveConnections()
 
-	t.Logf("Lossy→Normal: %d → %d (additive adjustment toward target)", lossyConns, normalConns)
+		t.Logf("Lossy→Normal: %d → %d (additive adjustment toward target)", lossyConns, normalConns)
 
-	if normalConns >= lossyConns {
-		t.Errorf("Normal connections (%d) should be < Lossy connections (%d)", normalConns, lossyConns)
-	}
+		if normalConns >= lossyConns {
+			t.Errorf("Normal connections (%d) should be < Lossy connections (%d)", normalConns, lossyConns)
+		}
+	})
 }
 
 // TestV21_DynamicConnectionScaling_PoolBehaviorUpdate verifies pool behavior updates with debounce.
 func TestV21_DynamicConnectionScaling_PoolBehaviorUpdate(t *testing.T) {
-	m := NewXmuxManager(&XmuxConfig{}, func() XmuxConn { return &mockConn{} })
-	defer m.Close()
+	withPoolAutoScale(t, func() {
+		m := NewXmuxManager(&XmuxConfig{}, func() XmuxConn { return &mockConn{} })
+		defer m.Close()
 
-	// Initially unknown
-	if m.GetPoolBehavior() != quality.BehaviorUnknown {
-		t.Errorf("initial pool behavior should be Unknown, got %v", m.GetPoolBehavior())
-	}
+		// Initially unknown
+		if m.GetPoolBehavior() != quality.BehaviorUnknown {
+			t.Errorf("initial pool behavior should be Unknown, got %v", m.GetPoolBehavior())
+		}
 
-	// 1 observation: should NOT switch (debounce)
-	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
-	if m.GetPoolBehavior() != quality.BehaviorUnknown {
-		t.Errorf("after 1 observation: should still be Unknown, got %v", m.GetPoolBehavior())
-	}
+		// 1 observation: should NOT switch (debounce)
+		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+		if m.GetPoolBehavior() != quality.BehaviorUnknown {
+			t.Errorf("after 1 observation: should still be Unknown, got %v", m.GetPoolBehavior())
+		}
 
-	// 2 observations: should NOT switch
-	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
-	if m.GetPoolBehavior() != quality.BehaviorUnknown {
-		t.Errorf("after 2 observations: should still be Unknown, got %v", m.GetPoolBehavior())
-	}
+		// 2 observations: should NOT switch
+		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+		if m.GetPoolBehavior() != quality.BehaviorUnknown {
+			t.Errorf("after 2 observations: should still be Unknown, got %v", m.GetPoolBehavior())
+		}
 
-	// 3 observations: should switch
-	m.UpdatePoolBehavior(quality.BehaviorLowLatency)
-	if m.GetPoolBehavior() != quality.BehaviorLowLatency {
-		t.Errorf("after 3 observations: should be LowLatency, got %v", m.GetPoolBehavior())
-	}
+		// 3 observations: should switch
+		m.UpdatePoolBehavior(quality.BehaviorLowLatency)
+		if m.GetPoolBehavior() != quality.BehaviorLowLatency {
+			t.Errorf("after 3 observations: should be LowLatency, got %v", m.GetPoolBehavior())
+		}
+	})
 }
 
 // TestV21_ConnectionMigration_ProactiveReplacement verifies pool stays filled after removal.

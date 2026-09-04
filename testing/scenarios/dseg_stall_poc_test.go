@@ -8,18 +8,18 @@ package scenarios
 //  1. Accounting hole: the dseg production-leg GET and all 6 segment-pull
 //     GETs are issued directly via httpClient2/dc (dialer.go OpenStreamAsync
 //     / PullSegment) WITHOUT going through XMUX Borrow bookkeeping and
-//     WITHOUT decrementing LeftRequests — the XMUX pool cannot see them.
-//     The only XMUX slot a logical conn holds is the upload side
+//     WITHOUT touching the reuse budget (remaining) — the XMUX pool cannot
+//     see them. The only XMUX slot a logical conn holds is the upload side
 //     (ownedUploadXmux, dialer.go).
 //  2. Bidirectional traffic burns the upload POST budget (CMaxReuseTimes /
-//     leftUsage). Once exhausted, GetXmuxClient no longer reuses connection
+//     remaining). Once exhausted, GetXmuxClient no longer reuses connection
 //     A and returns a fresh client B; the rescue path swaps ownership and
 //     calls prev.Release() (dialer.go rescueClient -> ownedUploadXmux swap)
 //     — dropping A's activeStreams to 0 while the session's production leg
 //     and pullers still live on A.
-//  3. Within <=5s, XmuxManager.healthCheckTick sees leftUsage==0 &&
-//     activeStreams==0 and drains A (mux.go "health-check draining
-//     exhausted xmuxClient"); in Draining state tryClose() immediately
+//  3. Within <=5s, XmuxManager.healthCheckTick sees remaining==0 &&
+//     activeStreams==0 and drains A (mux.go retireLocked "budget/lifetime
+//     exhausted"); in Draining state tryClose() immediately
 //     hard-closes the underlying TLS/H2 transport — the transport carrying
 //     the STILL-ACTIVE session's production leg and all segment pulls.
 //  4. Server side: the production-leg request context is cancelled
@@ -36,8 +36,8 @@ package scenarios
 //
 // Trigger: the harness keeps production XMUX budgets except HMaxReusableSecs
 // (via dsegEndpoints.xmuxOverride), shrunk to 2s so the lifetime-expiry
-// rotation lands inside the observation window — the same UnreusableAt
-// renewal production users hit after 600-1200s of browsing.
+// rotation lands inside the observation window — the same deadlineUnix
+// (ex-UnreusableAt) renewal production users hit after 600-1200s of browsing.
 //
 // Run: go test ./testing/scenarios -run TestXHTTPDsegStall_POC -v -count 1
 
@@ -57,7 +57,8 @@ func TestXHTTPDsegStall_POC(t *testing.T) {
 	// Production-faithful trigger: the XMUX connection lifetime
 	// (HMaxReusableSecs; production default 600-1200s) is shrunk to 2s so
 	// the lifetime-expiry rotation lands INSIDE the observation window.
-	// Once UnreusableAt passes, the upload chunk loop renews the upload onto
+	// Once the lifetime deadline (deadlineUnix, ex-UnreusableAt) passes, the
+	// upload chunk loop renews the upload onto
 	// a fresh XMUX client at the next written chunk (dialer.go renew path),
 	// releasing the Borrow that — before the pin fix — was the only thing
 	// keeping the old client (which carries this session's dseg production

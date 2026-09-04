@@ -20,6 +20,19 @@
 
 ---
 
+## [2026.09.04b] — 2026-09-04（XMUX 池管理奥卡姆化简：单一预算 + 单一后台循环）
+
+### 简化（重构不改行为 — `remaining` 合并、循环合并、AIMD 门控）
+
+- **复用预算二合一**：`leftUsage`（每次 Get 扣减）与 `LeftRequests`（每次 Dial 扣减，dialer 内 4 处扣减点）均为逻辑磨损计数器（分片 POST 从不扣减），池在任一耗尽即退休连接 → 合并为单一 `remaining`（取 `min(CMax, HMax)`），仅在 `GetXmuxClient` 的 `acquireReuse()` 单点记账，创建即消耗首次（`Store(lim-1)` 保持旧轮换节奏，`TestCMaxReuseTimes` 钉住 64 Get→32 客户端不变量）。默认钳制下 CMax(32-256) 恒小于 HMax(200-1600)，生产行为不变。`UnreusableAt/unreusableAtUnix` 同步并入 `deadlineUnix`（biased 抽样寿命语义保留）。
+- **删除 GetXmuxClient 快照微优化**：`xmuxSnapPool`/`acquireSnap`/`releaseSnap`/`copyXmuxClientsLocked`/`maxInlineXmuxScan` 内联数组全删——池仅 1-16 个指针，RLock 下直接拷贝扫描更便宜也更难写错；GetXmuxClient 重写为线性两阶段（先扩容到 steady 目标 → 评分选优 → 单点扣预算 → burst 超卖），选择语义逐分支保留。
+- **后台循环 3→1**：`preConnectLoop`（异步预热）、`healthCheckLoop`（5s tick）、`networkWatchLoop`（10s tick）合并为单一 `maintenanceLoop`——预热本就是 tick 任务（冷启动首填由补池逻辑覆盖），网络变更检测自节流 30s 挂进同一 tick；panic 收口、`doneCh` 关闭、goroutine 数均相应简化。`scheduleWarmReconnect` 惰性 CDN 保活计时器保留（mux_cdn_test 钉住）。
+- **retire 收口**：healthCheckTick 五个正常退休分支（预算耗尽/寿命到期/空闲/超龄/质量劣化/高 RTT）统一走 `retireLocked(reason)`——单条日志 + `maybeDrain` + 出池；致命故障 `MarkDead`（Fast Eviction）路径不变。
+- **AIMD 自适应池置于可逆门控后**：`xmuxPoolAutoScale = false`（默认关）。环回 TCP_INFO 下质量恒定，A/B 无法给出自适应有利的结论，故代码保留（UpdatePoolBehavior/effectiveConnections/Concurrency/healthCheckTick 投票块完整），仅入口 early-return；`TestV21_PoolAutoScaleGateDisabled` 钉住默认关 + 关闭时惰性，AIMD 单测在门控内运行。出基准证据前控制器不参与生产。
+- **验证**：`go build ./...` + `go vet` 全绿；splithttp 单元套件全绿（含 CMaxReuseTimes/MaxConcurrency/BurstCapOverAdmit/ConcurrentPoolAccess/v21 系列）；dseg 断流 POC 复测 PASS（123.6s 满速，downloadPins 闭环不受重构影响）；4 项 XHTTP 回归场景全绿。
+
+---
+
 ## [2026.09.01] — 2026-09-01（2026-09-02 重发：补入 dseg 交付延迟与 EOF 竞争修复）
 
 对应提交：`5b0d9b33` 至 `581d67b0`（VLESS/Vision、DNS、XMUX、REALITY 四专项修复 + 8.31 断流风暴止血 + 日志膨胀修复 + dseg 性能修复）。

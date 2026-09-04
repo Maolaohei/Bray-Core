@@ -26,7 +26,7 @@ func TestMaxConnections(t *testing.T) {
 	})
 	defer xmuxManager.Close()
 
-	// preConnectLoop creates 1 initial connection. Drain it first.
+	// The manager no longer pre-connects; the first Get dials connection #1.
 	xmuxManager.GetXmuxClient(context.Background())
 
 	xmuxClients := make(map[interface{}]struct{})
@@ -35,7 +35,7 @@ func TestMaxConnections(t *testing.T) {
 		xmuxClients[c] = struct{}{}
 	}
 
-	// background goroutines (preConnectLoop, healthCheckTick) may create
+	// The maintenance loop (healthCheckTick) may create
 	// additional connections concurrently, so the pool can reach the limit
 	// before all loop iterations run. We expect at least 2 distinct clients
 	// (proving connections are created) and at most 4 (proving the limit works).
@@ -57,7 +57,7 @@ func TestCMaxReuseTimes(t *testing.T) {
 		return &fakeRoundTripper{}
 	})
 
-	// Let preConnectLoop finish creating the initial connection, then close.
+	// Close before the first tick so no warm connection exists.
 	xmuxManager.Close()
 	defer ResetGlobalDialer()
 
@@ -67,9 +67,9 @@ func TestCMaxReuseTimes(t *testing.T) {
 		xmuxClients[c] = struct{}{}
 	}
 
-	// preConnectLoop may create 1 extra client before Close takes effect.
+	// The maintenance loop may create 1 extra client before Close takes effect.
 	// With CMaxReuseTimes=2: 64 calls / 2 = 32 clients from the test loop.
-	// Plus possibly 1 from preConnectLoop = 32 or 33.
+	// Plus possibly 1 from the maintenance loop = 32 or 33.
 	n := len(xmuxClients)
 	if n < 32 || n > 34 {
 		t.Error("expected 32-34 distinct clients, got ", n)
@@ -153,9 +153,9 @@ func TestBurstCapOverAdmit(t *testing.T) {
 		clients[c] = struct{}{}
 	}
 	n := len(clients)
-	// preConnectLoop may asynchronously warm one extra connection (it bypasses
-	// the burst gate by design), so allow burst+1. Service connections for the
-	// 20 Borrow slots must still never exceed burst.
+	// The maintenance loop may asynchronously warm one extra connection (it
+	// bypasses the burst gate by design), so allow burst+1. Service
+	// connections for the 20 Borrow slots must still never exceed burst.
 	if n > 5 {
 		t.Fatalf("burst cap broken: got %d distinct clients, want <=4 (+1 preconnect)", n)
 	}

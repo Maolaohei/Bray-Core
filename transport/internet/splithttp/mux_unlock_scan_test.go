@@ -17,7 +17,7 @@ func TestMultiPoolUnlockScanPrefersLowRTT(t *testing.T) {
 	m := NewXmuxManager(&XmuxConfig{
 		MaxConnections: &RangeConfig{From: 8, To: 8},
 		MaxConcurrency: &RangeConfig{From: 0, To: 0}, // unlimited streams
-		CMaxReuseTimes: &RangeConfig{From: 0, To: 0}, // unlimited reuse (leftUsage=-1)
+		CMaxReuseTimes: &RangeConfig{From: 0, To: 0}, // unlimited reuse (remaining=-1)
 	}, func() XmuxConn {
 		return &fakeRoundTripper{}
 	})

@@ -72,9 +72,10 @@ func TestPOC_NonDialDeadProbeFailureNeverCoolsDown(t *testing.T) {
 	// so it is restated here. Update both if the policy changes.
 	const coolFailStreak = 3
 
-	// newConnFunc returns nil on purpose. NewXmuxManager runs preConnectLoop(),
-	// which spawns background newXmuxClient() goroutines that sleep ~100ms and
-	// then evaluate m.probeURL; whatever the test does in the meantime, those
+	// newConnFunc returns nil on purpose. The manager's healthCheckTick no
+	// longer pre-connects, but the first tick (and any pool refill) spawns
+	// newXmuxClient() work that sleeps ~100ms and
+	// then evaluates m.probeURL; whatever the test does in the meantime, those
 	// goroutines can start their own async probeConnection at any moment and
 	// land extra failures in the very counters asserted below (observed: the
 	// streak grew by 2 per driven probe). Returning nil makes

@@ -7,7 +7,7 @@ import (
 
 func TestPipeline_UpdateQuality_ReflectsInScoreClient(t *testing.T) {
 	c := &XmuxClient{createdAt: time.Now()}
-	c.LeftRequests.Store(999999)
+	c.remaining.Store(-1)
 
 	baseline := scoreClient(c)
 	if baseline == 0 {
@@ -28,7 +28,7 @@ func TestPipeline_UpdateQuality_ReflectsInScoreClient(t *testing.T) {
 
 func TestPipeline_UpdateQuality_HighRetransPenalizes(t *testing.T) {
 	c := &XmuxClient{createdAt: time.Now()}
-	c.LeftRequests.Store(999999)
+	c.remaining.Store(-1)
 
 	c.UpdateQuality(90, 95, 5, 0)
 	scoreLow := scoreClient(c)
@@ -45,7 +45,7 @@ func TestPipeline_UpdateQuality_HighRetransPenalizes(t *testing.T) {
 
 func TestPipeline_UpdateQuality_HighLossPenalizes(t *testing.T) {
 	c := &XmuxClient{createdAt: time.Now()}
-	c.LeftRequests.Store(999999)
+	c.remaining.Store(-1)
 
 	c.UpdateQuality(90, 95, 0, 0)
 	scoreNoLoss := scoreClient(c)
@@ -81,12 +81,12 @@ func TestPipeline_UpdateQuality_QualityScoreUpdate(t *testing.T) {
 
 func TestPipeline_ScoreClient_ConfidenceWeighting(t *testing.T) {
 	cHi := &XmuxClient{createdAt: time.Now()}
-	cHi.LeftRequests.Store(999999)
+	cHi.remaining.Store(-1)
 	cHi.UpdateQuality(80, 90, 10, 500)
 	scoreHi := scoreClient(cHi)
 
 	cLo := &XmuxClient{createdAt: time.Now()}
-	cLo.LeftRequests.Store(999999)
+	cLo.remaining.Store(-1)
 	cLo.UpdateQuality(80, 10, 10, 500)
 	scoreLo := scoreClient(cLo)
 
@@ -103,7 +103,7 @@ func TestPipeline_ScoreClient_ConfidenceWeighting(t *testing.T) {
 
 func TestPipeline_ShouldDrain_TracksConsecutiveDrops(t *testing.T) {
 	c := &XmuxClient{createdAt: time.Now()}
-	c.LeftRequests.Store(999999)
+	c.remaining.Store(-1)
 
 	c.UpdateQuality(100, 50, 0, 0)
 
@@ -122,7 +122,7 @@ func TestPipeline_ShouldDrain_TracksConsecutiveDrops(t *testing.T) {
 
 func TestPipeline_ShouldDrain_ResetsOnImprovement(t *testing.T) {
 	c := &XmuxClient{createdAt: time.Now()}
-	c.LeftRequests.Store(999999)
+	c.remaining.Store(-1)
 
 	for i := 0; i < 3; i++ {
 		c.UpdateQuality(int32(80-i), 50, 0, 0)

@@ -23,41 +23,6 @@ type XmuxConn interface {
 	IsClosed() bool
 }
 
-// xmuxSnapPool reuses snapshot buffers for GetXmuxClient selection.
-// Pool stores *xmuxSnap so Put never captures a stack-local slice header.
-type xmuxSnap struct {
-	s []*XmuxClient
-}
-
-var xmuxSnapPool = sync.Pool{
-	New: func() any {
-		return &xmuxSnap{s: make([]*XmuxClient, 0, 8)}
-	},
-}
-
-func acquireSnap(n int) *xmuxSnap {
-	sn := xmuxSnapPool.Get().(*xmuxSnap)
-	if cap(sn.s) < n {
-		sn.s = make([]*XmuxClient, 0, n)
-	} else {
-		sn.s = sn.s[:0]
-	}
-	return sn
-}
-
-func releaseSnap(sn *xmuxSnap) {
-	if sn == nil {
-		return
-	}
-	for i := range sn.s {
-		sn.s[i] = nil
-	}
-	sn.s = sn.s[:0]
-	if cap(sn.s) <= 64 {
-		xmuxSnapPool.Put(sn)
-	}
-}
-
 // Connection lifecycle states.
 const (
 	StateActive   int32 = 0 // accepting new streams
@@ -180,20 +145,30 @@ type XmuxClient struct {
 	// the dseg production leg plus its segment pulls) riding on this
 	// connection WITHOUT Borrow accounting: the dialer issues them straight
 	// over the shared transport, so pool hygiene cannot see them through
-	// activeStreams/LeftRequests. A pin keeps the transport open even after
+	// activeStreams/remaining. A pin keeps the transport open even after
 	// an upload-side rotation releases the connection's last Borrow and a
 	// drain fires (budget/lifetime exhaustion): tryClose refuses to close
 	// while pins>0, and the unpin path retries the close. Pins never affect
 	// selection or admission — a pinned, exhausted connection keeps serving
 	// only its existing download leg and receives no new work. Real
 	// connection faults bypass this via MarkDead.
-	downloadPins     atomic.Int32
-	leftUsage        atomic.Int32
-	LeftRequests     atomic.Int32
-	UnreusableAt     time.Time    // wall deadline for HMaxReusableSecs (health / dialer)
-	unreusableAtUnix atomic.Int64 // unix nano of UnreusableAt; 0 = unlimited (hot path)
-	createdAt        time.Time
-	LastUsed         atomic.Int64 // unix nano: last time this client was borrowed
+	downloadPins atomic.Int32
+	// remaining is THE single reuse budget for this connection: how many
+	// more stream acquisitions it may serve before a hygiene drain.
+	// Config-derived once at creation (min of CMaxReuseTimes /
+	// HMaxRequestTimes; -1 = unlimited), decremented exactly once per
+	// acquisition — in GetXmuxClient, the single choke point. There is no
+	// per-POST or per-leg decrement: a packet-up session burns one unit per
+	// Dial regardless of how many POSTs or legs it opens. 0 = exhausted;
+	// negative = unlimited. (Runtime state; see deadlineUnix for the
+	// lifetime half of the budget and activeStreams for concurrency.)
+	remaining atomic.Int32
+	// deadlineUnix is the unix-nano lifetime deadline (0 = unlimited):
+	// after it passes the connection takes no new work and is drained once
+	// idle. Config-derived once at creation (HMaxReusableSecs).
+	deadlineUnix atomic.Int64
+	createdAt    time.Time
+	LastUsed     atomic.Int64 // unix nano: last time this client was borrowed
 	// lastIdleActivity is the unix nano timestamp of the last beacon-style
 	// idle activity, for per-connection rate limiting.
 	lastIdleActivity atomic.Int64
@@ -590,9 +565,10 @@ type XmuxManager struct {
 	}
 }
 
-// NewXmuxManager creates a manager and starts background pool loops.
-// Optional probeURL is the HEAD probe target for real dial warm-up; pass it
-// at construction time so preConnectLoop never races a later field write.
+// NewXmuxManager creates a manager and starts the single background
+// maintenance loop. Optional probeURL is the HEAD probe target for real dial
+// warm-up; pass it at construction time so tick-time newXmuxClient calls
+// never race a later field write.
 //
 // xmuxConfig is held by pointer (protobuf messages carry an internal mutex and
 // must never be copied by value). A nil config is treated as all-defaults.
@@ -615,65 +591,28 @@ func NewXmuxManager(xmuxConfig *XmuxConfig, newConnFunc func() XmuxConn, probeUR
 		lastActivity: atomic.Int64{},
 	}
 
-	// Start background goroutines for connection management.
+	// Start the single background maintenance loop. Initial pool fill and
+	// probe-warm happen on the first tick (~instant); a synchronous pre-fill
+	// here would only block NewXmuxManager callers on dial latency.
 	go func() {
-		var wg sync.WaitGroup
-		wg.Add(3)
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					errors.LogDebug(context.Background(), "XMUX: preConnectLoop recovered panic: ", r)
-				}
-			}()
-			m.preConnectLoop()
+		defer func() {
+			if r := recover(); r != nil {
+				errors.LogDebug(context.Background(), "XMUX: maintenanceLoop recovered panic: ", r)
+			}
 		}()
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					errors.LogDebug(context.Background(), "XMUX: healthCheckLoop recovered panic: ", r)
-				}
-			}()
-			m.healthCheckLoop()
-		}()
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					errors.LogDebug(context.Background(), "XMUX: networkWatchLoop recovered panic: ", r)
-				}
-			}()
-			m.networkWatchLoop()
-		}()
-		wg.Wait()
-		close(m.doneCh)
+		m.maintenanceLoop()
 	}()
 
 	return m
 }
 
-// preConnectLoop establishes initial pool connections using exponential backoff.
-// Fully async -> never blocks on probe completion. Health check loop handles cleanup.
-func (m *XmuxManager) preConnectLoop() {
-	if m.pool.Len() == 0 {
-		errors.LogDebug(context.Background(), "XMUX: pre-connect creating xmuxClient (initial)")
-		go m.newXmuxClient()
-		// Brief pause to let the connection establish before returning.
-		// Not a probe wait -> just enough time for TCP+TLS to complete locally.
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Optionally fill one more connection to ensure robustness, but do NOT wait.
-	if m.pool.Len() < 2 {
-		// demoted: pre-connect filling pool
-		go m.newXmuxClient()
-	}
-}
-
-// networkWatchLoop monitors network changes and triggers warmup.
-func (m *XmuxManager) networkWatchLoop() {
-	ticker := time.NewTicker(10 * time.Second)
+// maintenanceLoop is the ONE background goroutine: periodic health checking,
+// pool replenishment/migration, network-change detection, and idle-manager
+// housekeeping all run on one 5s tick. The former split (preConnectLoop /
+// healthCheckLoop / networkWatchLoop goroutines) existed without a reason —
+// the network check self-throttles to 30s and pre-connect is a tick job.
+func (m *XmuxManager) maintenanceLoop() {
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -681,6 +620,7 @@ func (m *XmuxManager) networkWatchLoop() {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
+			m.healthCheckTick()
 			m.checkNetworkChange()
 		}
 	}
@@ -945,23 +885,15 @@ func (m *XmuxManager) sendIdleActivity(c *XmuxClient) {
 	c.NoteBeaconSuccess()
 }
 
-// healthCheckLoop periodically checks connection health and removes unhealthy ones.
-// Improvements over original:
-// - Cold start protection: new connections (<10s) are not removed
-// - RTT-based: only remove if RTT > 5000ms (not just IsClosed)
-// - Does not remove active connections with low Running
-func (m *XmuxManager) healthCheckLoop() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.stopCh:
-			return
-		case <-ticker.C:
-			m.healthCheckTick()
-		}
-	}
+// retireLocked performs a hygiene retirement of c: transition Active→Draining
+// (closing immediately when nothing holds it — downloadPins keep the transport
+// open inside tryClose until the last pin releases), remove from the pool, and
+// log the reason. Caller must hold m.pool.mu for writing. Fatal faults use
+// MarkDead instead — retireLocked never force-closes a live transport.
+func (m *XmuxManager) retireLocked(c *XmuxClient, reason string) {
+	errors.LogDebug(context.Background(), "XMUX: retiring xmuxClient (", reason, ")")
+	c.maybeDrain()
+	m.pool.Remove(c)
 }
 
 // healthCheckTick performs one tick of health checking.
@@ -982,7 +914,7 @@ func (m *XmuxManager) healthCheckTick() {
 				m.pool.RemoveAt(i)
 				continue
 			}
-			// Still draining with active streams -> skip
+			// Still draining with active streams or pinned downloads -> skip
 			i++
 			continue
 		}
@@ -1011,13 +943,9 @@ func (m *XmuxManager) healthCheckTick() {
 		// per connection; deliberately does NOT refresh LastUsed, so
 		// idle eviction still follows business traffic.
 		m.maybeIdleActivity(c, now)
-		// Exhausted reuse budget / lifetime: drain when idle (moved from Get).
-		if c.leftUsage.Load() == 0 ||
-			c.LeftRequests.Load() <= 0 ||
-			(c.UnreusableAt != time.Time{} && now.After(c.UnreusableAt)) {
-			errors.LogDebug(context.Background(), "XMUX: health-check draining exhausted xmuxClient")
-			c.maybeDrain()
-			m.pool.RemoveAt(i)
+		// Exhausted reuse budget / past lifetime: drain when idle.
+		if c.remaining.Load() == 0 || c.expiredAt(now.UnixNano()) {
+			m.retireLocked(c, "budget/lifetime exhausted")
 			continue
 		}
 		// Idle eviction: only evict if NO active streams AND idle for too long.
@@ -1031,9 +959,7 @@ func (m *XmuxManager) healthCheckTick() {
 				idleNs = rttAdjustedIdleNs(idleNs, rtt)
 			}
 			if now.UnixNano()-lastUsed > idleNs {
-				errors.LogDebug(context.Background(), "XMUX: health-check removing idle xmuxClient, lastUsed=", time.Unix(0, lastUsed).Format(time.RFC3339))
-				c.maybeDrain()
-				m.pool.RemoveAt(i)
+				m.retireLocked(c, "idle")
 				// Lazy CDN keep-warm: the last connection just idled out of
 				// an empty pool. Pre-pay one reconnect so the next user
 				// request does not eat a full CDN cold start.
@@ -1050,22 +976,16 @@ func (m *XmuxManager) healthCheckTick() {
 		// Max connection age: drain connections that have lived too long.
 		// Handles NAT/LB changes, server rotation, TLS session refresh.
 		if now.Sub(c.createdAt) > maxConnectionAge {
-			errors.LogDebug(context.Background(), "XMUX: health-check draining aged xmuxClient, age=", now.Sub(c.createdAt).Round(time.Second))
-			c.maybeDrain()
-			m.pool.RemoveAt(i)
+			m.retireLocked(c, "max connection age")
 			continue
 		}
 		if c.ShouldDrain() && c.confidence.Load() >= 30 {
-			errors.LogDebug(context.Background(), "XMUX: health-check draining quality-degraded xmuxClient, consecutiveDrops=", c.consecDrops.Load())
-			c.maybeDrain()
-			m.pool.RemoveAt(i)
+			m.retireLocked(c, "quality degraded")
 			continue
 		}
 		rttMs := c.GetRTT().Milliseconds()
 		if rttMs >= maxRTTBeforeRemove && c.GetRTT() > 0 {
-			errors.LogDebug(context.Background(), "XMUX: health-check removing high-RTT xmuxClient, rtt=", rttMs, "ms")
-			c.maybeDrain()
-			m.pool.RemoveAt(i)
+			m.retireLocked(c, "high RTT")
 			continue
 		}
 		i++
@@ -1093,44 +1013,47 @@ func (m *XmuxManager) healthCheckTick() {
 		}
 	}
 
-	// V2.1: Update pool behavior from client observations
-	snap := m.pool.Snapshot()
-	var dominantBehavior quality.Behavior
-	if len(snap) > 0 {
-		behaviorCounts := make(map[quality.Behavior]int)
-		totalKnown := 0
-		badCount := 0
+	// V2.1: Update pool behavior from client observations (gated; see
+	// xmuxPoolAutoScale). Disabled by default — skip the per-tick scan.
+	if xmuxPoolAutoScale {
+		snap := m.pool.Snapshot()
+		var dominantBehavior quality.Behavior
+		if len(snap) > 0 {
+			behaviorCounts := make(map[quality.Behavior]int)
+			totalKnown := 0
+			badCount := 0
 
-		for _, c := range snap {
-			if b := c.GetBehavior(); b != quality.BehaviorUnknown {
-				behaviorCounts[b]++
-				totalKnown++
-				if b == quality.BehaviorLossy || b == quality.BehaviorSaturated {
-					badCount++
+			for _, c := range snap {
+				if b := c.GetBehavior(); b != quality.BehaviorUnknown {
+					behaviorCounts[b]++
+					totalKnown++
+					if b == quality.BehaviorLossy || b == quality.BehaviorSaturated {
+						badCount++
+					}
+				}
+			}
+
+			if totalKnown > 0 {
+				maxCount := 0
+				for b, count := range behaviorCounts {
+					if count > maxCount {
+						maxCount = count
+						dominantBehavior = b
+					}
+				}
+				badRatio := float64(badCount) / float64(totalKnown)
+				if badRatio > 0.4 && dominantBehavior != quality.BehaviorLossy && dominantBehavior != quality.BehaviorSaturated {
+					if behaviorCounts[quality.BehaviorSaturated] > 0 {
+						dominantBehavior = quality.BehaviorSaturated
+					} else {
+						dominantBehavior = quality.BehaviorLossy
+					}
 				}
 			}
 		}
-
-		if totalKnown > 0 {
-			maxCount := 0
-			for b, count := range behaviorCounts {
-				if count > maxCount {
-					maxCount = count
-					dominantBehavior = b
-				}
-			}
-			badRatio := float64(badCount) / float64(totalKnown)
-			if badRatio > 0.4 && dominantBehavior != quality.BehaviorLossy && dominantBehavior != quality.BehaviorSaturated {
-				if behaviorCounts[quality.BehaviorSaturated] > 0 {
-					dominantBehavior = quality.BehaviorSaturated
-				} else {
-					dominantBehavior = quality.BehaviorLossy
-				}
-			}
+		if dominantBehavior != quality.BehaviorUnknown {
+			m.UpdatePoolBehavior(dominantBehavior)
 		}
-	}
-	if dominantBehavior != quality.BehaviorUnknown {
-		m.UpdatePoolBehavior(dominantBehavior)
 	}
 }
 
@@ -1165,6 +1088,14 @@ func (m *XmuxManager) Close() {
 
 // V2.1: Dynamic Connection Scaling
 
+// xmuxPoolAutoScale gates the pool-level AIMD/behavior control loop
+// (UpdatePoolBehavior + dynamic connections/concurrency). It ships DISABLED
+// pending a real-network A/B: on loopback, TCP_INFO quality is constant and
+// behavior classification never leaves Unknown, so the loop only costs a
+// per-tick voting scan. Flip to true (same-package tests may do so) to
+// re-enable; if it stays unused the whole block is scheduled for removal.
+var xmuxPoolAutoScale = false
+
 const (
 	// debounceThreshold is how many consecutive observations needed before switching behavior.
 	debounceThreshold = 3
@@ -1179,6 +1110,9 @@ const (
 // out while the link is already lossy/saturated keeps the pool mis-sized
 // exactly when isolation matters most.
 func (m *XmuxManager) UpdatePoolBehavior(b quality.Behavior) {
+	if !xmuxPoolAutoScale {
+		return
+	}
 	m.poolBehaviorMu.Lock()
 	defer m.poolBehaviorMu.Unlock()
 
@@ -1355,19 +1289,20 @@ func (m *XmuxManager) GetPoolBehavior() quality.Behavior {
 	return m.poolBehavior
 }
 
-// effectiveConnections returns the AIMD-smoothed connection limit.
-// Lock-free read via atomic.Load -> safe for concurrent callers.
+// effectiveConnections returns the pool's connection limit. With
+// xmuxPoolAutoScale disabled this is the static config draw; the AIMD
+// override only exists behind the gate.
 func (m *XmuxManager) effectiveConnections() int32 {
-	if !m.scaledOnce.Load() {
+	if !xmuxPoolAutoScale || !m.scaledOnce.Load() {
 		return m.connections
 	}
 	return m._dynamicConns.Load()
 }
 
-// effectiveConcurrency returns the AIMD-smoothed concurrency limit.
-// Lock-free read via atomic.Load -> safe for concurrent callers.
+// effectiveConcurrency returns the pool's per-connection stream limit.
+// See effectiveConnections for the gate semantics.
 func (m *XmuxManager) effectiveConcurrency() int32 {
-	if !m.scaledOnce.Load() {
+	if !xmuxPoolAutoScale || !m.scaledOnce.Load() {
 		return m.concurrency
 	}
 	return m._dynamicConc.Load()
@@ -1745,36 +1680,43 @@ func (m *XmuxManager) initNewClient(conn XmuxConn) *XmuxClient {
 	// connections do not live forever (a machine signature), long enough to
 	// survive video/viewing gaps.
 	c.idleTimeoutNs = int64(biasedRangeRand(clientIdleTimeoutMinSecs, clientIdleTimeoutMaxSecs)) * int64(time.Second)
-	c.leftUsage.Store(-1)
+	// Single reuse budget = the tighter of the two configured request caps.
+	// (CMaxReuseTimes historically counted Get-level reuses, HMaxRequestTimes
+	// counted per-Dial stream opens; both are logical-wear counters and the
+	// pool OR-ed them at exhaustion, so min() of the two reproduces today's
+	// effective retirement point with one counter instead of two.)
+	c.remaining.Store(-1)
+	lim := int32(-1)
 	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
-		c.leftUsage.Store(x - 1)
+		lim = x
 	}
-	c.LeftRequests.Store(math.MaxInt32)
-	if x := m.xmuxConfig.GetNormalizedHMaxRequestTimes().rand(); x > 0 {
-		c.LeftRequests.Store(x)
+	if x := m.xmuxConfig.GetNormalizedHMaxRequestTimes().rand(); x > 0 && (lim < 0 || x < lim) {
+		lim = x
+	}
+	if lim >= 0 {
+		// Store lim-1: creation IS the first use (the caller dials this
+		// transport immediately), matching the old Xray semantics where
+		// CMaxReuseTimes=2 allowed exactly one GetXmuxClient reuse after
+		// the create. Without this, every client serves one extra Get and
+		// the pool rotates 1.5x slower (TestCMaxReuseTimes regression).
+		c.remaining.Store(lim - 1)
 	}
 	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs(); x != nil && x.To > 0 {
 		// Skewed lifetime draw: most connections rotate in 10-12min, a few
 		// live 20min — a uniform 600-1200s spread is a machine signature.
 		deadline := time.Now().Add(time.Duration(biasedRangeRand(x.From, x.To)) * time.Second)
-		c.UnreusableAt = deadline
-		c.unreusableAtUnix.Store(deadline.UnixNano())
+		c.deadlineUnix.Store(deadline.UnixNano())
 	}
 	c.recomputeScore()
 	return c
 }
 
-// maxInlineXmuxScan is the stack capacity for multi-conn selection without
-// heap snapshot. Covers common MaxConnections and BenchmarkXMUXPoolScheduling
-// sizes (1..32). Larger pools fall back to xmuxSnapPool.
-const maxInlineXmuxScan = 32
-
 // pickBestXmuxClient scans candidates and returns the lowest selectionScore
 // reusable client under concurrency/idle rules. overAdmit prefers lower
-// inflight first, then score. Snapshot may be nil when n==0.
+// inflight first, then score.
 //
 // Callers that unlocked the pool must re-validate the winner before use
-// (leftUsage CAS + state) because the set can change after the snapshot.
+// (budget charge + state) because the set can change after the snapshot.
 func pickBestXmuxClient(candidates []*XmuxClient, n int, nowNs int64, effectiveConc int32, overAdmit bool) *XmuxClient {
 	if n <= 0 {
 		return nil
@@ -1817,23 +1759,6 @@ func pickBestXmuxClient(candidates []*XmuxClient, n int, nowNs int64, effectiveC
 	return best
 }
 
-// copyXmuxClientsLocked copies pool client pointers under RLock into dst
-// (must have len>=poolLen) or allocates via snap when dst is too small.
-// Returns the slice to scan and an optional snap to release after unlock.
-func copyXmuxClientsLocked(clients []*XmuxClient, poolLen int, dst []*XmuxClient) (scan []*XmuxClient, sn *xmuxSnap) {
-	if poolLen <= 0 {
-		return nil, nil
-	}
-	if poolLen <= len(dst) {
-		copy(dst[:poolLen], clients[:poolLen])
-		return dst[:poolLen], nil
-	}
-	sn = acquireSnap(poolLen)
-	sn.s = sn.s[:poolLen]
-	copy(sn.s, clients[:poolLen])
-	return sn.s, sn
-}
-
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 	// Bypass: always create new connection (for debugging XMUX issues)
 	if forceNewConnection {
@@ -1852,126 +1777,56 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		return nil, errors.New("XMUX: newConnFunc returned nil")
 	}
 
-	// Phase 1: brief RLock to size/copy pointers, score scan outside the lock.
+	// Phase 1: reuse scan. The pool holds a handful of pointers, so a plain
+	// copy under RLock is cheaper than any snapshot-pool micro-optimization.
 	// Prune of dead/exhausted clients is owned by healthCheckTick (Bray-only).
-	// Multi-conn must remain full quality scan (no sticky pin of high-RTT).
 	nowNs := time.Now().UnixNano()
 	effectiveConns := m.effectiveConnections()
 	effectiveConc := m.effectiveConcurrency()
 
 	// overAdmit: when saturated past burst, reuse least-loaded Active client
 	// instead of creating unbounded REALITY/TLS connections.
-	overAdmit := false
-	var best *XmuxClient
-	var inline [maxInlineXmuxScan]*XmuxClient
-
-	// Attempt reuse with CAS on leftUsage; reselect if race loses.
-	for attempt := 0; attempt < 4; attempt++ {
+	scanPool := func(overAdmit bool) *XmuxClient {
 		m.pool.mu.RLock()
-		poolLen := len(m.pool.clients)
+		scan := make([]*XmuxClient, len(m.pool.clients))
+		copy(scan, m.pool.clients)
+		m.pool.mu.RUnlock()
+		return pickBestXmuxClient(scan, len(scan), nowNs, effectiveConc, overAdmit)
+	}
+
+	for attempt := 0; attempt < 4; attempt++ {
+		poolLen := m.pool.Len()
 		if poolLen == 0 {
-			m.pool.mu.RUnlock()
-			best = nil
 			break
 		}
-		// Prefer expanding until base connection target is filled.
+		// Prefer expanding until the base connection target is filled.
 		if effectiveConns > 0 && poolLen < int(effectiveConns) {
-			m.pool.mu.RUnlock()
-			best = nil
 			break
 		}
 
-		// Single-conn warm path: no snapshot, decide under RLock (pool_1 / default).
-		if !overAdmit && poolLen == 1 {
-			c := m.pool.clients[0]
-			best = nil
-			if xmuxClientReusable(c, nowNs) {
-				inf := c.activeStreams.Load()
-				idleSkip := false
-				if inf == 0 {
-					if lastUsed := c.LastUsed.Load(); lastUsed > 0 && nowNs-lastUsed > c.idleTimeoutNs {
-						idleSkip = true
-					}
-				}
-				if !idleSkip && (effectiveConc <= 0 || inf < effectiveConc) {
-					best = c
-				}
+		best := scanPool(false)
+		if best == nil {
+			// All Active clients at concurrency limit (or idle-evicted).
+			// Soft-expand only up to burst; beyond that over-admit onto H2.
+			burst := burstConnectionLimit(effectiveConns)
+			if burst == 0 || poolLen < burst {
+				break
 			}
-			if best != nil {
-				m.pool.mu.RUnlock()
-			} else {
-				burst := burstConnectionLimit(effectiveConns)
-				if burst == 0 || poolLen < burst {
-					m.pool.mu.RUnlock()
-					best = nil
-					break
-				}
-				overAdmit = true
-				// fall through to over-admit snapshot path with lock still held
-				scan, sn := copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
-				m.pool.mu.RUnlock()
-				best = pickBestXmuxClient(scan, len(scan), nowNs, effectiveConc, true)
-				releaseSnap(sn)
-				if best == nil {
-					break
-				}
-			}
-		} else {
-			// Multi-conn (or over-admit retry): copy pointers under RLock, score unlocked.
-			scan, sn := copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
-			m.pool.mu.RUnlock()
-			best = pickBestXmuxClient(scan, len(scan), nowNs, effectiveConc, overAdmit)
-			releaseSnap(sn)
+			best = scanPool(true)
 			if best == nil {
-				if overAdmit {
-					break
-				}
-				// All Active clients at concurrency limit (or idle-evicted).
-				// Soft-expand only up to burst; beyond that over-admit onto H2.
-				burst := burstConnectionLimit(effectiveConns)
-				if burst == 0 || poolLen < burst {
-					best = nil
-					break
-				}
-				overAdmit = true
-				// Reselect over-admit on the same snapshot size; take a fresh copy.
-				m.pool.mu.RLock()
-				poolLen = len(m.pool.clients)
-				scan, sn = copyXmuxClientsLocked(m.pool.clients, poolLen, inline[:])
-				m.pool.mu.RUnlock()
-				best = pickBestXmuxClient(scan, len(scan), nowNs, effectiveConc, true)
-				releaseSnap(sn)
-				if best == nil {
-					break
-				}
+				break
 			}
 		}
 
-		// Snapshot can race with drain/close after unlock; drop and reselect.
-		if best == nil || !xmuxClientReusable(best, nowNs) {
-			best = nil
+		// The pool can race with drain/close between scan and charge;
+		// re-validate before spending budget.
+		if !xmuxClientReusable(best, nowNs) {
 			continue
 		}
 
-		// CAS loop to atomically decrement leftUsage for finite reuse budgets.
-		acquired := false
-		for {
-			old := best.leftUsage.Load()
-			if old == 0 {
-				best.maybeDrain()
-				best = nil
-				break // reselect
-			}
-			if old < 0 {
-				acquired = true
-				break
-			}
-			if best.leftUsage.CompareAndSwap(old, old-1) {
-				acquired = true
-				break
-			}
-		}
-		if !acquired {
+		// Charge one unit of the reuse budget — the single accounting site
+		// for the whole dialer (per acquisition, not per POST/leg).
+		if !best.acquireReuse() {
 			continue
 		}
 
@@ -1987,7 +1842,6 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 				m.pool.mu.Lock()
 				m.pool.RemoveAndClose(best)
 				m.pool.mu.Unlock()
-				best = nil
 				continue
 			}
 			return best, nil
@@ -1997,7 +1851,6 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 			m.pool.mu.Lock()
 			m.pool.RemoveAndClose(best)
 			m.pool.mu.Unlock()
-			best = nil
 			continue
 		}
 		return best, nil
@@ -2012,17 +1865,16 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 		if burst := burstConnectionLimit(m.effectiveConnections()); burst > 0 {
 			m.pool.mu.RLock()
 			cur := len(m.pool.clients)
+			scan := make([]*XmuxClient, cur)
+			copy(scan, m.pool.clients)
+			m.pool.mu.RUnlock()
 			// Use effective concurrency hard-cap so a single wedged H2 cannot
 			// absorb every Dial under burst saturation.
-			effConc := m.effectiveConcurrency()
-			var inline2 [maxInlineXmuxScan]*XmuxClient
-			scan, sn := copyXmuxClientsLocked(m.pool.clients, cur, inline2[:])
-			m.pool.mu.RUnlock()
-			least := pickBestXmuxClient(scan, len(scan), time.Now().UnixNano(), effConc, true)
-			releaseSnap(sn)
+			least := pickBestXmuxClient(scan, len(scan), time.Now().UnixNano(), m.effectiveConcurrency(), true)
 			if cur >= burst && least != nil {
-				m.lastActivity.Store(time.Now().UnixNano())
-				least.LastUsed.Store(time.Now().UnixNano())
+				now := time.Now().UnixNano()
+				m.lastActivity.Store(now)
+				least.LastUsed.Store(now)
 				m.RecordReuseHit()
 				if err := least.WaitForReady(ctx); err != nil {
 					errors.LogDebug(ctx, "XMUX: probe failed for burst-cap client, removing: ", err)
@@ -2059,7 +1911,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) (*XmuxClient, error) {
 }
 
 // xmuxClientReusable reports whether a client may be scheduled by GetXmuxClient.
-// Closed / exhausted / past UnreusableAt clients are skipped (pruned by health later).
+// Closed / exhausted / past-lifetime clients are skipped (pruned by health later).
 // nowNs is unix nano from the Get hot path (avoids time.Time comparisons under RLock).
 func xmuxClientReusable(c *XmuxClient, nowNs int64) bool {
 	if c == nil || c.state.Load() != StateActive {
@@ -2068,13 +1920,43 @@ func xmuxClientReusable(c *XmuxClient, nowNs int64) bool {
 	if c.XmuxConn != nil && c.XmuxConn.IsClosed() {
 		return false
 	}
-	if c.leftUsage.Load() == 0 || c.LeftRequests.Load() <= 0 {
-		return false
-	}
-	if until := c.unreusableAtUnix.Load(); until > 0 && nowNs > until {
+	if c.remaining.Load() == 0 || c.expiredAt(nowNs) {
 		return false
 	}
 	return true
+}
+
+// exhausted reports whether the connection's reuse budget is used up.
+func (c *XmuxClient) exhausted() bool {
+	return c.remaining.Load() == 0
+}
+
+// expiredAt reports whether the connection's lifetime deadline has passed.
+// 0 = unlimited lifetime. nowNs is unix nano.
+func (c *XmuxClient) expiredAt(nowNs int64) bool {
+	until := c.deadlineUnix.Load()
+	return until > 0 && nowNs > until
+}
+
+// acquireReuse atomically charges one unit of the reuse budget for one
+// stream acquisition. Returns false when the budget is exhausted, in which
+// case the connection is drained for the health check to retire. The
+// caller holds m.pool.mu (read or write), serializing scanners; the CAS
+// loop still guards the drain-free paths.
+func (c *XmuxClient) acquireReuse() bool {
+	for {
+		old := c.remaining.Load()
+		if old == 0 {
+			c.maybeDrain()
+			return false
+		}
+		if old < 0 {
+			return true // unlimited
+		}
+		if c.remaining.CompareAndSwap(old, old-1) {
+			return true
+		}
+	}
 }
 
 // overAdmitHardCap is the absolute max activeStreams allowed on one client

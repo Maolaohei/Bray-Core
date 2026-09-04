@@ -221,8 +221,8 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		// internal mutex). Nil means all-defaults, handled by NewXmuxManager.
 		xmuxConfig := transportConfig.Xmux
 
-		// Build probe URL before starting XmuxManager background loops so
-		// preConnectLoop/newXmuxClient never race a later probeURL write.
+		// Build probe URL before starting the XmuxManager maintenance loop so
+		// newXmuxClient never races a later probeURL write.
 		tlsCfg := tls.ConfigFromStreamSettings(streamSettings)
 		realityCfg := reality.ConfigFromStreamSettings(streamSettings)
 		var probeScheme string
@@ -854,7 +854,7 @@ func init() {
 // second: the upload-side half of the 2026.08.31 断流 report.
 //
 // Only UNSUCCESSFUL attempts arm the backoff. A healthy renewal hands the
-// connection a fresh LeftRequests budget and is not needed again for a long
+// connection a fresh reuse budget and is not needed again for a long
 // time, so this never delays the normal path.
 const uploadRenewBackoff = time.Second
 
@@ -1136,9 +1136,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				if oerr != nil {
 					return false, false, oerr
 				}
-				// Count LeftRequests only after a successful open (Wave-7).
 				if xmuxClient != nil {
-					xmuxClient.LeftRequests.Add(-1)
 					xmuxClient.NoteOpenSuccess()
 				}
 				return true, false, nil
@@ -1219,28 +1217,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			}
 
 			if mode == "stream-up" {
-				// Green-zone: do not burn download LeftRequests until upload also succeeds.
-				// Half-open (download OK, upload fail) previously leaked quota and could
-				// exhaust XMUX MaxRequests during cascade retries.
+				// Budget was charged once per acquisition in GetXmuxClient;
+				// open failures rotate the client but never double-charge.
 				var upErr error
 				_, _, _, upErr = httpClient.OpenStream(ctx, &requestURL, sessionId, reader, true)
 				if upErr != nil {
 					return false, false, upErr
 				}
-				if xmuxClient2 != nil {
-					xmuxClient2.LeftRequests.Add(-1)
-				}
-				if xmuxClient != nil {
-					xmuxClient.LeftRequests.Add(-1)
-				}
 				return true, false, nil
 			}
 
-			// packet-up / other non-stream-up: download open succeeded; count download quota.
-			// Primary LeftRequests still decremented once on packet path after tryMode.
-			if xmuxClient2 != nil {
-				xmuxClient2.LeftRequests.Add(-1)
-			}
+			// packet-up / other non-stream-up: download open succeeded.
 			return false, true, nil
 		}
 
@@ -1323,17 +1310,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		scMaxEachPostBytes := transportConfiguration.GetNormalizedScMaxEachPostBytes()
 		scMinPostsIntervalMs := transportConfiguration.GetNormalizedScMinPostsIntervalMs()
 
-		// Validate config before burning XMUX LeftRequests (P2 review fix).
+		// Validate config before starting the packet-up upload loop (P2 review fix).
 		if scMaxEachPostBytes.From <= 0 {
 			cleanup()
 			return nil, errors.New("`scMaxEachPostBytes` should be bigger than 0")
-		}
-
-		// Decrement LeftRequests once per Dial call (all modes).
-		// stream-one/stream-down/stream-up: decremented above.
-		// packet-up: decremented here.
-		if xmuxClient != nil {
-			xmuxClient.LeftRequests.Add(-1)
 		}
 
 		// Seed RTT once for both chunk size and in-flight window.
@@ -1501,8 +1481,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					}
 
 					clientMu.Lock()
-					if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Load() <= 0 ||
-						(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
+					if dynamicXmuxClient != nil && (dynamicXmuxClient.exhausted() || dynamicXmuxClient.expiredAt(lastWrite.UnixNano())) {
 						// Only retry after a failed attempt once per backoff;
 						// otherwise a persistent failure costs a full TLS
 						// handshake and an Info log per chunk.

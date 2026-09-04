@@ -151,7 +151,7 @@ func benchXMUXPoolWorkload(b *testing.B, cfg *XmuxConfig) {
 				}
 				runtime.Gosched()
 			}
-			work[0] = byte(c.LeftRequests.Load())
+			work[0] = byte(c.LastUsed.Load() & 0xFF)
 			work[512] ^= work[0]
 			_ = work
 			c.Release()
