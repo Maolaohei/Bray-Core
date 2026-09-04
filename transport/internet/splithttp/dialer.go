@@ -1077,6 +1077,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		// packet-up may rotate to a new client mid-session; onClose must Release the latest.
 		ownedUploadXmux := xmuxClient
 		var ownedUploadMu sync.Mutex
+		// pinnedDownloadXmux is the client carrying the connection's long-lived
+		// download leg (the legacy long-GET, or the dseg production leg plus its
+		// segment pulls). Those legs are issued straight over the transport and
+		// are invisible to Borrow/activeStreams accounting, so the client is
+		// pinned for their lifetime: once an upload-side rotation releases the
+		// last Borrow, a hygiene drain would otherwise hard-close the transport
+		// under the still-active download (observed as mid-stream 断流 after the
+		// XMUX reuse budget/lifetime expires). The pin moves with the leg —
+		// never onto a fresh rotation client, which by definition serves no
+		// existing download — and is released exactly once via onClose.
+		var pinnedDownloadXmux *XmuxClient
 
 		reader, writer := io.Pipe()
 		conn := splitConn{
@@ -1094,6 +1105,13 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				}
 				if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
 					xmuxClient2.Release()
+				}
+				ownedUploadMu.Lock()
+				pinned := pinnedDownloadXmux
+				pinnedDownloadXmux = nil
+				ownedUploadMu.Unlock()
+				if pinned != nil {
+					pinned.UnpinDownload()
 				}
 			},
 		}
@@ -1177,6 +1195,21 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				}
 				if oerr != nil {
 					return false, false, oerr
+				}
+				// Download leg is live on xmuxClient2's transport: pin it so a
+				// later hygiene drain (budget/lifetime exhaustion after an
+				// upload-side rotation) cannot close that transport underneath.
+				// Moved per cascade attempt; released via onClose.
+				if xmuxClient2 != nil {
+					ownedUploadMu.Lock()
+					if pinnedDownloadXmux != xmuxClient2 {
+						if pinnedDownloadXmux != nil {
+							pinnedDownloadXmux.UnpinDownload()
+						}
+						pinnedDownloadXmux = xmuxClient2
+						xmuxClient2.PinDownload()
+					}
+					ownedUploadMu.Unlock()
 				}
 				if xmuxClient2 != nil {
 					xmuxClient2.NoteOpenSuccess()

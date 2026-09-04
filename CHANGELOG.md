@@ -9,6 +9,17 @@
 
 ---
 
+## [2026.09.04] — 2026-09-04（XHTTP packet-up + dseg 双向长连接断流修复）
+
+### 修复（XMUX 下载腿生命周期 pin — 断流根因闭环）
+
+- **根因**：dseg 生产腿 GET 与全部 segment pull 直接走 `httpClient2`/`dc`，不经 XMUX Borrow/activeStreams/LeftRequests 会计；双向流量耗尽上传预算（或上传换持 rescue/renew）后旧连接 `activeStreams→0`，≤5s 内 `healthCheckTick` 判定空闲并 drain——`tryClose()` 硬关闭仍承载活跃下载的 TLS/H2 transport → 服务端 `deleteSession` → 后续 pull 永久 404 → 用户可见断流。短时正常、长时间必现（生产默认 600-1200s 生命周期 / 64-128 复用预算耗尽即触发）。
+- **修复**：`XmuxClient` 新增 `downloadPins` 引用计数，`tryClose()` 单一咽喉点加守卫——pinned 连接可被 drain 出池（对选择/准入零影响，不再接新活），但 transport 保持打开直至最后一个 pin 释放（unpin 路径自动补上搁置的关闭）。dialer 侧下载腿建立即 pin、`onClose` 恰好 unpin 一次；pin 不跟随上传轮换、无泄漏路径。真实故障路径 `MarkDead`（Fast Eviction）按设计绕过守卫，坏连接仍被立即强杀。
+- **验证（A/B，同一 POC：4MiB/s 下载 + 320KB/s 上传，生命周期缩至 2s）**：基线 27.4s 断流复现（`STALLED: no progress for 20s`）；修复后 100s 满速 PASS，期间多次 drain 均被 pin 安全搁置。回归：LongIdleConnectionReuse / RealityPacketUpDseg / SessionChurnNo404 / UploadBackpressureScenario 全绿；splithttp XMUX 单测全绿。`TestVlessTLSPacketUpDsegPlain` 为分支存量失败（基线同样失败，与本修复无关）。
+- 详见 `DSEG_STALL_ROOT_CAUSE.md` 与 POC `testing/scenarios/dseg_stall_poc_test.go`。
+
+---
+
 ## [2026.09.01] — 2026-09-01（2026-09-02 重发：补入 dseg 交付延迟与 EOF 竞争修复）
 
 对应提交：`5b0d9b33` 至 `581d67b0`（VLESS/Vision、DNS、XMUX、REALITY 四专项修复 + 8.31 断流风暴止血 + 日志膨胀修复 + dseg 性能修复）。

@@ -173,9 +173,21 @@ func (p *XmuxClientPool) RemoveAndClose(target *XmuxClient) bool {
 }
 
 type XmuxClient struct {
-	XmuxConn         XmuxConn
-	state            atomic.Int32 // StateActive / StateDraining / StateClosed
-	activeStreams    atomic.Int32 // number of active HTTP/2 streams using this connection
+	XmuxConn      XmuxConn
+	state         atomic.Int32 // StateActive / StateDraining / StateClosed
+	activeStreams atomic.Int32 // number of active HTTP/2 streams using this connection
+	// downloadPins counts long-lived download legs (the legacy long-GET, or
+	// the dseg production leg plus its segment pulls) riding on this
+	// connection WITHOUT Borrow accounting: the dialer issues them straight
+	// over the shared transport, so pool hygiene cannot see them through
+	// activeStreams/LeftRequests. A pin keeps the transport open even after
+	// an upload-side rotation releases the connection's last Borrow and a
+	// drain fires (budget/lifetime exhaustion): tryClose refuses to close
+	// while pins>0, and the unpin path retries the close. Pins never affect
+	// selection or admission — a pinned, exhausted connection keeps serving
+	// only its existing download leg and receives no new work. Real
+	// connection faults bypass this via MarkDead.
+	downloadPins     atomic.Int32
 	leftUsage        atomic.Int32
 	LeftRequests     atomic.Int32
 	UnreusableAt     time.Time    // wall deadline for HMaxReusableSecs (health / dialer)
@@ -359,15 +371,38 @@ func (c *XmuxClient) maybeDrain() {
 
 // tryClose is the single entry point for closing the TCP connection.
 // Only succeeds when state is Draining, activeStreams is 0, and CAS to Closed wins.
-func (c *XmuxClient) tryClose() {
+//
+// downloadPins guard: hygiene drains are allowed only once the connection's
+// download legs are gone. A pinned connection sits in StateDraining —
+// invisible to selection (xmuxClientReusable requires StateActive) and
+// exempt from further eviction checks (removed from the pool at drain time)
+// — until the last pin releases and the unpin path performs the close.
+func (c *XmuxClient) tryClose() bool {
+	if c.downloadPins.Load() > 0 {
+		return false
+	}
 	if c.state.Load() != StateDraining {
-		return
+		return false
 	}
 	if c.activeStreams.Load() > 0 {
-		return
+		return false
 	}
 	if c.state.CompareAndSwap(StateDraining, StateClosed) {
 		c.closeConn()
+		return true
+	}
+	return false
+}
+
+// PinDownload registers one long-lived download leg on this connection so a
+// hygiene drain cannot close the transport under it. Pairs with UnpinDownload.
+func (c *XmuxClient) PinDownload() { c.downloadPins.Add(1) }
+
+// UnpinDownload releases one PinDownload reference and retries the drain's
+// deferred close when the last pin is gone.
+func (c *XmuxClient) UnpinDownload() {
+	if c.downloadPins.Add(-1) == 0 {
+		c.tryClose()
 	}
 }
 

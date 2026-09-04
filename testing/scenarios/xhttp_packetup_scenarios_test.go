@@ -260,6 +260,11 @@ type dsegEndpoints struct {
 	// the full-queue path while keeping the client in-flight window capped to
 	// half the advertised reorder capacity (the protocol safety invariant).
 	maxBufferedPosts int64
+	// xmuxOverride, when non-nil, is applied to BOTH ends' splithttp config
+	// (clients are the XMUX decision makers; the server ignores the fields).
+	// Lets a test shrink connection budgets so lifecycle rotations land
+	// inside the observation window (production defaults: 600-1200s etc).
+	xmuxOverride *splithttp.XmuxConfig
 	// forcePlain leaves the dual-end on H1 plaintext for the specifically
 	// named plain smoke case. All other scenarios default to TLS/H2 so the
 	// H2/H3 gate actually exercises dseg (plaintext otherwise falls back to
@@ -305,6 +310,9 @@ func sharedPupConfigForSide(ep *dsegEndpoints, server bool) *splithttp.Config {
 	cfg := sharedPupConfigMode(dseg, mode)
 	if ep != nil && ep.maxBufferedPosts > 0 {
 		cfg.ScMaxBufferedPosts = ep.maxBufferedPosts
+	}
+	if ep != nil && ep.xmuxOverride != nil {
+		cfg.Xmux = ep.xmuxOverride
 	}
 	return cfg
 }
