@@ -1,3 +1,5 @@
+//go:build endurance
+
 package splithttp_test
 
 import (
@@ -22,6 +24,7 @@ func TestBenchmark_PacketUpBulkDefaultPacing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping long XHTTP packet-up bulk bench under -short")
 	}
+	skipIfHostLoopbackHTTPRewrite(t)
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName: "splithttp",

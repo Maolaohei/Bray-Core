@@ -1,3 +1,5 @@
+//go:build endurance
+
 package splithttp_test
 
 import (

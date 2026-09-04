@@ -9,6 +9,27 @@
 
 ---
 
+## [2026.09.05] — 2026-09-05（XHTTP 稳定性重构第一批：上传队列三件套 + 长测试隔离 + 环境自检门）
+
+### 稳定性（上传重排队列 — 分段重组语义清单落地）
+
+- **seq gap 超时策略显式化**：`maxSeqGapWait` const→var（测试可缩，生产默认 5s 不变），注释补全语义契约——超时 = 会话流拆除（非静默跳号、非请求重发触发器；重发是客户端 postPacketReliable 的职责）。`uploadQueueBackpressureWait` 改为 var 派生（保持 500ms 边距不变式，测试缩 gap 时同步缩背压窗）。
+- **重复 seq 幂等语义钉死**：dup（seq < nextSeq，客户端丢响应后重发/竞态重试）静默丢弃并继续服务下一个有序包——绝不错误、绝不拆会话（HTTP handler 已回 200）。注释与实现对齐（旧注释"return its payload"与 freePacketPayload 实现不符）。
+- **新增内部测试锁死三件套**（`upload_queue_internal_test.go`，-race 绿）：gap 超时拆除会话（时长受配置上限约束）、堆容量溢出拆除（并发驱动绕开背压窗）、dup seq 幂等（重复推送不报错、不重复服务）、partial read 链、Close 后 EOF、会话重建独立编号边界。
+
+### 可观测性（重试耗尽不再静默）
+
+- `failUpload` 日志 Debug→**Warning**（每会话仅一次，failOnce 门控）：重试/救援全失败、会话即将重置时默认级别可见——此前生产"上传死了但日志一片安静"。逐尝试噪声仍留 Debug（postPacketReliable），log_storm 白名单测试保持绿。
+
+### 工程质量（测试基建）
+
+- **endurance 隔离**：`endurance_test.go`（NoDrop 全家，串行 ≈12min）与 `packet_opt_bench_test.go`（bulk bench）加 `//go:build endurance` tag——默认套件 213s 内收官，不再被 600s 包超时连坐（NoDrop"挂死"的真相：测试时长 × 包超时，非产品死锁）。运行：`go test -tags endurance ./transport/internet/splithttp`。
+- **主机环境自检门**：新增 `host_http_sanity_test.go` 的 `skipIfHostLoopbackHTTPRewrite(t)`——461B 探针经一对裸 loopback socket 检测系统级 HTTP 改写（本机实测：火绒 `hrwfpdrv.sys` WFP callout 向请求注入 `DNT: 1`+`Sec-GPC: 1` 共 20B、重写/吞没响应流），检出即 skip 并说明原因。bulk bench 已接入；此前三个提交上的 bulk 失败均为此环境噪声（与代码无关，双向 tee + 独立探针双重证实，证据存档 `.diag-400/NOTES.md`）。给 go test 加火绒白名单（或临时退出网络防护）后该测试可真实运行。
+
+---
+
+
+
 ## [2026.09.04] — 2026-09-04（XHTTP packet-up + dseg 双向长连接断流修复）
 
 ### 修复（XMUX 下载腿生命周期 pin — 断流根因闭环）
