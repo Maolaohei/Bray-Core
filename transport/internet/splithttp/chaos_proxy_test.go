@@ -134,7 +134,10 @@ func runChaosProxyTestFull(t *testing.T, transparent bool, rttHalf time.Duration
 	if testing.Short() {
 		t.Skip("fault injection e2e skipped under -short")
 	}
-	skipIfHostLoopbackHTTPRewrite(t)
+	// Bind to a wire-clean IP: loopback when possible, else the first clean
+	// LAN IPv4 (Huorong's callout covers loopback only). Traffic stays
+	// on-host either way.
+	bindIP := testBindIP(t)
 
 	serverPort := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
@@ -145,7 +148,7 @@ func runChaosProxyTestFull(t *testing.T, transparent bool, rttHalf time.Duration
 			Headers: map[string]string{BraySessionSecretHeader: "chaos-secret"},
 		},
 	}
-	listen, err := ListenXH(context.Background(), xnet.LocalHostIP, serverPort, settings, func(conn stat.Connection) {
+	listen, err := ListenXH(context.Background(), xnet.ParseAddress(bindIP), serverPort, settings, func(conn stat.Connection) {
 		go func(c stat.Connection) {
 			defer c.Close()
 			buf.Copy(buf.NewReader(c), buf.NewWriter(c))
@@ -153,11 +156,11 @@ func runChaosProxyTestFull(t *testing.T, transparent bool, rttHalf time.Duration
 	})
 	common.Must(err)
 	defer listen.Close()
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", int(serverPort))
+	serverAddr := fmt.Sprintf("%s:%d", bindIP, int(serverPort))
 
 	proxyPort := tcp.PickPort()
 	proxy := &chaosProxy{injectRST: !transparent, firstByteDelay: rttHalf}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", int(proxyPort)))
+	ln, err := net.Listen("tcp", net.JoinHostPort(bindIP, fmt.Sprint(int(proxyPort))))
 	common.Must(err)
 	defer ln.Close()
 	go func() {
@@ -170,7 +173,7 @@ func runChaosProxyTestFull(t *testing.T, transparent bool, rttHalf time.Duration
 		}
 	}()
 
-	dest := xnet.TCPDestination(xnet.DomainAddress("localhost"), proxyPort)
+	dest := xnet.TCPDestination(xnet.ParseAddress(bindIP), proxyPort)
 	conn, err := Dial(context.Background(), dest, settings)
 	common.Must(err)
 	defer conn.Close()

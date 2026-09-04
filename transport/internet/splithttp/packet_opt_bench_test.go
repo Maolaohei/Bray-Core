@@ -24,7 +24,8 @@ func TestBenchmark_PacketUpBulkDefaultPacing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping long XHTTP packet-up bulk bench under -short")
 	}
-	skipIfHostLoopbackHTTPRewrite(t)
+	// Wire-clean bind IP: loopback when possible, else first clean LAN IPv4.
+	bindIP := testBindIP(t)
 	p := tcp.PickPort()
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName: "splithttp",
@@ -36,7 +37,7 @@ func TestBenchmark_PacketUpBulkDefaultPacing(t *testing.T) {
 			// Keep defaults for max post size / interval (30ms) via nil fields.
 		},
 	}
-	listen, err := ListenXH(context.Background(), net.LocalHostIP, p, settings, func(conn stat.Connection) {
+	listen, err := ListenXH(context.Background(), net.ParseAddress(bindIP), p, settings, func(conn stat.Connection) {
 		go func(c stat.Connection) {
 			defer c.Close()
 			buf.Copy(buf.NewReader(c), buf.NewWriter(c))
@@ -45,7 +46,7 @@ func TestBenchmark_PacketUpBulkDefaultPacing(t *testing.T) {
 	common.Must(err)
 	defer listen.Close()
 
-	dest := net.TCPDestination(net.DomainAddress("localhost"), p)
+	dest := net.TCPDestination(net.ParseAddress(bindIP), p)
 	conn, err := Dial(context.Background(), dest, settings)
 	common.Must(err)
 	defer conn.Close()

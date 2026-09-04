@@ -71,10 +71,11 @@ func TestThroughputFloor_LoopbackEcho(t *testing.T) {
 	if testing.Short() {
 		t.Skip("throughput floor skipped under -short")
 	}
-	skipIfHostLoopbackHTTPRewrite(t)
+	// Wire-clean bind IP: loopback when possible, else first clean LAN IPv4.
+	bindIP := testBindIP(t)
 
 	// Raw TCP baseline: plain echo server, same payload, same copy count.
-	tln, err := net.Listen("tcp", "127.0.0.1:0")
+	tln, err := net.Listen("tcp", net.JoinHostPort(bindIP, "0"))
 	common.Must(err)
 	defer tln.Close()
 	go func() {
@@ -103,7 +104,7 @@ func TestThroughputFloor_LoopbackEcho(t *testing.T) {
 			Headers: map[string]string{BraySessionSecretHeader: "throughput-floor"},
 		},
 	}
-	listen, err := ListenXH(context.Background(), xnet.LocalHostIP, p, settings, func(conn stat.Connection) {
+	listen, err := ListenXH(context.Background(), xnet.ParseAddress(bindIP), p, settings, func(conn stat.Connection) {
 		go func(c stat.Connection) {
 			defer c.Close()
 			buf.Copy(buf.NewReader(c), buf.NewWriter(c))
@@ -111,7 +112,7 @@ func TestThroughputFloor_LoopbackEcho(t *testing.T) {
 	})
 	common.Must(err)
 	defer listen.Close()
-	dest := xnet.TCPDestination(xnet.DomainAddress("localhost"), p)
+	dest := xnet.TCPDestination(xnet.ParseAddress(bindIP), p)
 	conn, err := Dial(context.Background(), dest, settings)
 	common.Must(err)
 	shMbps := echoThroughput(t, conn)

@@ -30,6 +30,7 @@
 ### 工程质量（铁律 2）
 
 - dialer 上传循环内联魔数提取命名常量（recentFlow 窗口 50ms、小包阈值 256B，数值不变）；新增 `protocol_profile_test` **中央关系审计**：pacing 带 To>recentFlow 窗口（pacing 可达）、背压窗<gap 等待、chunk 档单调 ≤1MiB、bulk 阈值≤chunk 最小档、dseg 预取窗≤自适应缓存界、重试退避≥1ms 底、H1 管线深 [1,8]——常量改动破坏耦合时 CI 即红。
+- **LAN 回退绑定**（环境自适应测试基建）：守卫升级为 `probeWireFidelity(ip)` + `testBindIP(t)`——loopback 被 HTTP 改写（火绒 callout 仅覆盖 loopback）而 LAN IPv4 干净时，e2e/bulk bench 自动改绑干净 LAN IP 真实运行，不再整轮 skip；四个 e2e + bulk bench 在被改写主机上实测 PASS（bulk 648.7 Mbps、吞吐地板 splithttp/TCP=26.7%）。火绒"网络防护"界面开关不注销 `hrwfpdrv.sys` WFP callout（实测退出+关防护均无效），自我保护也拦 `sc stop`（提权实测 1052/拒绝访问）——本基建是无需动安全产品的正解。
 
 ---
 
