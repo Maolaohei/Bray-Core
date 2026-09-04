@@ -143,8 +143,8 @@ func runChaosProxyTestFull(t *testing.T, transparent bool, rttHalf time.Duration
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName: "splithttp",
 		ProtocolSettings: &Config{
-			Path: "/sh",
-			Mode: "packet-up",
+			Path:    "/sh",
+			Mode:    "packet-up",
 			Headers: map[string]string{BraySessionSecretHeader: "chaos-secret"},
 		},
 	}

@@ -99,8 +99,8 @@ func TestThroughputFloor_LoopbackEcho(t *testing.T) {
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName: "splithttp",
 		ProtocolSettings: &Config{
-			Path: "/sh",
-			Mode: "packet-up",
+			Path:    "/sh",
+			Mode:    "packet-up",
 			Headers: map[string]string{BraySessionSecretHeader: "throughput-floor"},
 		},
 	}

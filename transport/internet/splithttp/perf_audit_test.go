@@ -30,7 +30,7 @@ func TestPerfAudit_WindowChunkTracksBDP(t *testing.T) {
 		wantWin   int
 		chunkCeil int32
 	}{
-		{0, packetUploadDefaultWindow, 1 << 20},  // unknown RTT: defaults
+		{0, packetUploadDefaultWindow, 1 << 20}, // unknown RTT: defaults
 		{5 * time.Millisecond, 8, packetUploadChunkLow},
 		{20 * time.Millisecond, 12, packetUploadChunkLow},
 		{80 * time.Millisecond, 18, packetUploadChunkMid},
@@ -71,7 +71,7 @@ func TestPerfAudit_RetryChainFitsGapTimeout(t *testing.T) {
 		backoff += step
 		step *= 2
 	}
-	worstAttempt := 300*time.Millisecond // slowest audited RTT
+	worstAttempt := 300 * time.Millisecond // slowest audited RTT
 	total := backoff + worstAttempt
 	if total > maxSeqGapWait/2 {
 		t.Fatalf("retry chain (%v + one attempt RTT %v = %v) exceeds half of maxSeqGapWait (%v): a single blip would tear the session down",

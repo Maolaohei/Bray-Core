@@ -40,8 +40,8 @@ func TestWireShape_FailClosed404Uniform(t *testing.T) {
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName: "splithttp",
 		ProtocolSettings: &Config{
-			Path: "/sh",
-			Mode: "packet-up",
+			Path:    "/sh",
+			Mode:    "packet-up",
 			Headers: map[string]string{BraySessionSecretHeader: "wire-shape-secret"},
 		},
 	}

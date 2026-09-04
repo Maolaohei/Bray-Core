@@ -93,8 +93,8 @@ func TestBenchmark_PacketUpBulkChunkJitterAB(t *testing.T) {
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName: "splithttp",
 		ProtocolSettings: &Config{
-			Path: "/sh",
-			Mode: "packet-up",
+			Path:    "/sh",
+			Mode:    "packet-up",
 			Headers: map[string]string{BraySessionSecretHeader: "bench-test-secret"},
 		},
 	}
