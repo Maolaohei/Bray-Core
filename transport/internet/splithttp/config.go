@@ -117,7 +117,12 @@ func acquireDurableBody(data []byte) *durableBody {
 // XMUX nil fields use process-stable jittered copies (green-zone); explicit config wins.
 var (
 	defaultRangeConfigMaxPostBytes         = &RangeConfig{From: 1000000, To: 1000000}
-	defaultRangeConfigMinPostInterval      = &RangeConfig{From: 30, To: 30}
+	// Bray-only default: a jittered 20-60ms band, NOT upstream's fixed 30ms.
+	// A fixed cadence is the cheapest statistical fingerprint (it also made
+	// the paced sleep unreachable: recentFlow skips anything <50ms since the
+	// last launch, so paceMs=30 - elapsed>=50ms never slept). Band To>50ms
+	// makes idle-post pacing actually bite with 0-10ms of extra jitter.
+	defaultRangeConfigMinPostInterval = &RangeConfig{From: 20, To: 60}
 	defaultRangeConfigStreamUpSecs         = &RangeConfig{From: 20, To: 80}
 	defaultRangeConfigUplinkChunkCookie    = &RangeConfig{From: 2 * 1024, To: 3 * 1024}
 	defaultRangeConfigUplinkChunkHeader    = &RangeConfig{From: 3 * 1000, To: 4 * 1000}

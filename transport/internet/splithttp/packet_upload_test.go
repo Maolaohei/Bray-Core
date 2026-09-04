@@ -276,6 +276,32 @@ func TestPacketUploadLaunchInterval(t *testing.T) {
 	}
 }
 
+// TestDefaultMinPostIntervalJittered pins the Bray-only anti-fingerprint
+// default: idle-post pacing must come from a jittered band, never a fixed
+// cadence, and the band must extend past 50ms so the paced sleep is actually
+// reachable (recentFlow skips sub-50ms gaps).
+func TestDefaultMinPostIntervalJittered(t *testing.T) {
+	cfg := &Config{}
+	r := cfg.GetNormalizedScMinPostsIntervalMs()
+	if r.From >= r.To {
+		t.Fatalf("default interval must be a jitter band, got [%d,%d]", r.From, r.To)
+	}
+	if r.To <= 50 {
+		t.Fatalf("band To must exceed the 50ms recentFlow window so paced sleeps can occur, To=%d", r.To)
+	}
+	seen := map[int32]bool{}
+	for i := 0; i < 64; i++ {
+		v := r.rand()
+		if v < r.From || v > r.To {
+			t.Fatalf("draw %d out of band [%d,%d]: %d", i, r.From, r.To, v)
+		}
+		seen[v] = true
+	}
+	if len(seen) < 4 {
+		t.Fatalf("band shows no jitter diversity after 64 draws: %v", seen)
+	}
+}
+
 func TestPostPacketReliable_ConcurrentSlots(t *testing.T) {
 	// Simulates limited-window launch: N concurrent postPacketReliable calls.
 	const n = 8
