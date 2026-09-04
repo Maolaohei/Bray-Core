@@ -1435,6 +1435,18 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 							effMax = packetUploadChunkMin
 						}
 					}
+					// Anti-fingerprint body jitter: bulk flows would otherwise
+					// repeat one exact Content-Length every POST; the skew draw
+					// keeps most posts at the ceiling with occasional deeper
+					// shrinks. Shrink-only: effMax stays a ceiling, and the
+					// operator config is untouched (packetUploadChunkSize already
+					// clamped to it above). Skipped for small-packet flows —
+					// their sizes are app-driven and already natural.
+					if PacketUploadChunkJitterFn != nil && effMax > packetUploadChunkMin {
+						if j := PacketUploadChunkJitterFn(effMax); j > 0 && j < effMax {
+							effMax = j
+						}
+					}
 					var chunk buf.MultiBuffer
 					remainder, chunk = buf.SplitSize(remainder, effMax)
 					if chunk.IsEmpty() {

@@ -195,6 +195,19 @@ const packetUploadSmallPacketAvg int32 = 256
 // Pinned in TestDefaultMinPostIntervalJittered.
 const packetUploadRecentFlowWindow = 50 * time.Millisecond
 
+// PacketUploadChunkJitterFn returns the jittered effective chunk ceiling for
+// one POST. Sustained bulk flows otherwise repeat one exact Content-Length
+// on the wire (the chunker fills the ceiling every time) — a fixed body size
+// is the same class of statistical fingerprint as a fixed pacing interval
+// (pacing got the {20,60}ms band; bodies get this). Draw is right-skewed:
+// most POSTs stay at/near the ceiling with an occasional deeper shrink,
+// mirroring downsegSizeJitterFn on the download side. Shrink-only by
+// contract: the operator ceiling (scMaxEachPostBytes) is never exceeded.
+// Replaceable for A/B benchmarks and tests; nil disables jitter.
+var PacketUploadChunkJitterFn = func(ceil int32) int32 {
+	return ceil - biasedRangeRand(0, ceil/10)
+}
+
 // chunkAvgPacketSize returns the average per-buffer payload size of a
 // MultiBuffer (0 when empty), used by the L3a small-packet flow detector.
 func chunkAvgPacketSize(mb buf.MultiBuffer) int32 {

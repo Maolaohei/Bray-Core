@@ -303,6 +303,52 @@ func TestDefaultMinPostIntervalJittered(t *testing.T) {
 	}
 }
 
+// TestPacketUploadChunkJitter pins the anti-quantization body jitter: every
+// draw stays inside the shrink-only band (operator ceiling never exceeded,
+// never below ceiling−10%), draws diversify, and a simulated sustained bulk
+// flow produces many distinct body sizes instead of one repeated
+// Content-Length (the wire property the jitter exists for).
+func TestPacketUploadChunkJitter(t *testing.T) {
+	ceil := int32(1 << 20)
+	low := ceil - ceil/10
+	if PacketUploadChunkJitterFn == nil {
+		t.Fatal("default jitter fn must be installed")
+	}
+	draws := map[int32]bool{}
+	for i := 0; i < 200; i++ {
+		v := PacketUploadChunkJitterFn(ceil)
+		if v < low || v > ceil {
+			t.Fatalf("draw %d outside [%d,%d]: %d", i, low, ceil, v)
+		}
+		draws[v] = true
+	}
+	if len(draws) < 8 {
+		t.Fatalf("no jitter diversity after 200 draws: %d distinct", len(draws))
+	}
+	// Sustained bulk flow simulation: 20 MiB through the jittered chunker.
+	sizes := map[int32]bool{}
+	for remaining := int64(20 << 20); remaining > 0; {
+		eff := PacketUploadChunkJitterFn(ceil)
+		if int64(eff) > remaining {
+			eff = int32(remaining)
+		}
+		if eff < 1 {
+			eff = 1
+		}
+		sizes[eff] = true
+		remaining -= int64(eff)
+	}
+	if len(sizes) < 10 {
+		t.Fatalf("20MiB bulk flow produced only %d distinct body sizes; quantization persists", len(sizes))
+	}
+	// Degenerate ceilings must stay in range (no divide blowups, no growth).
+	for _, tiny := range []int32{1, 9, 10, 11, 15} {
+		if v := PacketUploadChunkJitterFn(tiny); v < 1 || v > tiny {
+			t.Fatalf("ceil=%d produced out-of-range %d", tiny, v)
+		}
+	}
+}
+
 func TestPostPacketReliable_ConcurrentSlots(t *testing.T) {
 	// Simulates limited-window launch: N concurrent postPacketReliable calls.
 	const n = 8
