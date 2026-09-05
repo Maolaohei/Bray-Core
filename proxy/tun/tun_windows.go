@@ -333,7 +333,7 @@ func findOutboundInterface(tunIndex int, fixedName string) (*net.Interface, erro
 		if iface.Index == tunIndex {
 			continue
 		}
-		if strings.Contains(iface.Name, "vEthernet") {
+		if skipWindowsInterface(iface.Name) {
 			continue
 		}
 		if iface.Flags&net.FlagUp == 0 {
@@ -366,12 +366,37 @@ func findOutboundInterface(tunIndex int, fixedName string) (*net.Interface, erro
 	return &iface, nil
 }
 
+// skipWindowsInterface filters virtual/hypervisor adapters out of automatic
+// physical-interface selection. They frequently hold an Up flag with a
+// private address, which would otherwise win the heuristic on score ties.
+func skipWindowsInterface(name string) bool {
+	n := strings.ToLower(name)
+	for _, marker := range []string{
+		"vethernet", // WSL / Hyper-V default switch
+		"vmware",
+		"virtualbox",
+		"vbox",
+		"hyper-v",
+		"wintun", // other TUN devices (ours is excluded by index already)
+	} {
+		if strings.Contains(n, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func scoreWindowsInterface(iface *net.Interface, addrs []net.Addr) int {
 	score := 0
 
 	name := strings.ToLower(iface.Name)
-	if strings.Contains(name, "wlan") || strings.Contains(name, "wi-fi") {
+	switch {
+	case strings.Contains(name, "wlan") || strings.Contains(name, "wi-fi") || strings.Contains(name, "wireless"):
 		score += 2
+	case strings.Contains(name, "ethernet") || strings.Contains(name, "以太网") || strings.Contains(name, "eth"):
+		// Wired links are the more stable egress; prefer them when both are
+		// up (previously WiFi outscored Ethernet on every tie).
+		score += 4
 	}
 
 	for _, addr := range addrs {

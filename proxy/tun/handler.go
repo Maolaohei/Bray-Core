@@ -99,7 +99,7 @@ func (t *Handler) Start() error {
 			t.config.AutoOutboundsInterface = ""
 		}
 		updater = &InterfaceUpdater{tunIndex: tunIndex, fixedName: t.config.AutoOutboundsInterface}
-		updater.Update()
+		updater.Start()
 		internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
 			iface := updater.Get()
 			if iface == nil {
@@ -213,6 +213,11 @@ func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
 
 // Close implements common.Closable.
 func (t *Handler) Close() error {
+	if updater != nil {
+		// Stop interface monitoring so a closed inbound leaves no goroutines
+		// behind and late dials skip binding instead of using a stale iface.
+		updater.Stop()
+	}
 	return errors.Combine(common.CloseIfExists(t.stack), common.CloseIfExists(t.tun))
 }
 

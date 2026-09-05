@@ -24,12 +24,12 @@ const (
 	defaultNIC tcpip.NICID = 1
 
 	tcpRXBufMinSize = tcp.MinBufferSize
-	tcpRXBufDefSize = 256 << 10 // 256KiB default (was 32KiB)
-	tcpRXBufMaxSize = 8 << 20   // 8MiB
+	tcpRXBufDefSize = tcp.DefaultSendBufferSize // upstream default (32KiB, auto-tunes up to Max)
+	tcpRXBufMaxSize = 8 << 20                   // 8MiB
 
 	tcpTXBufMinSize = tcp.MinBufferSize
-	tcpTXBufDefSize = 256 << 10 // 256KiB default (was 32KiB)
-	tcpTXBufMaxSize = 6 << 20   // 6MiB
+	tcpTXBufDefSize = tcp.DefaultReceiveBufferSize // upstream default (32KiB, auto-tunes up to Max)
+	tcpTXBufMaxSize = 6 << 20                      // 6MiB
 )
 
 // stackGVisor is ip stack implemented by gVisor package

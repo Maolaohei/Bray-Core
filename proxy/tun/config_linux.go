@@ -11,6 +11,8 @@ import (
 
 func init() {
 	// Override startNetlinkListener with the Linux netlink implementation.
+	// The 30s poll loop runs regardless as a safety net; this listener
+	// provides sub-second reaction and exits when the updater is stopped.
 	startNetlinkListener = func(updater *InterfaceUpdater) bool {
 		ch := make(chan netlink.RouteUpdate, 16)
 		if err := netlink.RouteSubscribe(ch, nil); err != nil {
@@ -19,8 +21,16 @@ func init() {
 		}
 
 		go func() {
-			for range ch {
-				updater.debounceUpdate()
+			for {
+				select {
+				case _, ok := <-ch:
+					if !ok {
+						return
+					}
+					updater.debounceUpdate()
+				case <-updater.quit:
+					return
+				}
 			}
 		}()
 
