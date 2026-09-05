@@ -3,7 +3,6 @@ package splithttp_test
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/xtls/xray-core/common"
 	. "github.com/xtls/xray-core/transport/internet/splithttp"
@@ -125,29 +124,10 @@ func TestSessionAuth_UUIDDerived(t *testing.T) {
 	}
 }
 
-func TestUploadQueue_GapTimeout(t *testing.T) {
-	q := NewUploadQueue(10)
-	common.Must(q.Push(Packet{Payload: []byte("b"), Seq: 1}))
-
-	done := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 8)
-		_, err := q.Read(buf)
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("expected gap timeout error")
-		}
-		if !strings.Contains(err.Error(), "gap timeout") {
-			t.Fatalf("want gap timeout, got %v", err)
-		}
-	case <-time.After(7 * time.Second):
-		t.Fatal("Read did not return within gap timeout window")
-	}
-}
+// TestUploadQueue_GapTimeout moved to upload_queue_internal_test.go as
+// TestUploadQueue_GapTimeout_TearsDownSession (stricter: asserts the exact
+// error text and a bounded elapsed). The external duplicate ran on the real
+// 5s production wait — 5s of pure wall clock for an already-covered path.
 
 func TestUploadQueue_OrderedOk(t *testing.T) {
 	q := NewUploadQueue(10)

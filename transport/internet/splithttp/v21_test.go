@@ -444,11 +444,11 @@ func TestV21_ConnectionMigration_QualityDrain(t *testing.T) {
 		t.Fatal("c1 should be ready to drain")
 	}
 
-	// Release c1 so health check can remove it
+	// Release c1 so health check can remove it. Then drive the maintenance
+	// tick directly (the exact code the 5s ticker runs) instead of sleeping
+	// one tick — deterministic and saves 6s of wall clock.
 	c1.Release()
-
-	// Wait for health check to run (5s ticker) and migrate
-	time.Sleep(6 * time.Second)
+	m.healthCheckTick()
 
 	// Verify pool recovered: GetXmuxClient should return a fresh connection
 	c, _ := m.GetXmuxClient(context.Background())

@@ -61,6 +61,13 @@ func TestUploadQueueFullBackpressuresThenSucceeds(t *testing.T) {
 // goroutine forever. The wait is deliberately long enough to absorb a brief
 // legitimate target/VLESS stall but bounded well below session lifetime.
 func TestUploadQueueFullBackpressureIsBounded(t *testing.T) {
+	// Shrink the production 4.5s backpressure grace (same technique as
+	// upload_queue_internal_test.go): the test pins the bounded-wait property
+	// via the uploadQueueBackpressureWait var itself, so shrinking it keeps
+	// the assertions self-consistent. Safe: same-package tests run serially.
+	oldWait := uploadQueueBackpressureWait
+	uploadQueueBackpressureWait = 100 * time.Millisecond
+	defer func() { uploadQueueBackpressureWait = oldWait }()
 	q := NewUploadQueue(1)
 	if err := q.Push(smallPacket(0)); err != nil {
 		t.Fatal(err)

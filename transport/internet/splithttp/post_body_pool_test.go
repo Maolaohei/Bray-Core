@@ -135,6 +135,13 @@ func TestUploadQueue_PooledReturnOnDuplicate(t *testing.T) {
 
 // Push failure (queue full) must return the pooled payload.
 func TestUploadQueue_PooledReturnOnPushFail(t *testing.T) {
+	// Shrink the production 4.5s backpressure grace (same technique as
+	// upload_queue_internal_test.go): Push's failure path waits
+	// uploadQueueBackpressureWait before giving up; the test pins that the
+	// failing push frees exactly one pooled payload, not the wall clock.
+	oldWait := uploadQueueBackpressureWait
+	uploadQueueBackpressureWait = 100 * time.Millisecond
+	defer func() { uploadQueueBackpressureWait = oldWait }()
 	q := NewUploadQueue(2)
 	// Fill the channel: the first two pushes land in the channel buffer.
 	if err := q.Push(Packet{Payload: allocPostBody(4096), Seq: 0, Pooled: true}); err != nil {
@@ -167,6 +174,12 @@ func TestUploadQueue_PooledReturnOnPushFail(t *testing.T) {
 // (identity verified by TestUploadQueue_PooledDrainReturnsAll; here we pin the
 // timeout behavior itself).
 func TestUploadQueue_PooledReturnOnGapTimeout(t *testing.T) {
+	// Shrink the production 5s gap wait (same technique as
+	// upload_queue_internal_test.go): the test pins the timeout path, not the
+	// wall-clock duration. Safe: same-package tests run serially.
+	oldWait := maxSeqGapWait
+	maxSeqGapWait = 50 * time.Millisecond
+	defer func() { maxSeqGapWait = oldWait }()
 	q := NewUploadQueue(10)
 	for i := 1; i <= 3; i++ {
 		p := allocPostBody(4096)
@@ -193,6 +206,9 @@ func TestUploadQueue_PooledReturnOnGapTimeout(t *testing.T) {
 // buffers in the pool. The counter is deterministic and works under -race
 // (where the detector clears the pool but the free path still runs).
 func TestUploadQueue_PooledDrainReturnsAll(t *testing.T) {
+	oldWait := maxSeqGapWait
+	maxSeqGapWait = 50 * time.Millisecond
+	defer func() { maxSeqGapWait = oldWait }()
 	q := NewUploadQueue(10)
 	for i := 1; i <= 3; i++ {
 		if err := q.Push(Packet{Payload: allocPostBody(4096), Seq: uint64(i), Pooled: true}); err != nil {

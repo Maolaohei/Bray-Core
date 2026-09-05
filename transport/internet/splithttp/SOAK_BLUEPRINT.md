@@ -84,7 +84,19 @@ Android/iOS 客户端 × 真实基站切换/锁屏省电：抓包对线上形状
 | 固定 chunk 尺寸/节拍（A/B 已采纳全尺寸+抖动） | ShapeStatistics CV+自相关判据 |
 | 空闲后首包迟滞 | ChatIdle 首消息 SLA |
 
-## 6. 运行手册
+## 6. 运行手册（分层入口 = 习惯）
+
+| 时机 | 命令 | 实测 |
+|---|---|---|
+| 改代码随手跑 | `go test -short ./transport/internet/splithttp` | **~10s**（260 测试） |
+| push 前 | `go test ./transport/internet/splithttp` | **~50s**（286 测试） |
+| 改了重连/超时/背压/会话逻辑 | 上一行 + `go test -tags soak ./transport/internet/splithttp -run TestSoak` | +~70s |
+| 发版前 | `go test -tags endurance ./transport/internet/splithttp` | ~10 min |
+
+> 2026-09-05 提速：假等待注入（gap/backpressure 超时测试缩到 50–100ms）、
+> QualityDrain 直驱 healthCheckTick、以及 `doneCh` 契约兑现（mux.go:
+> maintenanceLoop 退出时 close —— 此前每次 `Close()` 烧满 3s 超时兜底，
+> 全套件 ~60 处 defer Close 共付 ~174s）。-short 115s→10s，全量 229s→50s。
 
 ```bash
 # L2 soak 全套（~2.5 min）

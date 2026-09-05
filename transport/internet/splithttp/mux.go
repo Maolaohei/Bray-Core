@@ -612,6 +612,10 @@ func NewXmuxManager(xmuxConfig *XmuxConfig, newConnFunc func() XmuxConn, probeUR
 // healthCheckLoop / networkWatchLoop goroutines) existed without a reason —
 // the network check self-throttles to 30s and pre-connect is a tick job.
 func (m *XmuxManager) maintenanceLoop() {
+	// doneCh's contract: "closed when all goroutines exit". This is the only
+	// long-lived goroutine, so its exit closes doneCh — without this, Close()
+	// always burned its full 3s shutdown-timeout fallback.
+	defer close(m.doneCh)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
