@@ -61,8 +61,8 @@ type FaultPlan struct {
 	// before they enter the elevator; a killed handshake is the dialer's
 	// fail-closed design, not a soak finding).
 	GracePeriod     time.Duration
-	RTTMean         time.Duration   // per-chunk forward delay mean
-	RTTJitter       time.Duration   // ±jitter around mean
+	RTTMean         time.Duration    // per-chunk forward delay mean
+	RTTJitter       time.Duration    // ±jitter around mean
 	RSTLifetime     [2]time.Duration // per-conn lifetime draw → RST both ends
 	Stall           [2]time.Duration // hold bytes mid-conn (no error surfaces)
 	StallChance     float64
@@ -93,12 +93,12 @@ type faultProxy struct {
 	active atomic.Int64
 	ln     net.Listener
 	// c2s burst observation (>=5ms silence separates bursts) for shape stats.
-	burstMu     sync.Mutex
-	bursts      []burst
-	curBurst    int64
-	curBurstAt  time.Duration
-	lastReadAt  time.Duration
-	bw          *tokenBucket
+	burstMu      sync.Mutex
+	bursts       []burst
+	curBurst     int64
+	curBurstAt   time.Duration
+	lastReadAt   time.Duration
+	bw           *tokenBucket
 	truncatedC2S atomic.Bool // guard: only one s2c truncate per proxy
 }
 

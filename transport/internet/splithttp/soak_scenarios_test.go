@@ -124,7 +124,7 @@ func TestSoak_ChatIdle(t *testing.T) {
 	defer ln.Close()
 
 	plan := FaultPlan{
-		GracePeriod:    3 * time.Second,
+		GracePeriod:     3 * time.Second,
 		RTTMean:         30 * time.Millisecond,
 		RTTJitter:       10 * time.Millisecond,
 		RSTLifetime:     [2]time.Duration{4 * time.Second, 9 * time.Second},

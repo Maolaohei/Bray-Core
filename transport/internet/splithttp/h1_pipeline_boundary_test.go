@@ -82,8 +82,8 @@ func TestH1Pipeline_RequestBoundaryIntegrity(t *testing.T) {
 	settings := &internet.MemoryStreamConfig{
 		ProtocolName: "splithttp",
 		ProtocolSettings: &Config{
-			Path: "/sh",
-			Mode: "packet-up",
+			Path:    "/sh",
+			Mode:    "packet-up",
 			Headers: map[string]string{BraySessionSecretHeader: "boundary-secret"},
 		},
 	}
