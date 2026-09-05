@@ -151,15 +151,18 @@ func TestWarmupCompletesBeforeLookup(t *testing.T) {
 
 	client := v.GetFeature(featuredns.ClientType()).(featuredns.Client)
 
+	// Drive warmup through the production path (SetWarmupDomainExtractor +
+	// WarmupNow); SetWarmupDomains was removed by the DNS razor as a
+	// write-only field with no production caller.
 	type warmupAPI interface {
-		SetWarmupDomains([]string)
+		SetWarmupDomainExtractor(func() []string)
 		WarmupNow()
 	}
 	ws, ok := client.(warmupAPI)
 	if !ok {
 		t.Skip("client does not support warmup")
 	}
-	ws.SetWarmupDomains([]string{"google.com"})
+	ws.SetWarmupDomainExtractor(func() []string { return []string{"google.com"} })
 	ws.WarmupNow()
 	time.Sleep(2 * time.Second)
 

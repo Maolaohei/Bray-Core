@@ -3,9 +3,8 @@
 // Injected by tools/benchcompare into every target worktree. Both forks ship
 // the same app/dns helpers (genEDNS0Options / buildReqMsgs / parseResponse /
 // Fqdn / record) with identical signatures, so this same file compiles and runs
-// on both sides. The Bray-only pool release helpers (releaseDnsRequest /
-// releaseOptResource) are intentionally NOT called here so the benchmark is a
-// fair baseline that measures the core parse/build logic itself.
+// on both sides. It measures the core parse/build logic itself (the former
+// Bray-only pool release helpers no longer exist after the DNS razor).
 package dns
 
 import (

@@ -6,7 +6,6 @@ import (
 	stderrors "errors"
 	"math"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/xtls/xray-core/common/errors"
@@ -79,22 +78,12 @@ func (r *IPRecord) getIPs() ([]net.IP, int32, error) {
 
 var errRecordNotFound = errors.New("record not found")
 
-// optResourcePool reuses dnsmessage.Resource + OPTResource across queries
-// to reduce per-query heap allocations.
-var optResourcePool = sync.Pool{
-	New: func() any {
-		return &dnsmessage.Resource{
-			Body: &dnsmessage.OPTResource{},
-		}
-	},
-}
-
-// messagePool reuses dnsmessage.Message structs across queries.
-var messagePool = sync.Pool{
-	New: func() any {
-		return &dnsmessage.Message{}
-	},
-}
+// Razor note (2026-09-05): the former optResourcePool / messagePool /
+// dnsRequestPool sync.Pools are gone. DNS query rate is far too low to make
+// pooling measurable, yet the pools twice produced real bugs: the OPT body
+// was shared across queries (DNS 专项 D1 race, fixed by a deep-copy that
+// nullified the pool's benefit) and early pool-returns caused UAF in DoH.
+// Plain per-query allocation keeps the lifetime owned by GC.
 
 type dnsRequest struct {
 	reqType dnsmessage.Type
@@ -102,13 +91,6 @@ type dnsRequest struct {
 	start   time.Time
 	expire  time.Time
 	msg     *dnsmessage.Message
-}
-
-// dnsRequestPool reuses dnsRequest structs across queries.
-var dnsRequestPool = sync.Pool{
-	New: func() any {
-		return &dnsRequest{}
-	},
 }
 
 func genEDNS0Options(clientIP net.IP, padding int) *dnsmessage.Resource {
@@ -119,10 +101,11 @@ func genEDNS0Options(clientIP net.IP, padding int) *dnsmessage.Resource {
 	const EDNS0SUBNET = 0x8
 	const EDNS0PADDING = 0xc
 
-	opt := optResourcePool.Get().(*dnsmessage.Resource)
+	opt := &dnsmessage.Resource{
+		Body: &dnsmessage.OPTResource{},
+	}
 	opt.Header.SetEDNS0(1350, 0xfe00, true)
 	body := opt.Body.(*dnsmessage.OPTResource)
-	body.Options = body.Options[:0] // reset without realloc
 
 	if len(clientIP) != 0 {
 		var netmask int
@@ -169,38 +152,9 @@ func genEDNS0Options(clientIP net.IP, padding int) *dnsmessage.Resource {
 	return opt
 }
 
-// releaseOptResource returns an OPT resource to the pool.
-// Must only be called after the Resource is no longer referenced.
-func releaseOptResource(opt *dnsmessage.Resource) {
-	if opt == nil {
-		return
-	}
-	optResourcePool.Put(opt)
-}
-
-// releaseMessage resets and returns a Message to the pool.
-func releaseMessage(msg *dnsmessage.Message) {
-	if msg == nil {
-		return
-	}
-	msg.Questions = msg.Questions[:0]
-	msg.Additionals = msg.Additionals[:0]
-	msg.Answers = msg.Answers[:0]
-	msg.Authorities = msg.Authorities[:0]
-	msg.Header = dnsmessage.Header{}
-	messagePool.Put(msg)
-}
-
-// releaseDnsRequest releases both the Message inside and the dnsRequest struct.
-func releaseDnsRequest(req *dnsRequest) {
-	if req == nil {
-		return
-	}
-	releaseMessage(req.msg)
-	req.msg = nil
-	dnsRequestPool.Put(req)
-}
-
+// buildReqMsgs builds one A and/or AAAA query message per requested family.
+// The returned messages own their payload (fresh allocation); callers never
+// share or recycle them, so no release discipline is required.
 func buildReqMsgs(domain string, option dns_feature.IPOption, reqIDGen func() uint16, reqOpts *dnsmessage.Resource) ([]*dnsRequest, error) {
 	name, err := dnsmessage.NewName(domain)
 	if err != nil {
@@ -223,61 +177,44 @@ func buildReqMsgs(domain string, option dns_feature.IPOption, reqIDGen func() ui
 	now := time.Now()
 
 	if option.IPv4Enable {
-		msg := messagePool.Get().(*dnsmessage.Message)
-		msg.Header.ID = reqIDGen()
-		msg.Header.RecursionDesired = true
-		msg.Questions = append(msg.Questions[:0], qA)
-		if reqOpts != nil {
-			msg.Additionals = append(msg.Additionals[:0], *reqOpts)
-			// Deep-copy the OPT body so the message owns its Options slice and does
-			// not share the pooled *OPTResource with a concurrent query that reuses
-			// reqOpts after releaseOptResource. The old shallow copy left
-			// msg.Additionals[0].Body pointing at the same *OPTResource, so PackMessage
-			// (reading Options) raced with the next genEDNS0Options (resetting/
-			// appending Options) on the shared object — DNS 专项 D1.
-			if opt, ok := msg.Additionals[0].Body.(*dnsmessage.OPTResource); ok {
-				optCopy := *opt
-				optCopy.Options = append([]dnsmessage.Option(nil), opt.Options...)
-				msg.Additionals[0].Body = &optCopy
-			}
+		msg := &dnsmessage.Message{
+			Header: dnsmessage.Header{
+				ID:               reqIDGen(),
+				RecursionDesired: true,
+			},
+			Questions: []dnsmessage.Question{qA},
 		}
-		req := dnsRequestPool.Get().(*dnsRequest)
-		req.reqType = dnsmessage.TypeA
-		req.domain = domain
-		req.start = now
-		req.msg = msg
-		reqs = append(reqs, req)
+		if reqOpts != nil {
+			// reqOpts is freshly allocated per query and immutable after
+			// construction — sharing its Body pointer is safe.
+			msg.Additionals = append(msg.Additionals, *reqOpts)
+		}
+		reqs = append(reqs, &dnsRequest{
+			reqType: dnsmessage.TypeA,
+			domain:  domain,
+			start:   now,
+			msg:     msg,
+		})
 	}
 
 	if option.IPv6Enable {
-		msg := messagePool.Get().(*dnsmessage.Message)
-		msg.Header.ID = reqIDGen()
-		msg.Header.RecursionDesired = true
-		msg.Questions = append(msg.Questions[:0], qAAAA)
-		if reqOpts != nil {
-			msg.Additionals = append(msg.Additionals[:0], *reqOpts)
-			// Deep-copy the OPT body so the message owns its Options slice and does
-			// not share the pooled *OPTResource with a concurrent query that reuses
-			// reqOpts after releaseOptResource. The old shallow copy left
-			// msg.Additionals[0].Body pointing at the same *OPTResource, so PackMessage
-			// (reading Options) raced with the next genEDNS0Options (resetting/
-			// appending Options) on the shared object — DNS 专项 D1.
-			if opt, ok := msg.Additionals[0].Body.(*dnsmessage.OPTResource); ok {
-				optCopy := *opt
-				optCopy.Options = append([]dnsmessage.Option(nil), opt.Options...)
-				msg.Additionals[0].Body = &optCopy
-			}
+		msg := &dnsmessage.Message{
+			Header: dnsmessage.Header{
+				ID:               reqIDGen(),
+				RecursionDesired: true,
+			},
+			Questions: []dnsmessage.Question{qAAAA},
 		}
-		req := dnsRequestPool.Get().(*dnsRequest)
-		req.reqType = dnsmessage.TypeAAAA
-		req.domain = domain
-		req.start = now
-		req.msg = msg
-		reqs = append(reqs, req)
+		if reqOpts != nil {
+			msg.Additionals = append(msg.Additionals, *reqOpts)
+		}
+		reqs = append(reqs, &dnsRequest{
+			reqType: dnsmessage.TypeAAAA,
+			domain:  domain,
+			start:   now,
+			msg:     msg,
+		})
 	}
-
-	// Release OPT resource back to pool after it's been copied into messages
-	releaseOptResource(reqOpts)
 
 	return reqs, nil
 }

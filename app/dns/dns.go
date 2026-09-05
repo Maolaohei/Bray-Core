@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -36,24 +35,11 @@ type DNS struct {
 	domainMatcher          geodata.DomainMatcher
 	matcherInfos           []*DomainMatcherInfo
 	checkSystem            bool
-	// warmupDomains are resolved asynchronously after Start() to
-	// prime the DNS cache for faster cold-start lookups.
+	// warmupDomains come from the DNS config (immutable after construction).
 	warmupDomains []string
 	// extractWarmupDomains is a function that extracts domains from outbound
 	// configuration (node domains, REALITY, etc.) for DNS warmup.
 	extractWarmupDomains func() []string
-	// warmupInFlight tracks domains currently being resolved during warmup.
-	// Key: domain (string), Value: chan struct{} (closed when warmup completes).
-	warmupInFlight sync.Map
-	// clientCache caches sortClients results to avoid repeated allocation
-	// and domain matching on the same domain.
-	clientCache     sync.Map // map[string]*clientCacheEntry
-	clientCacheSize int64    // atomic counter for clientCache entries
-}
-
-type clientCacheEntry struct {
-	clients   []*Client
-	expiresAt time.Time
 }
 
 // DomainMatcherInfo contains information attached to index returned by Server.domainMatcher.
@@ -219,7 +205,8 @@ func (*DNS) Type() interface{} {
 // Note: extractWarmupDomains is not set yet at Start() time (it's set later
 // by core/xray.go via SetWarmupDomainExtractor). The extractor-based warmup
 // is triggered by WarmupNow() after outbound handlers are registered.
-// Only user-configured warmupDomains are warmed up here.
+// Only user-configured warmupDomains are warmed up here. The field is
+// immutable after construction — no lock needed to read it.
 func (s *DNS) Start() error {
 	if len(s.warmupDomains) > 0 {
 		go s.warmup(s.warmupDomains)
@@ -227,18 +214,9 @@ func (s *DNS) Start() error {
 	return nil
 }
 
-// SetWarmupDomains configures domains to be pre-resolved at startup
-// or on network change. Call before Start() or after a network event.
-func (s *DNS) SetWarmupDomains(domains []string) {
-	s.Lock()
-	s.warmupDomains = domains
-	s.Unlock()
-}
-
 // SetWarmupDomainExtractor sets a function that extracts warmup domains from
 // outbound configuration. Called from core/xray.go after outbound handlers
-// are registered. If no explicit warmupDomains are configured, this function
-// is used to automatically discover domains from node configs, REALITY, etc.
+// are registered.
 func (s *DNS) SetWarmupDomainExtractor(fn func() []string) {
 	s.Lock()
 	s.extractWarmupDomains = fn
@@ -246,25 +224,13 @@ func (s *DNS) SetWarmupDomainExtractor(fn func() []string) {
 }
 
 // WarmupNow triggers an immediate warmup using the configured extractor.
-// Called from core/xray.go after outbound handlers are registered.
+// Called from core/xray.go after outbound handlers are registered and from
+// the network-change hook (TriggerDNSWarmup).
 func (s *DNS) WarmupNow() {
 	s.Lock()
 	var domains []string
 	if s.extractWarmupDomains != nil {
 		domains = s.extractWarmupDomains()
-	}
-
-	// Append user-configured warmupDomains (deduplicated)
-	if len(s.warmupDomains) > 0 {
-		seen := make(map[string]struct{}, len(domains))
-		for _, d := range domains {
-			seen[d] = struct{}{}
-		}
-		for _, d := range s.warmupDomains {
-			if _, exists := seen[d]; !exists {
-				domains = append(domains, d)
-			}
-		}
 	}
 	s.Unlock()
 
@@ -289,7 +255,10 @@ func (s *DNS) ClearCache() {
 const warmupConcurrency = 8
 
 // warmup resolves the given domains in the background to prime the DNS
-// cache. Errors are silently ignored since warmup is best-effort.
+// cache. Errors are silently ignored since warmup is best-effort. Concurrent
+// user lookups of the same domain are deduplicated by each nameserver's
+// singleflight group (fetch in nameserver_cached.go) — no warmup-specific
+// coordination is needed.
 func (s *DNS) warmup(domains []string) {
 	_, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
@@ -297,15 +266,11 @@ func (s *DNS) warmup(domains []string) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, warmupConcurrency)
 	for _, domain := range domains {
-		ch := make(chan struct{})
-		s.warmupInFlight.Store(domain, ch)
 		wg.Add(1)
 		s.wgs.Add(1)
 		go func(d string) {
 			defer wg.Done()
 			defer s.wgs.Done()
-			defer close(ch)
-			defer s.warmupInFlight.Delete(d)
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			s.LookupIP(d, *s.ipOption)
@@ -359,22 +324,6 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 	domain = strings.TrimSuffix(domain, ".")
 	if domain == "" {
 		return nil, 0, errors.New("empty domain name")
-	}
-
-	// If this domain is being warmup-resolved, wait briefly for it to complete
-	// to avoid redundant queries and benefit from the cached result.
-	if v, ok := s.warmupInFlight.Load(domain); ok {
-		ch := v.(chan struct{})
-		errors.LogDebug(s.ctx, "domain ", domain, " is being warmup-resolved, waiting...")
-		select {
-		case <-ch:
-			// Warmup completed — the cache should now have the result.
-		case <-time.After(500 * time.Millisecond):
-			// Don't block the caller too long; proceed with normal resolution.
-			errors.LogDebug(s.ctx, "warmup wait timed out for ", domain, ", proceeding with normal query")
-		case <-s.ctx.Done():
-			return nil, 0, s.ctx.Err()
-		}
 	}
 
 	if s.checkSystem {
@@ -452,44 +401,11 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
 	return ips, ttl, err
 }
 
-const clientCacheTTL = 60 * time.Second
-
+// sortClients orders the name servers for a domain: rule-matched clients
+// first (by matcher priority), then fallback clients. Plain deterministic
+// computation — no caching (matcher lookups are µs-scale and DNS queries
+// are network-bound).
 func (s *DNS) sortClients(domain string) []*Client {
-	// Check cache first
-	if v, ok := s.clientCache.Load(domain); ok {
-		entry := v.(*clientCacheEntry)
-		if time.Now().Before(entry.expiresAt) {
-			return entry.clients
-		}
-		s.clientCache.Delete(domain)
-		// Keep the counter accurate so the >2048 sweep stays rare.
-		atomic.AddInt64(&s.clientCacheSize, -1)
-	}
-
-	clients := s.doSortClients(domain)
-
-	// Store in cache (cap at 2048 entries to prevent memory growth)
-	s.clientCache.Store(domain, &clientCacheEntry{
-		clients:   clients,
-		expiresAt: time.Now().Add(clientCacheTTL),
-	})
-	if atomic.AddInt64(&s.clientCacheSize, 1) > 2048 {
-		// Evict expired entries
-		now := time.Now()
-		s.clientCache.Range(func(key, value any) bool {
-			entry := value.(*clientCacheEntry)
-			if now.After(entry.expiresAt) {
-				s.clientCache.Delete(key)
-				atomic.AddInt64(&s.clientCacheSize, -1)
-			}
-			return true
-		})
-	}
-
-	return clients
-}
-
-func (s *DNS) doSortClients(domain string) []*Client {
 	clients := make([]*Client, 0, len(s.clients))
 	clientUsed := make([]bool, len(s.clients))
 	var clientNames []string

@@ -117,7 +117,6 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- e
 			var cancel context.CancelFunc
 			dnsCtx, cancel = context.WithDeadline(dnsCtx, deadline)
 			defer cancel()
-			defer releaseDnsRequest(r)
 
 			b, err := dns.PackMessage(r.msg)
 			if err != nil {
@@ -126,10 +125,6 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- e
 					noResponseErrCh <- err
 				}
 				return
-			}
-			if r.msg != nil {
-				releaseMessage(r.msg)
-				r.msg = nil
 			}
 
 			dnsReqBuf := buf.New()

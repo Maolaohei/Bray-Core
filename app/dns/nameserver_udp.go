@@ -91,9 +91,6 @@ func (s *ClassicNameServer) RequestsCleanup() error {
 	for id, req := range s.requests {
 		if req.expire.Before(now) {
 			delete(s.requests, id)
-			// Return the abandoned request (and its Message) to the pools;
-			// dropping the map entry alone leaks them to the GC.
-			releaseDnsRequest(&req.dnsRequest)
 		}
 	}
 
@@ -131,7 +128,6 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 	// domain (RFC 5452). Discard mismatches before they reach the cache.
 	if !responseMatchesRequest(req.domain, ipRec) {
 		errors.LogErrorInner(ctx, errors.New("question mismatch"), s.Name(), " response discarded")
-		releaseDnsRequest(&req.dnsRequest)
 		return
 	}
 
@@ -151,18 +147,16 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 			newReq.msg = &newMsg
 			if err := s.addPendingRequest(&newReq); err != nil {
 				errors.LogErrorInner(ctx, err, s.Name(), " EDNS0 retry dropped")
-				releaseDnsRequest(&req.dnsRequest)
+
 				return
 			}
 			b, _ := dns.PackMessage(newReq.msg)
 			s.udpServer.Dispatch(toDnsContext(newReq.ctx, s.address.String()), *s.address, b)
-			releaseDnsRequest(&req.dnsRequest)
 			return
 		}
 	}
 
 	s.cacheController.updateRecord(&req.dnsRequest, ipRec)
-	releaseDnsRequest(&req.dnsRequest)
 }
 
 func (s *ClassicNameServer) newReqID() uint16 {
@@ -236,11 +230,8 @@ func (s *ClassicNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<
 		}
 		if err := s.addPendingRequest(udpReq); err != nil {
 			// Table effectively full: fail loudly instead of leaving the
-			// caller waiting on an answer that can never arrive. Release the
-			// copy (its Message is shared with req by value-copy semantics,
-			// so req itself must never be released here).
+			// caller waiting on an answer that can never arrive.
 			errors.LogErrorInner(ctx, err, "failed to register pending DNS request for ", fqdn)
-			releaseDnsRequest(&udpReq.dnsRequest)
 			if noResponseErrCh != nil {
 				noResponseErrCh <- err
 			}

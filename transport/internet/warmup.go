@@ -6,16 +6,19 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/features/outbound"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // ExtractWarmupDomains extracts domains from outbound handlers that should be
 // pre-resolved at startup for faster first connection.
 //
-// Priority:
-//   - Node domains (proxy server addresses)
-//   - REALITY dest/serverName
+// Scope (razor 2026-09-05): only domains that are real connection targets —
+//   - Node domains (VLESS/VMess/trojan server addresses)
+//   - REALITY dest / serverName
+//
+// Transport header hosts and fake domains are deliberately NOT warmed: they
+// are not dialed directly (fakeHost is camouflage), and lazy resolution on
+// first use costs one query per domain per process lifetime.
 //
 // Returns deduplicated list of domain strings.
 func ExtractWarmupDomains(obm outbound.Manager) []string {
@@ -142,175 +145,6 @@ func extractDomainsFromSenderSettings(ss *serial.TypedMessage, domainSet map[str
 		secType := streamMsg.Get(secTypeField).String()
 		if secType == "reality" {
 			extractRealityDomainsFromMsg(streamMsg, domainSet)
-		}
-	}
-
-	// Extract transport host (CDN edge domains for Spider path simulation)
-	extractTransportHostDomains(streamMsg, domainSet)
-
-	// Extract header fakeHost (Spider simulation targets)
-	extractHeaderFakeHostDomains(streamMsg, domainSet)
-}
-
-// extractTransportHostDomains extracts host domains from transport settings.
-// For example, WebSocket "host" field and TCP header "domain" field.
-func extractTransportHostDomains(streamMsg protoreflect.Message, domainSet map[string]struct{}) {
-	tSettingsField := streamMsg.Descriptor().Fields().ByName("transport_settings")
-	if tSettingsField == nil || !streamMsg.Has(tSettingsField) {
-		return
-	}
-
-	tSettingsList := streamMsg.Get(tSettingsField).List()
-	for i := 0; i < tSettingsList.Len(); i++ {
-		tConfig := tSettingsList.Get(i).Message()
-		if !tConfig.IsValid() {
-			continue
-		}
-
-		settingsField := tConfig.Descriptor().Fields().ByName("settings")
-		if settingsField == nil || !tConfig.Has(settingsField) {
-			continue
-		}
-
-		settingsMsg := tConfig.Get(settingsField).Message()
-		if !settingsMsg.IsValid() {
-			continue
-		}
-
-		extractDomainsFromTypedMessage(settingsMsg, domainSet)
-	}
-}
-
-// extractHeaderFakeHostDomains extracts fakeHost from TCP header settings.
-func extractHeaderFakeHostDomains(streamMsg protoreflect.Message, domainSet map[string]struct{}) {
-	tSettingsField := streamMsg.Descriptor().Fields().ByName("transport_settings")
-	if tSettingsField == nil || !streamMsg.Has(tSettingsField) {
-		return
-	}
-
-	tSettingsList := streamMsg.Get(tSettingsField).List()
-	for i := 0; i < tSettingsList.Len(); i++ {
-		tConfig := tSettingsList.Get(i).Message()
-		if !tConfig.IsValid() {
-			continue
-		}
-
-		protoNameField := tConfig.Descriptor().Fields().ByName("protocol_name")
-		if protoNameField == nil || !tConfig.Has(protoNameField) {
-			continue
-		}
-		protoName := tConfig.Get(protoNameField).String()
-		if protoName != "tcp" {
-			continue
-		}
-
-		settingsField := tConfig.Descriptor().Fields().ByName("settings")
-		if settingsField == nil || !tConfig.Has(settingsField) {
-			continue
-		}
-
-		settingsMsg := tConfig.Get(settingsField).Message()
-		if !settingsMsg.IsValid() {
-			continue
-		}
-
-		extractHeaderDomainsFromTCP(settingsMsg, domainSet)
-	}
-}
-
-// extractDomainsFromTypedMessage deserializes a TypedMessage and looks for
-// a "host" string field containing a domain.
-func extractDomainsFromTypedMessage(settingsMsg protoreflect.Message, domainSet map[string]struct{}) {
-	typeField := settingsMsg.Descriptor().Fields().ByName("type")
-	valueField := settingsMsg.Descriptor().Fields().ByName("value")
-	if typeField == nil || valueField == nil {
-		return
-	}
-	if !settingsMsg.Has(typeField) || !settingsMsg.Has(valueField) {
-		return
-	}
-
-	msgType := settingsMsg.Get(typeField).String()
-	msgBytes := settingsMsg.Get(valueField).Bytes()
-
-	instance, err := serial.GetInstance(msgType)
-	if err != nil {
-		return
-	}
-
-	pbMsg, ok := instance.(protoreflect.ProtoMessage)
-	if !ok {
-		return
-	}
-
-	if err := proto.Unmarshal(msgBytes, pbMsg); err != nil {
-		return
-	}
-
-	innerMsg := pbMsg.ProtoReflect()
-
-	// Look for "host" field (string) — common in WebSocket, HTTP/2, etc.
-	hostField := innerMsg.Descriptor().Fields().ByName("host")
-	if hostField != nil && innerMsg.Has(hostField) && hostField.Kind() == protoreflect.StringKind {
-		host := innerMsg.Get(hostField).String()
-		if host != "" && !isIP(host) {
-			domainSet[host] = struct{}{}
-		}
-	}
-}
-
-// extractHeaderDomainsFromTCP extracts fake domains from TCP header settings.
-func extractHeaderDomainsFromTCP(settingsMsg protoreflect.Message, domainSet map[string]struct{}) {
-	typeField := settingsMsg.Descriptor().Fields().ByName("type")
-	valueField := settingsMsg.Descriptor().Fields().ByName("value")
-	if typeField == nil || valueField == nil {
-		return
-	}
-	if !settingsMsg.Has(typeField) || !settingsMsg.Has(valueField) {
-		return
-	}
-
-	msgType := settingsMsg.Get(typeField).String()
-	msgBytes := settingsMsg.Get(valueField).Bytes()
-
-	instance, err := serial.GetInstance(msgType)
-	if err != nil {
-		return
-	}
-
-	pbMsg, ok := instance.(protoreflect.ProtoMessage)
-	if !ok {
-		return
-	}
-
-	if err := proto.Unmarshal(msgBytes, pbMsg); err != nil {
-		return
-	}
-
-	innerMsg := pbMsg.ProtoReflect()
-
-	// TCP header settings have a "domain" field with a list of domain names
-	domainField := innerMsg.Descriptor().Fields().ByName("domain")
-	if domainField == nil || !innerMsg.Has(domainField) {
-		return
-	}
-	if domainField.Kind() != protoreflect.MessageKind {
-		return
-	}
-
-	domainList := innerMsg.Get(domainField).List()
-	for i := 0; i < domainList.Len(); i++ {
-		domainMsg := domainList.Get(i).Message()
-		if !domainMsg.IsValid() {
-			continue
-		}
-		// Each domain entry has a "domain" string field
-		dField := domainMsg.Descriptor().Fields().ByName("domain")
-		if dField != nil && domainMsg.Has(dField) {
-			d := domainMsg.Get(dField).String()
-			if d != "" && !isIP(d) {
-				domainSet[d] = struct{}{}
-			}
 		}
 	}
 }

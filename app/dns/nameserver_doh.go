@@ -194,8 +194,6 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			var cancel context.CancelFunc
 			dnsCtx, cancel = context.WithDeadline(dnsCtx, deadline)
 			defer cancel()
-			// release only after updateRecord (or error) — early Put caused UAF on pool reuse
-			defer releaseDnsRequest(r)
 
 			b, err := dns.PackMessage(r.msg)
 			if err != nil {
@@ -204,11 +202,6 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 					noResponseErrCh <- err
 				}
 				return
-			}
-			// free wire message early; metadata kept until defer releaseDnsRequest
-			if r.msg != nil {
-				releaseMessage(r.msg)
-				r.msg = nil
 			}
 			resp, err := s.dohHTTPSContext(dnsCtx, b.Bytes())
 			if err != nil {

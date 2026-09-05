@@ -50,8 +50,8 @@ func BenchmarkBuildReqMsgs(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		reqs, _ := buildReqMsgs("google.com", opt, stubID, nil)
-		for _, r := range reqs {
-			releaseDnsRequest(r)
+		if len(reqs) != 1 {
+			b.Fatal("expected 1 request")
 		}
 	}
 }
@@ -64,8 +64,8 @@ func BenchmarkBuildReqMsgsIPv4Only(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		reqs, _ := buildReqMsgs("google.com", opt, stubID, nil)
-		for _, r := range reqs {
-			releaseDnsRequest(r)
+		if len(reqs) != 1 {
+			b.Fatal("expected 1 request")
 		}
 	}
 }
@@ -76,8 +76,7 @@ func BenchmarkGenEDNS0Options(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		opt := genEDNS0Options(clientIP, 200)
-		releaseOptResource(opt)
+		_ = genEDNS0Options(clientIP, 200)
 	}
 }
 
@@ -85,8 +84,7 @@ func BenchmarkGenEDNS0OptionsNoIP(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		opt := genEDNS0Options(nil, 200)
-		releaseOptResource(opt)
+		_ = genEDNS0Options(nil, 200)
 	}
 }
 
